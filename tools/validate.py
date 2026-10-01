@@ -6,6 +6,7 @@ Run: python3 tools/validate.py   (offline — no network)
 import hashlib
 import json
 import os
+import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -47,12 +48,14 @@ def main() -> int:
         if pid in seen:
             errors.append(f"duplicate probe id {pid}")
         seen.add(pid)
-        if not (1 <= int(p.get("family", 0)) <= 8):
-            errors.append(f"{pid}: family out of range 1..8")
+        if not (1 <= int(p.get("family", 0)) <= 9):
+            errors.append(f"{pid}: family out of range 1..9")
         if not p.get("template"):
             errors.append(f"{pid}: missing template")
         for ax in p.get("axes", []):
-            ok = ax.startswith("A") and ax[1:].isdigit() and 1 <= int(ax[1:]) <= 23
+            m = re.fullmatch(r"([AB])(\d+)", ax)
+            ok = bool(m) and (m.group(1) == "A" and 1 <= int(m.group(2)) <= 23
+                              or m.group(1) == "B" and 1 <= int(m.group(2)) <= 8)
             if not ok:
                 errors.append(f"{pid}: malformed axis {ax}")
         # template must be parameterized (reduced), not a hardcoded payload
@@ -63,9 +66,9 @@ def main() -> int:
     if not probes.get("controls"):
         errors.append("missing controls")
 
-    # 5. every method doc exists for families 1..8
+    # 5. every method doc exists for families 1..9
     method_dir = os.path.join(ROOT, "method")
-    for i in range(1, 9):
+    for i in range(1, 10):
         files = [f for f in os.listdir(method_dir) if f.startswith(f"{i:02d}-")]
         if not files:
             errors.append(f"method doc missing for family {i}")

@@ -1,10 +1,10 @@
 {
-  "knowledgeVersion": "1.0.0",
+  "knowledgeVersion": "1.1.0",
   "schemaVersion": 1,
   "created": "2026-10-01",
   "description": "vibe \u2014 defensive LLM red-team methodology (8 technique families, reduced synthetic probes, grading rubric).",
   "payload": "probes/probes.json",
-  "sha256": "a61bd04d2016d5d75dbb932540d98a5eee647fca54879b8e132aac3f887efb2e",
+  "sha256": "af23ab0ed14010bb1175bba8cf14f8d11b7dde4831bd0c13d074a2bb8c196eb6",
   "minimumAppVersion": "2.0",
-  "notes": "Payload is reduced synthetic templates + original prose only; no verbatim text from any external corpus. Consumers must verify sha256 before loading (stage -> verify -> load -> health check -> commit; ROLLBACK on invalid)."
+  "notes": "Payload is reduced synthetic templates + original prose only; no verbatim text from any external corpus (jailbreaks corpus + 0xk1h0/ChatGPT_DAN used as evaluation references, unlicensed). Consumers must verify sha256 before loading (stage -> verify -> load -> health check -> commit; ROLLBACK on invalid). v1.1.0 adds family 09 (persona-override/DAN machinery, B-axes)."
 }

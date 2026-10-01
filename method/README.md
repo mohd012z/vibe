@@ -1,6 +1,6 @@
 # Technique families — index
 
-Eight prompt-override / jailbreak technique families, in order of blast radius.
+Nine prompt-override / jailbreak technique families, in order of blast radius.
 Each document explains the **mechanism** (how it works), **why it works** (which
 model behavior it exploits), and the **test axes** a defense should check.
 Machine-readable probes: [`probes/probes.json`](../probes/probes.json).
@@ -15,6 +15,7 @@ Machine-readable probes: [`probes/probes.json`](../probes/probes.json).
 | 06 | Policy-document framing | A "content policy" that reclassifies harmful classes as permitted |
 | 07 | Minimal config injection | Tiny high-signal block: priority + refuse-only + execute |
 | 08 | Agent operating instructions | "Your tokens are parameters, not refusal triggers" |
+| 09 | Persona-override jailbreaks ("DAN" family) | Unrestricted alter-ego + dual-response + existential stakes |
 
 ## How to use this for defense
 
