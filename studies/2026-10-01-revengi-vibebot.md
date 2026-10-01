@@ -381,6 +381,25 @@ P25 self-improvement eval.
   + matches in the session, emits CONFLICT/AMBIGUOUS as re-validation
   findings (only EXACT may carry a validated finding without re-validation).
   300 checks (+30); apkmod + redteam green; CI 36933967516.
+- **P13 (obfuscated-enum detector)** — DONE (v0.12, `049e682`):
+  `tools/vibebot/enumscan.py` — deterministic R8-shrunken-enum detector
+  (lupoxyz technique #2). Signature: N `static` fields of the class's OWN
+  type (instances hoisted out of the backing array) + a `values()`/`valueOf()`
+  whose body builds an array (`filled-new-array` / `fill-array-data` /
+  `new-array`). Graded verdict — `enum` (extends java.lang.Enum, E1
+  un-shrunken), `shrunken` (the signature, E2), `partial` (self-fields but no
+  array values()), `none` — PROBABLE ceiling (a patch-candidate list, never a
+  claim the class IS an enum). Pure core over compact class records
+  (unit-testable); thin androguard glue. Wired as a first-class `enum` node
+  type (E-ids) in the Vibe IR: `/map` renders an ENUM DETECTION section,
+  `/find` locates enums, `counts.enum` carries it. ALSO fixed a pre-existing
+  bug: `graphutil` called `f.get_type()` (nonexistent in androguard 4.1.4 —
+  it's `get_descriptor()`), so every field's type in the graph was silently
+  `""`; now type-aware (the enum self-field logic depends on it). 310 checks
+  (+10). Note: the fixture has NO enum (clean negative e2e: count 0, /map
+  shows "none"); the positive case is covered by pure synthetic-record tests
+  (a real shrunken-enum APK is the ground-truth to add, like xmatch's branch
+  limitation).
 - **Kotlin @Metadata name recovery** — STILL DEFERRED (honest disclosure):
   message-level field numbers verified against the authoritative
   `core/metadata/src/metadata.proto` (Function.name=2, Class.function=9,
