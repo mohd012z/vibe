@@ -365,17 +365,31 @@ P25 self-improvement eval.
   `[F1]` contradiction rendering in `/why`. Pure (no androguard), tested on
   synthetic clean + corrupted graphs (zero false positives / every
   corruption caught) + fixture e2e. 270 checks (+18).
-- **Kotlin @Metadata name recovery + cross-version fingerprinting** —
-  DEFERRED (honest disclosure): message-level field numbers verified
-  against the authoritative `core/metadata/src/metadata.proto`
-  (Function.name=2, Class.function=9, constructor=8, fq_name=3,
-  StringTable.string=1, PackageFragment.class=4, Property.name=2), but the
-  top-level `Metadata` envelope positions still need verification against a
-  REAL Kotlin APK — per the repo invariant "never hand-roll binary-format
-  constants from memory," the parser is held until a sample (or a JDK to
-  compile one) exists. Design for both items is in
-  `studies/2026-10-02-external-study-lupoxyz-ghidra-mcp.md` (backlog items
-  2–3).
+- **P12 (cross-version method fingerprinting)** — DONE (v0.11, `f98beca`):
+  `tools/vibebot/xmatch.py` — normalized DEX-bytecode fingerprint per method
+  (ghidra-mcp `computeStrictHash` ported to DEX). The one DEX-specific
+  adaptation: virtual registers are compiler-assigned and RENUMBERED between
+  builds (unlike native x0/r0), so they're bucketed to REG; identity is kept
+  in const-string literals, call targets, and small immediates (large
+  bucketed to IMM_LARGE); branch targets collapse to L (kind survives,
+  distance does not). Six-state matcher on the EntityResolver contract with
+  an IDENTITY TIEBREAK for shared fingerprints (bare SHA-256 can't tell
+  identical stubs apart — 14 fixture methods → 8 unique fps; tiebreak makes
+  self-match 14/14 EXACT). Name tier keys on method NAME (not class.name —
+  the class is usually renamed across versions too). `/xmatch <src> <dst>`
+  runs as a job (two-APK parse under the watchdog budget), stores the board
+  + matches in the session, emits CONFLICT/AMBIGUOUS as re-validation
+  findings (only EXACT may carry a validated finding without re-validation).
+  300 checks (+30); apkmod + redteam green; CI 36933967516.
+- **Kotlin @Metadata name recovery** — STILL DEFERRED (honest disclosure):
+  message-level field numbers verified against the authoritative
+  `core/metadata/src/metadata.proto` (Function.name=2, Class.function=9,
+  constructor=8, fq_name=3, StringTable.string=1, PackageFragment.class=4,
+  Property.name=2), but the top-level `Metadata` envelope positions still
+  need verification against a REAL Kotlin APK — per the repo invariant "never
+  hand-roll binary-format constants from memory," the parser is held until a
+  sample (or a JDK to compile one) exists. Design in
+  `studies/2026-10-02-external-study-lupoxyz-ghidra-mcp.md` (backlog item 2).
 
 ## Open items (need Fatah/Anam decision)
 
