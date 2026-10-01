@@ -252,6 +252,188 @@ def parse_xrefs(out: str, target_va: int) -> list[int]:
     return froms
 
 
+# ------------------------------------------------------------------ P15: native function-pattern classifier
+# The ARM64 corpus insight (2026-10-02 external study): recognize a function
+# by its NORMALIZED instruction SEQUENCE, not by hex bytes. lupoxyz shipped a
+# memorized ARM hex-patch table; the durable form is these structural flags.
+# Every flag is E3 (static XREF/disassembly evidence) — the SAME /360 claim
+# discipline as the native provider, at the logic layer. The mnemonic
+# vocabulary is the public ARMv8-A ISA (stable architecture facts, not
+# reverse-engineered constants), and the patterns are compiler-output shapes
+# observed in the exercism reference corpus.
+def _adrp_add_pairs(mnems: list[str]) -> list[str]:
+    """adrp Xd,label followed within 2 instructions by add Xd,Xd,:lo12:label —
+    the position-independent address-load idiom (how every string/data
+    reference is materialized). Returns the referenced symbol names."""
+    pairs: list[str] = []
+    for i, m in enumerate(mnems):
+        a = m.lower()
+        if not a.startswith("adrp "):
+            continue
+        lab = a.rsplit(" ", 1)[-1].strip()
+        if not lab or lab.startswith("#"):
+            continue
+        for j in range(i + 1, min(i + 3, len(mnems))):
+            m2 = mnems[j].lower()
+            if m2.startswith("add ") and lab in m2 and ":lo12:" in m2:
+                pairs.append(lab)
+                break
+    return pairs
+
+
+def classify_function(mnems: list[str]) -> list[dict]:
+    """Recognize a native function's LOGIC from its normalized ARM64 mnemonic
+    sequence (PURE — no r2, no bytes). Each flag is structural evidence (E3):
+    'this function's logic matches pattern X'. This is a candidate list for a
+    human to re-validate (PROBABLE ceiling) — never a claim about what the app
+    does. Returns [{id, pattern, evidence, reason}]."""
+    if not mnems:
+        return []
+    low = [m.lower() for m in mnems]
+    flags: list[dict] = []
+
+    def _add(pid, pattern, ev, reason):
+        flags.append({"id": pid, "pattern": pattern,
+                      "evidence": "E3", "instrs": ev, "reason": reason})
+
+    # popcount: clear-highest-set-bit loop (clz -> ror -> eor), no per-bit loop
+    for i in range(len(low)):
+        if low[i].startswith("clz") and i + 2 < len(low) \
+                and low[i + 1].startswith("ror") and low[i + 2].startswith("eor"):
+            _add("P1", "popcount-loop",
+                 [mnems[i], mnems[i + 1], mnems[i + 2]],
+                 "clz+ror+eor clear-highest-bit loop — popcount without a "
+                 "per-bit loop")
+            break
+    # ASCII case-fold: orr Xd,Xd,#32 (force lower bit -> lowercase)
+    for i, a in enumerate(low):
+        if a.startswith("orr ") and ", #32" in a:
+            _add("P2", "case-fold-scan", [mnems[i]],
+                 "orr #32 — forces the ASCII lowercase bit (case-insensitive "
+                 "match idiom)")
+            break
+    # bitset membership: `tst Xd, Xn, lsl #imm` — test a SINGLE bit of a
+    # register (flag/permission check). The shifted form is the idiom; a bare
+    # `tst Xd, Xn` (and `tst Xd, Xd` null-check) is deliberately NOT matched,
+    # keeping the false-positive rate low. Documented precision trade.
+    has_tst = re.search(r"\btst\s+\w+\s*,\s*\w+\s*,\s*lsl\s*#?\d+\b",
+                        " ".join(low)) is not None
+    if has_tst:
+        has_lsl = any(a.startswith("lsl") for a in low)
+        has_br = any(a == "bne" for a in low)
+        _add("P3", "bitset-test",
+             ["tst …, lsl #imm"] + (["lsl"] if has_lsl else [])
+             + (["branch"] if has_br else []),
+             "tst with a lsl #imm shift — single-bit (bitset) membership test "
+             "(flag/permission check idiom)")
+    # parity / even-odd test: tbb (bit 0 by definition) or tbz on bit #0
+    # (a documented precision trade: a `tbz` on another bit index is a
+    # generic bit-test, not parity, so it is NOT flagged). Real r2 `pdj`
+    # names carry operands, so the `#0` operand is visible here.
+    for m in mnems:
+        a = m.lower()
+        if a.startswith("tbb "):
+            _add("P4", "tbz-bit0-parity", [m],
+                 "tbb — branch on bit 0 (parity/even-odd test)")
+            break
+        if re.search(r"\btbz\s+\w+,\s*#?0\b", a):
+            _add("P4", "tbz-bit0-parity", [m],
+                 "tbz …, #0 — test bit 0 and branch (parity/even-odd test)")
+            break
+    # fused multiply-add: madd (3n+1 style)
+    for i, a in enumerate(low):
+        if a.startswith("madd") or a.startswith("mls"):
+            _add("P5", "fused-madd", [mnems[i]],
+                 "madd/mls — fused multiply-add (affine transform idiom)")
+            break
+    # position-independent string/data reference (adrp + add :lo12:)
+    pairs = _adrp_add_pairs(mnems)
+    if pairs:
+        _add("P6", "string-ref-pair", pairs[:3],
+             "adrp+add :lo12: — position-independent address load (string or "
+             "data reference); a likely patch target")
+    return flags
+
+
+def classify_functions(fns_with_mnems: list[tuple[dict, list[str]]]) -> list[dict]:
+    """Classify a batch of (function, mnemonics). Returns a list of
+    {fcn, va, name, patterns:[...]} for the functions that matched >=1
+    pattern (the interesting ones). Pure."""
+    out = []
+    for f, mnems in fns_with_mnems:
+        pats = classify_function(mnems)
+        if pats:
+            out.append({"fcn": f.get("r2_id"), "va": f.get("va"),
+                        "name": f.get("name"),
+                        "patterns": [p["pattern"] for p in pats],
+                        "details": pats})
+    return out
+
+
+def parse_disasm(out: str) -> list[str]:
+    """r2 `pdj` (JSON) or `pd` (text) -> [mnemonic]. Tolerant: a JSON array
+    of {"name":..} items, or one 'addr  name  rest' line each. Pure."""
+    s = (out or "").strip()
+    if not s:
+        return []
+    mn: list[str] = []
+    if s[0] == "[":
+        import json
+        try:
+            arr = json.loads(s)
+            for it in arr:
+                if isinstance(it, dict) and it.get("name"):
+                    name = str(it["name"]).split(".")[0]
+                    # r2 pdj keeps operands in a separate field ("opcode"
+                    # in older r2, "op" in newer) — append them so the full
+                    # mnemonic is available for pattern matching.
+                    op = it.get("opcode") or it.get("op")
+                    if isinstance(op, str) and op.strip():
+                        mn.append(f"{name} {op.strip()}")
+                    else:
+                        mn.append(name)
+        except Exception:
+            pass
+        return mn
+    for ln in s.splitlines():
+        ln = ln.strip()
+        if not ln or ln.startswith(";"):
+            continue
+        toks = ln.split()
+        if not toks or not re.match(r"^0x[0-9a-fA-F]+$", toks[0]):
+            continue
+        # after the address: skip consecutive pure-hex tokens (r2 `pd` emits
+        # 4 opcode bytes: "53 00 c0 f2"), then the FIRST non-hex token is the
+        # mnemonic. This handles both real `pd` (addr opcode... mnemonic) and
+        # a simplified "addr mnemonic" line.
+        i = 1
+        while i < len(toks) and re.match(r"^[0-9a-fA-F]+$", toks[i]):
+            i += 1
+        if i < len(toks):
+            mn.append(toks[i])
+    return mn
+
+
+def _classify_native_functions(native: dict, runner: "RadareLike | None" = None) -> None:
+    """Attach a 'patterns' list to each function in native['functions'] by
+    disassembling it via the runner (r2 `pdj`). Pure glue over the runner
+    seam — no r2 required (works with FakeRunner). A disasm error leaves the
+    function with an empty pattern list (honest: NOT OBSERVED, not a failure).
+    Mutates native in place."""
+    runner = runner or RadareRunner()
+    for f in native.get("functions", []):
+        try:
+            dsize = f.get("size") or 0
+            out = runner.run(native["path"],
+                             f"pdj {dsize} @{f['va']:x}")
+            mnems = parse_disasm(out)
+        except Exception:
+            mnems = []
+        f["mnemonics"] = mnems
+        f["patterns"] = [p["pattern"] for p in classify_function(mnems)]
+        f["pattern_details"] = classify_function(mnems)
+
+
 # ------------------------------------------------------------------ native
 def _r2_command_for(goal: str, path: str) -> str | None:
     return {
@@ -296,6 +478,11 @@ def analyze_native(path: str, runner: "RadareLike | None" = None,
         f["offset_exact"] = exact
         # section name = unknown without .shstrtab parse -> mark approx
         f["section"] = ".text?"
+
+    # P15: native function-pattern classifier — recognize each function's
+    # LOGIC by its normalized instruction sequence (E3). Best-effort: a
+    # disasm failure leaves empty patterns (NOT OBSERVED), never an error.
+    _classify_native_functions({"path": path, "functions": fns}, runner)
 
     return {
         "provider": PROVIDER_NAME,
@@ -371,8 +558,21 @@ def render_native(native: dict, limit: int = 15) -> str:
         lines.append(f"    {f['r2_id']}  {f['name']}  "
                      f"va=0x{f['va']:x} {f['section']} "
                      f"file=0x{f['file_offset']:x}{offmark}  ({f['size']}B)")
+        pats = f.get("patterns") or []
+        if pats:
+            lines.append(f"        [E3] logic pattern(s): {', '.join(pats)}")
     if c["function"] > limit:
         lines.append(f"    … {c['function'] - limit} more")
+    # P15: a summary of the recognized logic patterns (the interesting ones)
+    matched = [f for f in native["functions"] if f.get("patterns")]
+    if matched:
+        lines.append(f"  [E3] logic patterns recognized in {len(matched)} "
+                     f"function(s) (structural match — re-validate; not a "
+                     f"claim about app behavior):")
+        for f in matched[:8]:
+            lines.append(f"    {f['name']}: {', '.join(f['patterns'])}")
+        if len(matched) > 8:
+            lines.append(f"    … {len(matched) - 8} more")
     if native["imports"][:8]:
         lines.append(f"  imports:")
         for i in native["imports"][:8]:

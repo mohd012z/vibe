@@ -89,9 +89,14 @@ instruction-set side*; nothing in this note depends on it. Retriable when
 archive.org is back up.
 
 ## D. Backlog additions (appended to the 2026-10-02 external-study list)
-11. **Native function-pattern classifier** (pure, over normalized
+11. ~~**Native function-pattern classifier** (pure, over normalized
     mnemonics; E3 flags) in `native.py` — testable with FakeRunner today,
-    activates when r2 is installed. *Highest-value ARM64 item.*
+    activates when r2 is installed. *Highest-value ARM64 item.*~~ —
+    **DONE (P15, v0.14)**: `native.classify_function` recognizes 6 idioms
+    (popcount-loop, case-fold, bitset-test, tbz-parity, fused-madd,
+    string-ref-pair) by normalized sequence (not hex), E3, wired into
+    `/native` + `render_native`, FakeRunner e2e. Real r2 + a real .so is the
+    ground-truth to add.
 12. **qemu-aarch64 harness note** for P17/P21 validation spec (a native
     change is proven by C tests under qemu, not by diff appearance).
 13. ~~xmatch.py (in-flight v0.11)~~ — **DONE → P12** (see §E).

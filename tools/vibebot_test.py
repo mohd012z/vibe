@@ -906,6 +906,156 @@ def main() -> int:
             check("/native missing path refused", "not found" in r, r)
 
         # ------------------------------------------------------------------
+        print("== P15: native function-pattern classifier (pure — no r2) ==")
+        # --- the 6 ARM64 idioms from the exercism reference corpus, each
+        # recognized by its normalized instruction SEQUENCE (not hex bytes)
+        pop = ["sub", "clz", "ror", "eor", "sub", "b"]
+        check("P1 popcount-loop (clz+ror+eor)",
+              any(p["pattern"] == "popcount-loop"
+                  for p in nat.classify_function(pop)),
+              str(nat.classify_function(pop)))
+        # the real idiom: orr xN, xN, #32 — encode the register+immediate form
+        cf = ["ldrb w1, [x0]", "orr w1, w1, #32", "sub w1, w1, #0x61", "ret"]
+        check("P2 case-fold-scan (orr #32)",
+              any(p["pattern"] == "case-fold-scan"
+                  for p in nat.classify_function(cf)),
+              str(nat.classify_function(cf)))
+        bs = ["lsl", "tst x0, x1, lsl #5", "bne"]
+        check("P3 bitset-test (tst with a bit index)",
+              any(p["pattern"] == "bitset-test"
+                  for p in nat.classify_function(bs)),
+              str(nat.classify_function(bs)))
+        parity = ["tbz x0, #0", "ret"]
+        check("P4 tbz-bit0-parity (tbz #0)",
+              any(p["pattern"] == "tbz-bit0-parity"
+                  for p in nat.classify_function(parity)),
+              str(nat.classify_function(parity)))
+        madd = ["madd x0, x1, x2, x0", "ret"]
+        check("P5 fused-madd (madd)",
+              any(p["pattern"] == "fused-madd"
+                  for p in nat.classify_function(madd)),
+              str(nat.classify_function(madd)))
+        adrp = ["adrp x8, str_lbl", "add x8, x8, :lo12:str_lbl", "ret"]
+        check("P6 string-ref-pair (adrp + add :lo12:)",
+              any(p["pattern"] == "string-ref-pair"
+                  for p in nat.classify_function(adrp)),
+              str(nat.classify_function(adrp)))
+
+        # --- cross-match negatives: each pattern must NOT fire on the others
+        check("popcount body does not report case-fold/madd",
+              [p["pattern"] for p in nat.classify_function(pop)] == ["popcount-loop"],
+              str(nat.classify_function(pop)))
+        check("a null-test (tst x0, x0, no bit index) is NOT bitset-test",
+              [p["pattern"] for p in nat.classify_function(["tst x0, x0", "bne"])]
+              == [], str(nat.classify_function(["tst x0, x0", "bne"])))
+        check("an empty / unknown body reports no patterns (honest)",
+              nat.classify_function([]) == []
+              and nat.classify_function(["mov", "ret"]) == [],
+              "")
+        # a function carrying TWO idioms reports both
+        both = ["madd x0, x1, x2, x0", "orr w2, w2, #32"]
+        bboth = sorted(p["pattern"] for p in nat.classify_function(both))
+        check("a function with two idioms reports both",
+              bboth == ["case-fold-scan", "fused-madd"], str(bboth))
+
+        # --- parse_disasm: JSON (pdj) and text (pd) forms
+        import json as _jsonp15
+        jd = _jsonp15.dumps([{"name": "clz", "size": 4},
+                             {"name": "ror.w", "size": 4},
+                             {"name": "eor", "size": 4}])
+        check("parse_disasm JSON -> mnemonics (suffix stripped)",
+              nat.parse_disasm(jd) == ["clz", "ror", "eor"],
+              str(nat.parse_disasm(jd)))
+        td15 = ("0x400050  5300c0f2  clz   w2, w0\n"
+                "0x400054  6f0041f2  ror   w2, w2, w3\n"
+                "0x400058  4a0000eb  eor   w0, w0, w2\n")
+        check("parse_disasm text -> mnemonics",
+              nat.parse_disasm(td15) == ["clz", "ror", "eor"],
+              str(nat.parse_disasm(td15)))
+        check("parse_disasm empty -> []", nat.parse_disasm("") == [], "")
+
+        # --- end-to-end via the FakeRunner seam (no r2 installed)
+        import struct as _struct
+        def _mk_elf15():
+            b = bytearray(64); b[:4] = b"\x7fELF"; b[4] = 2; b[5] = 1; b[6] = 1
+            _struct.pack_into("<H", b, 0x10, 2); _struct.pack_into("<H", b, 0x12, 0xB7)
+            _struct.pack_into("<I", b, 0x18, 1)
+            _struct.pack_into("<I", b, 0x20, 64); _struct.pack_into("<H", b, 0x36, 56)
+            _struct.pack_into("<H", b, 0x38, 2)
+            def _ph(off, va, fsize, typ=1):
+                seg = bytearray(56); _struct.pack_into("<I", seg, 0, typ)
+                _struct.pack_into("<Q", seg, 8, off); _struct.pack_into("<Q", seg, 16, va)
+                _struct.pack_into("<Q", seg, 32, fsize); return seg
+            return bytes(b + _ph(0x1000, 0x400000, 0x100) + _ph(0x2000, 0x400100, 0x80))
+        elf15 = _mk_elf15()
+        segs15 = nat.elf_segments_64(elf15)
+
+        class _FR15:
+            bin = "r2"
+            def version(self):
+                return "radare2 6.2.4 fake"
+            def run(self, path, cmd):
+                if cmd == "aflj":
+                    return "0x00400050  24  popcnt\n0x00400120  12  parityfn\n"
+                if cmd == "iEj":
+                    return "0x00400050  24  popcnt\n"
+                if cmd == "iI":
+                    return "memcpy:libc.so.6\n"
+                if cmd.startswith("pdj"):
+                    # popcnt function = clz+ror+eor ; parityfn = tbz x0, 0
+                    if "400050" in cmd:
+                        return _jsonp15.dumps(
+                            [{"name": "clz", "opcode": "w2, w0"},
+                             {"name": "ror.w", "opcode": "w2, w2, w3"},
+                             {"name": "eor", "opcode": "w0, w0, w2"},
+                             {"name": "sub", "opcode": "w0, w0, w2"}])
+                    if "400120" in cmd:
+                        return _jsonp15.dumps([{"name": "tbz", "opcode": "x0, 0"},
+                                               {"name": "ret", "opcode": ""}])
+                    return "[]"
+                return ""
+        tmp15 = os.path.join(td, "libp15.so")
+        with open(tmp15, "wb") as _f:
+            _f.write(elf15)
+        n15 = nat.analyze_native(tmp15, _FR15(), segments=segs15)
+        byname = {f["name"]: f for f in n15["functions"]}
+        check("e2e: popcnt function classified popcount-loop (E3)",
+              byname.get("popcnt", {}).get("patterns") == ["popcount-loop"],
+              str(byname.get("popcnt", {}).get("patterns")))
+        check("e2e: parityfn classified tbz-bit0-parity (E3)",
+              byname.get("parityfn", {}).get("patterns") == ["tbz-bit0-parity"],
+              str(byname.get("parityfn", {}).get("patterns")))
+        check("e2e: patterns are E3 + carry a reason",
+              byname["popcnt"]["pattern_details"][0]["evidence"] == "E3"
+              and "reason" in byname["popcnt"]["pattern_details"][0],
+              str(byname["popcnt"]["pattern_details"]))
+        check("render_native surfaces the recognized logic patterns",
+              "logic pattern" in nat.render_native(n15)
+              and "popcount-loop" in nat.render_native(n15),
+              nat.render_native(n15)[-300:])
+
+        # --- honest degrade: a runner whose disasm fails -> empty patterns
+        class _FR15err:
+            bin = "r2"
+            def version(self):
+                return "radare2 6.2.4 fake"
+            def run(self, path, cmd):
+                if cmd == "aflj":
+                    return "0x00400050  24  foo\n"
+                if cmd == "iEj":
+                    return "0x00400050  24  foo\n"
+                if cmd == "iI":
+                    return ""
+                if cmd.startswith("pdj"):
+                    raise nat.ProviderError("disasm failed")
+                return ""
+        n15e = nat.analyze_native(tmp15, _FR15err(), segments=segs15)
+        check("e2e: disasm error -> empty patterns (NOT OBSERVED, not crash)",
+              n15e["functions"][0]["patterns"] == []
+              and n15e["functions"][0]["mnemonics"] == [],
+              str(n15e["functions"][0]))
+
+        # ------------------------------------------------------------------
         print("== P11: Falsifier — deterministic mechanical refutation (pure) ==")
         from vibebot import falsify as F
         from vibebot import claims as C
