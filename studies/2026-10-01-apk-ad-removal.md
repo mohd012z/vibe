@@ -158,3 +158,5 @@ settings outside the code; left for Fatah's call.
   the account (via Settings → Signing keys); `commit.gpgsign=true`,
   `gpg.format=ssh`, `user.signingkey` set locally. This commit is the first
   signed one on the repo.
+  (Commit author email set to the account's associated noreply address so
+  GitHub can attribute the SSH signature to the account holding the key.)
