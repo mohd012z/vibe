@@ -681,6 +681,84 @@ def main() -> int:
                           == _j7.dumps(b, sort_keys=True))
 
         if HAVE_ANDROGUARD:
+            print("== P10: /investigate — orchestrated 18-stage ==")
+            from vibebot import deepdive
+            from vibebot import graphutil
+            gwi = gateway.Gateway(td)
+            ack, ji = gwi.handle(f"/investigate {FIXTURE}", user="test")
+            check("/investigate ACKs a job",
+                  ji is not None and "ACK" in ack, ack)
+            gwi.process_pending()
+            check("/investigate whole-artifact COMPLETED",
+                  ji is not None and ji.state == core.Job.COMPLETED,
+                  str(ji.error if ji else None))
+            if ji is not None and ji.result is not None:
+                res = ji.result.structural["deepdive"]
+                check("18 stages produced",
+                      len(res["stages"]) == 18, str(len(res["stages"])))
+                marks = {s["num"]: s["mark"] for s in res["stages"]}
+                # deterministic stages are established
+                for num in ("01", "02", "06", "07", "14", "16", "17", "18"):
+                    check(f"stage {num} established (✓)",
+                          marks.get(num) == deepdive.DONE, str(marks.get(num)))
+                # native stages are HONESTLY not-available here
+                check("stage 11 (Blocks) n/a (no native provider)",
+                      marks.get("11") == deepdive.NOTAVAILABLE, str(marks.get("11")))
+                check("stage 12 (CFG) n/a (no native provider)",
+                      marks.get("12") == deepdive.NOTAVAILABLE, str(marks.get("12")))
+                card = ji.result.structural["deepdive_card"]
+                check("card shows the 18-stage table",
+                      "DEEPDIVE" in card and "18 Summary" in card, card)
+                check("card is honest about native stages",
+                      "n/a — requires Radare/Ghidra" in card, card)
+                check("card notes NOT OBSERVED != IMPOSSIBLE",
+                      "NOT OBSERVED" in card, card)
+            # method-level: resolves the target, shows its callees
+            _, jm = gwi.handle(
+                f"/investigate {FIXTURE} com.fixture.demo.DemoApp.onCreate",
+                user="test")
+            gwi.process_pending()
+            check("/investigate method-level COMPLETED",
+                  jm is not None and jm.state == core.Job.COMPLETED,
+                  str(jm.error if jm else None))
+            if jm is not None and jm.result is not None:
+                resm = jm.result.structural["deepdive"]
+                check("method target resolved (M-id, not unrecognized)",
+                      resm["method"] is not None
+                      and resm["unrecognized"] is False,
+                      str(resm["method"]))
+                # stage 07 callees shows a real invoke
+                s07 = next(s for s in resm["stages"] if s["num"] == "07")
+                check("method stage 07 lists a callee",
+                      any("->" in l for l in s07["lines"]), str(s07["lines"]))
+            # staged progress events were recorded (bounded + cancellable)
+            if ji is not None:
+                progs = [e for e in ji.events if e["type"] == "progress"]
+                check("staged progress recorded (>= 18 stage pings)",
+                      len(progs) >= 18, str(len(progs)))
+            # budget enforcement: tiny wall -> FAILED "budget"
+            _, jb = gwi.handle(f"/investigate {FIXTURE} --max-wall 0.001",
+                               user="test")
+            gwi.process_pending()
+            check("/investigate tiny-wall FAILs (stop-controller)",
+                  jb is not None and jb.state == core.Job.FAILED
+                  and "budget" in (jb.error or ""),
+                  str(jb.error if jb else None))
+            # honest no-arg + missing path
+            r, _ = gwi.handle("/investigate")
+            check("/investigate no-arg shows usage", "<path>" in r, r)
+            r, _ = gwi.handle("/investigate /nope/missing.apk")
+            check("/investigate missing path refused", "not found" in r, r)
+            # run_deepdive is deterministic (2 runs identical)
+            gph = graphutil.build_graph(FIXTURE)
+            a = deepdive.run_deepdive(gph, "apk")
+            b = deepdive.run_deepdive(gph, "apk")
+            import json as _j10
+            check("run_deepdive reproducible (2 runs identical)",
+                  _j10.dumps(a, sort_keys=True)
+                  == _j10.dumps(b, sort_keys=True))
+
+        if HAVE_ANDROGUARD:
             print("== P4: /find TargetFinder + canonical EntityResolver ==")
             # fresh gateway (stateful /find needs a prior /apk in the SAME gw)
             gwf = gateway.Gateway(td)

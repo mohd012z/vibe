@@ -59,6 +59,7 @@ HELP = """vibebot commands
   /jobs                  all jobs
   /sessions              stored analysis sessions
   /deepdive <target> --sha <sha>   stateful traverse (callers|native|references|<name>|jni|calls)
+  /investigate <path> [target]     orchestrated 18-stage investigation (job)
   /report --sha <sha>    stored report card
   /cancel <job-id>       cancel queued/running job
   /help                  this text
@@ -101,6 +102,9 @@ class Gateway:
                 from . import graphutil
                 m["graph"] = graphutil.ApkGraphEngine(
                     os.path.join(self.work_dir, "reports"))
+                from . import deepdive
+                m["deepdive"] = deepdive.DeepDiveEngine(
+                    os.path.join(self.work_dir, "reports"))
         except Exception:
             pass
         return m
@@ -113,8 +117,8 @@ class Gateway:
                 "/apk", "/map", "/find", "/xref", "/callers", "/callees",
                 "/claims", "/why", "/plan", "/capabilities", "/analyze", "/dex",
                 "/smali", "/base", "/hash", "/dexcheck", "/dexrepair", "/status",
-                "/jobs", "/sessions", "/deepdive", "/report", "/cancel",
-                "/help", "/start"):
+                "/jobs", "/sessions", "/deepdive", "/investigate", "/report",
+                "/cancel", "/help", "/start"):
             return HELP, None
         cmd = parts[0]
 
@@ -191,6 +195,9 @@ class Gateway:
 
         if cmd == "/deepdive":
             return self._deepdive(parts[1:])
+
+        if cmd == "/investigate":
+            return self._investigate(parts[1:])
 
         if cmd == "/report":
             return self._report(parts[1:])
@@ -583,12 +590,46 @@ class Gateway:
             return res["error"], None
         lines = [f"deepdive '{target}'  ({res['matchCount']} matches, {res['note']})"]
         for m in res["matches"][:25]:
-            loc = f"{m.get('class')}{'.' + m.get('method') + '()' if m.get('method') else ''}"
+            if m.get("method"):
+                loc = f"{m.get('class')}.{m.get('method')}()"
+            else:
+                loc = str(m.get("class") or "")
             lines.append(f"  [{m.get('via')}] {m.get('finding', '')} "
-                         f"{loc} {m.get('artifact', '')} {m.get('detail', '')}".rstrip())
+                         f"{loc} {m.get('artifact', '')} "
+                         f"{m.get('detail', '')}".rstrip())
         if res["matchCount"] > 25:
             lines.append(f"  … {res['matchCount'] - 25} more")
         return "\n".join(lines), None
+
+    def _investigate(self, parts: list[str]) -> tuple[str, core.Job | None]:
+        """Orchestrated 18-stage investigation (P10). Reuses the Vibe IR +
+        xref + claims + budget; runs as a bounded, cancellable job."""
+        if not parts:
+            return ("/investigate <path> [target]\n"
+                    "  <path>:   APK (required) — builds its own Vibe IR\n"
+                    "  [target]: method (M-id / Class.method) or 'apk' "
+                    "(default)\n"
+                    "  e.g.  /investigate app.apk M4\n"
+                    "         /investigate app.apk com.x.DemoApp.onCreate"), None
+        if "deepdive" not in self.engines:
+            return ("error: /investigate needs androguard "
+                    "(uv pip install androguard)"), None
+        pos = [p for p in parts if not p.startswith("--")]
+        if not pos:
+            return "/investigate <path> [target]", None
+        path = os.path.abspath(os.path.expanduser(pos[0]))
+        if not os.path.exists(path):
+            return f"error: artifact not found (refused: {os.path.basename(path)})", None
+        target = " ".join(pos[1:]).strip() or "apk"
+        params = {"target": target, "sha": self._arg(parts, "--sha")}
+        params.update(self._budget_params(parts))
+        try:
+            job = self.jobs.submit("investigate", path, "cli", "deepdive", params)
+        except (KeyError, FileNotFoundError, RuntimeError) as e:
+            return f"error: {e}", None
+        return (f"ACK {job.id}  engine=deepdive  target='{target}'\n"
+                f"  18 stages running (bounded + cancellable) — "
+                f"/status {job.id}  /cancel {job.id}"), job
 
     def _report(self, parts: list[str]) -> tuple[str, None]:
         sha = self._arg(parts, "--sha")
