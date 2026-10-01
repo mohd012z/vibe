@@ -626,6 +626,61 @@ def main() -> int:
                   str(jo.error if jo else None))
 
         if HAVE_ANDROGUARD:
+            print("== P7: /xref + /callers + /callees over the call graph ==")
+            gwx2 = gateway.Gateway(td)
+            _, jxh = gwx2.handle(f"/apk {FIXTURE}", user="test")
+            gwx2.process_pending()
+            if jxh is not None and jxh.result is not None:
+                sha_x = jxh.result.intake["sha256"][:16]
+                # find a method with callees (DemoApp.onCreate)
+                from vibebot import graphutil as gu
+                sess_x = gwx2.sessions.load(sha_x)
+                if sess_x is None:
+                    check("P7: session persisted for xref tests", False)
+                else:
+                    gph = sess_x["structural"]["graph"]
+                    oncreate = next(m for m in gph["nodes"]["method"]
+                                    if m["name"] == "onCreate"
+                                    and "DemoApp" in m["class"])
+                    # /xref by M-id shows callees + strings
+                    r, _ = gwx2.handle(f"/xref {oncreate['id']} --sha {sha_x}")
+                    check("/xref by M-id lists callees + strings",
+                          "XREF " + oncreate["id"] in r and "callees (" in r
+                          and "strings referenced (" in r, r)
+                    check("/xref shows an in-APK callee",
+                          "MobileAds.initialize" in r, r)
+                    check("/xref shows a referenced string", "ad-unit" in r, r)
+                    # /callees by dotted name resolves to the same M-id
+                    r, _ = gwx2.handle(f"/callees {oncreate['class']}.onCreate "
+                                       f"--sha {sha_x}")
+                    check("/callees by dotted name resolves to M-id",
+                          "CALLEES " + oncreate["id"] in r, r)
+                    # /callers card renders
+                    r, _ = gwx2.handle(f"/callers {oncreate['class']}.onCreate "
+                                       f"--sha {sha_x}")
+                    check("/callers returns a CALLERS card", "CALLERS " in r, r)
+                    # external target is flagged honestly, not faked as in-graph
+                    r, _ = gwx2.handle("/xref android.os.Build.MODEL --sha "
+                                       + sha_x)
+                    check("/xref external is flagged EXTERNAL",
+                          "EXTERNAL" in r and "not an in-APK method" in r, r)
+                    # no-target / no-sha / bad-sha all honest
+                    r, _ = gwx2.handle("/xref --sha " + sha_x)
+                    check("/xref no-target shows usage", "/xref <M-id" in r, r)
+                    r, _ = gwx2.handle("/xref M1")
+                    check("/xref no-sha hints the last job sha",
+                          sha_x[:8] in r, r)
+                    r, _ = gwx2.handle("/xref M1 --sha ZZZZ")
+                    check("/xref bad-sha rejected", "hex sha" in r, r)
+                    # xrefs() is deterministic
+                    a = gu.xrefs(gph, oncreate["id"])
+                    b = gu.xrefs(gph, oncreate["id"])
+                    import json as _j7
+                    check("xrefs reproducible (2 calls identical)",
+                          _j7.dumps(a, sort_keys=True)
+                          == _j7.dumps(b, sort_keys=True))
+
+        if HAVE_ANDROGUARD:
             print("== P4: /find TargetFinder + canonical EntityResolver ==")
             # fresh gateway (stateful /find needs a prior /apk in the SAME gw)
             gwf = gateway.Gateway(td)

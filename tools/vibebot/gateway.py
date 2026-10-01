@@ -41,6 +41,9 @@ HELP = """vibebot commands
   /apk <path>            APK overview + Vibe IR entity graph (stable IDs)
   /map <path>            entity graph tree + cross-layer paths (or --sha <…>)
   /find <text> --sha <…> TargetFinder: strings/resources/classes/methods/components
+  /xref <M|Cls.m> --sha <…>  references: callers + callees + strings
+  /callers <M|Cls.m> --sha <…>  who calls this method (Used By)
+  /callees <M|Cls.m> --sha <…>  what this method calls (Uses)
   /claims [--sha <…>]    Evidence board: every claim + state + E-level
   /why <C-id> [--sha <…>] CodeTransparent trace: claim -> evidence -> bytes
   /plan <goal>           cheapest-capable method plan (live providers)
@@ -107,8 +110,8 @@ class Gateway:
         """Parse one command, ACK immediately. Returns (reply, accepted job)."""
         parts = (text or "").strip().split()
         if not parts or parts[0] not in (
-                "/apk", "/map", "/find", "/claims", "/why", "/plan",
-                "/capabilities", "/analyze", "/dex",
+                "/apk", "/map", "/find", "/xref", "/callers", "/callees",
+                "/claims", "/why", "/plan", "/capabilities", "/analyze", "/dex",
                 "/smali", "/base", "/hash", "/dexcheck", "/dexrepair", "/status",
                 "/jobs", "/sessions", "/deepdive", "/report", "/cancel",
                 "/help", "/start"):
@@ -123,6 +126,12 @@ class Gateway:
             return self._map(parts[1:])
         if cmd == "/find":
             return self._find(parts[1:])
+        if cmd == "/xref":
+            return self._xref(parts[1:])
+        if cmd == "/callers":
+            return self._callers(parts[1:])
+        if cmd == "/callees":
+            return self._callees(parts[1:])
         if cmd == "/claims":
             return self._claims(parts[1:])
         if cmd == "/why":
@@ -333,6 +342,46 @@ class Gateway:
             return (f"session {sha[:8]}… has no Vibe IR graph layer yet — run /apk <path>"), None
         targets = graphutil.find_targets(graph, query)
         return graphutil.render_find(targets, query, sha), None
+
+    def _xref_common(self, parts: list[str], mode: str, usage: str):
+        from . import graphutil
+        sha = self._arg(parts, "--sha")
+        skip = set()
+        for i, p in enumerate(parts):
+            if p == "--sha":
+                skip.update({i, i + 1})
+            elif p.startswith("--"):
+                skip.add(i)
+        target = " ".join(p for i, p in enumerate(parts) if i not in skip).strip()
+        if not target:
+            return usage, None
+        if not sha:
+            last = self._last_job_sha()
+            hint = last[:16] if last else "<sha from /apk>"
+            return (f"no --sha: run /apk <path> first, then {usage.split()[0]} "
+                    f"<M-id|Class.method> --sha {hint}"), None
+        if not SHA_RE.match(sha.lower()):
+            return usage + "   (hex sha, 8..64 chars)", None
+        sess = self.sessions.load(sha)
+        if not sess:
+            return f"no session for {sha[:8]}… — run /apk <path> first", None
+        graph = (sess.get("structural") or {}).get("graph")
+        if not graph:
+            return (f"session {sha[:8]}… has no Vibe IR graph layer yet — run /apk <path>"), None
+        x = graphutil.xrefs(graph, target)
+        return graphutil.render_xref(x, mode, sha), None
+
+    def _xref(self, parts: list[str]) -> tuple[str, None]:
+        return self._xref_common(parts, "xref",
+                                 "/xref <M-id|Class.method> --sha <…>")
+
+    def _callers(self, parts: list[str]) -> tuple[str, None]:
+        return self._xref_common(parts, "callers",
+                                 "/callers <M-id|Class.method> --sha <…>")
+
+    def _callees(self, parts: list[str]) -> tuple[str, None]:
+        return self._xref_common(parts, "callees",
+                                 "/callees <M-id|Class.method> --sha <…>")
 
     def _last_job_sha(self) -> str | None:
         j = self._last_job_id()

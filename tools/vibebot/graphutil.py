@@ -565,6 +565,112 @@ def resolve_entity(known: list[dict], provider: str, name: str,
             "note": "no matching known entity"}
 
 
+# ------------------------------------------------------------------ P7 xref
+def _xref_target(graph: dict, ref: str):
+    """Resolve an xref/callers/callees target to a method node.
+
+    Accepts a canonical M-id ('M12') or a dotted 'Class.method' (optionally
+    package-qualified). Returns (method_node, external). external=True means
+    the name is not an in-APK method (a framework/external call) — the caller
+    must report that honestly, never treat it as a real in-graph method.
+    """
+    ref = ref.strip()
+    nodes = graph.get("nodes", {})
+    for m in nodes.get("method", []):
+        if m["id"] == ref:
+            return m, False
+    dotted = (ref[1:] if ref.startswith("L") else ref)
+    if "." in dotted:
+        cls, _, meth = dotted.rpartition(".")
+        for m in nodes.get("method", []):
+            if m["class"].endswith(cls) and m["name"] == meth:
+                return m, False
+    # not an in-APK method -> external (split Class.method so callers of an
+    # external method still match the graph's targetClass/targetMethod)
+    if "." in dotted:
+        cls, _, meth = dotted.rpartition(".")
+        return {"id": None, "class": cls, "name": meth, "dex": None,
+                "external": True}, True
+    return {"id": None, "class": dotted, "name": dotted, "dex": None,
+            "external": True}, True
+
+
+def xrefs(graph: dict, target: str) -> dict:
+    """All in-APK references for a target: callers (incoming invokes),
+    callees (outgoing invokes), and strings the method references.
+
+    Deterministic. 'no static xref found' is reported as such — absence of
+    a static reference is NOT proof of non-use (NOT OBSERVED != IMPOSSIBLE).
+    """
+    m, external = _xref_target(graph, target)
+    mid = m.get("id")
+    callers = [c for c in graph.get("calls", [])
+               if (c.get("targetClass") or "").endswith(m["class"])
+               and c.get("targetMethod") == m["name"]]
+    callees = [c for c in graph.get("calls", [])
+               if c.get("caller") == m["class"]
+               and c.get("callerMethod") == m["name"]]
+    strings = [s for s in graph.get("nodes", {}).get("string", [])
+               if any((r.get("class") or "").endswith(m["class"])
+                      and r.get("method") == m["name"]
+                      for r in s.get("refs", []))]
+    return {"target": target, "method_id": mid, "external": external,
+            "callers": callers, "callees": callees, "strings": strings,
+            "note": ("target is external (not an in-APK method)"
+                     if external else
+                     ("no static xref found — absence is NOT proof of "
+                      "non-use (reflection / native / dynamic dispatch)"
+                      if not (callers or callees or strings) else None))}
+
+
+def callers(graph: dict, target: str) -> list[dict]:
+    return [c for c in xrefs(graph, target)["callers"]]
+
+
+def callees(graph: dict, target: str) -> list[dict]:
+    return [c for c in xrefs(graph, target)["callees"]]
+
+
+def render_xref(x: dict, mode: str, sha: str) -> str:
+    mode = mode or "xref"
+    ref = (x["method_id"] or "") + (" " + x["target"] if not x["method_id"]
+                                    else "")
+    head = {"xref": f"XREF {ref.strip()}", "callers": f"CALLERS {ref.strip()}",
+            "callees": f"CALLEES {ref.strip()}"}[mode]
+    lines = [f"{head}  (sha[:8]={sha[:8]})"]
+    if x["external"]:
+        lines.append("  target is EXTERNAL (not an in-APK method) — "
+                     "no in-graph owner; listing references only")
+    if mode in ("xref", "callers"):
+        cl = x["callers"]
+        lines.append(f"  callers ({len(cl)}):")
+        for c in cl:
+            lines.append(f"    <- {c.get('caller')}.{c.get('callerMethod')}"
+                         f"  [{c.get('invokeKind')}]  ({c.get('dex')})")
+        if not cl:
+            lines.append("    (none found statically)")
+    if mode in ("xref", "callees"):
+        ca = x["callees"]
+        lines.append(f"  callees ({len(ca)}):")
+        for c in ca:
+            lines.append(f"    -> {c.get('targetClass')}.{c.get('targetMethod')}"
+                         f"  [{c.get('invokeKind')}]  ({c.get('dex')})")
+        if not ca:
+            lines.append("    (none found statically)")
+    if mode == "xref":
+        st = x["strings"]
+        lines.append(f"  strings referenced ({len(st)}):")
+        for s in st[:12]:
+            lines.append(f"    {s['id']} '{s['value']}'")
+        if not st:
+            lines.append("    (none)")
+        elif len(st) > 12:
+            lines.append(f"    … {len(st) - 12} more")
+    if x.get("note"):
+        lines.append(f"  note: {x['note']}")
+    return "\n".join(lines)
+
+
 def render_overview(graph: dict, sha: str) -> str:
     """/apk Phase-1 card: situational awareness, not deep RE.
 
