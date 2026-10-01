@@ -226,7 +226,8 @@ def why(claims: list[dict], claim_id: str, sha: str) -> str:
         lines.append(f"    [E{e['level'][1:]}] {e['ref']}  — {e['detail']}")
         lines.append(f"        establishes: {EVIDENCE_STRENGTH[e['level']]}")
     for e in c["contradicting"]:
-        lines.append(f"  contradicts: [E{e['level'][1:]}] {e['ref']} — {e['detail']}")
+        tag = f"[{e['level']}]" if e["level"].startswith("F") else f"[E{e['level'][1:]}]"
+        lines.append(f"  contradicts: {tag} {e['ref']} — {e['detail']}")
     if c.get("note"):
         lines.append(f"  note: {c['note']}")
     lines.append(f"  -> REF {c['evidence'][0]['ref'] if c['evidence'] else '?'} "

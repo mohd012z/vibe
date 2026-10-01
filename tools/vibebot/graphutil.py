@@ -332,7 +332,18 @@ class ApkGraphEngine(core.Engine):
 
         # P3: derive the first-class claim set from the graph (+ DEX integrity)
         from . import claims as _claims
+        from . import falsify as _falsify
         claims_list = _claims.build_claims(g, g.get("dex_integrity"))
+
+        # P11: FALSIFIER — challenge the claims against an independent reading
+        # of the graph. A contradiction moves the claim to CONFLICTED (or
+        # REJECTED if PROPOSED) via the legal state-machine transition; the
+        # board gains a FALSIFIED section. Deterministic, no AI, no androguard.
+        f_findings = _falsify.falsify_graph(g) + _falsify.falsify_claims(
+            claims_list, g)
+        claims_list = _falsify.apply_falsifications(claims_list, f_findings)
+        claims_board = _claims.render_claims(claims_list, sha)
+        fals_board = _falsify.render_falsifications(f_findings, sha)
 
         return core.EngineResult(
             intake={"sha256": sha, "package": g.get("package"),
@@ -341,12 +352,14 @@ class ApkGraphEngine(core.Engine):
                     "methodCount": g["counts"]["method"]},
             structural={"graph": g, "overview": render_overview(g, sha),
                         "claims": claims_list,
-                        "claims_board": _claims.render_claims(claims_list, sha)},
+                        "falsifications": f_findings,
+                        "claims_board": claims_board,
+                        "falsification_board": fals_board},
             findings=findings,
             report_md=render_overview(g, sha) + "\n\n" + render_map(g, sha),
             outputs={"report": rep, "overview": render_overview(g, sha),
                      "map": render_map(g, sha),
-                     "claims": _claims.render_claims(claims_list, sha)},
+                     "claims": claims_board + "\n\n" + fals_board},
         )
 
 

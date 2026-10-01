@@ -45,6 +45,7 @@ HELP = """vibebot commands
   /callers <M|Cls.m> --sha <…>  who calls this method (Used By)
   /callees <M|Cls.m> --sha <…>  what this method calls (Uses)
   /claims [--sha <…>]    Evidence board: every claim + state + E-level
+  /falsify [--sha <…>]   Falsifier board: claims re-checked vs the artifact
   /why <C-id> [--sha <…>] CodeTransparent trace: claim -> evidence -> bytes
   /plan <goal>           cheapest-capable method plan (live providers)
   /capabilities          what's installed here (honest detection)
@@ -119,7 +120,8 @@ class Gateway:
         parts = (text or "").strip().split()
         if not parts or parts[0] not in (
                 "/apk", "/map", "/find", "/xref", "/callers", "/callees",
-                "/claims", "/why", "/plan", "/capabilities", "/analyze", "/dex",
+                "/claims", "/falsify", "/why", "/plan", "/capabilities",
+                "/analyze", "/dex",
                 "/native",
                 "/smali", "/base", "/hash", "/dexcheck", "/dexrepair", "/status",
                 "/jobs", "/sessions", "/deepdive", "/investigate", "/report",
@@ -143,6 +145,8 @@ class Gateway:
             return self._callees(parts[1:])
         if cmd == "/claims":
             return self._claims(parts[1:])
+        if cmd == "/falsify":
+            return self._falsify(parts[1:])
         if cmd == "/why":
             return self._why(parts[1:])
         if cmd == "/plan":
@@ -439,7 +443,35 @@ class Gateway:
         cl = (sess or {}).get("structural", {}).get("claims")
         if not cl:
             return (f"session {sha[:8]}… has no claim set yet — run /apk <path>"), None
-        return cmod.render_claims(cl, sha), None
+        out = cmod.render_claims(cl, sha)
+        board = (sess or {}).get("structural", {}).get("falsification_board")
+        if board:
+            out += "\n\n" + board
+        return out, None
+
+    def _falsify(self, parts: list[str]) -> tuple[str, None]:
+        """The FALSIFIER board — every contradiction found re-checking the
+        claims against an independent reading of the graph."""
+        from . import falsify as fmod
+        sha = self._arg(parts, "--sha")
+        if not sha:
+            last = self._last_job_sha()
+            if not last:
+                return "run /apk <path> first, then /falsify --sha <…>", None
+            sha = last
+        if not SHA_RE.match(sha.lower()):
+            return "/falsify --sha <sha256[:16]>", None
+        sess = self.sessions.load(sha) or {}
+        st = sess.get("structural", {})
+        finds = st.get("falsifications")
+        if finds is None:
+            # no stored findings (pre-P11 session) — run live over the graph
+            g = st.get("graph")
+            cl = st.get("claims")
+            if not g or cl is None:
+                return (f"session {sha[:8]}… has no graph yet — run /apk <path>"), None
+            finds = fmod.falsify_graph(g) + fmod.falsify_claims(cl, g)
+        return fmod.render_falsifications(finds, sha), None
 
     def _why(self, parts: list[str]) -> tuple[str, None]:
         from . import claims as cmod

@@ -902,6 +902,143 @@ def main() -> int:
             r, _ = gwn.handle("/native /nope/missing.so")
             check("/native missing path refused", "not found" in r, r)
 
+        # ------------------------------------------------------------------
+        print("== P11: Falsifier — deterministic mechanical refutation (pure) ==")
+        from vibebot import falsify as F
+        from vibebot import claims as C
+        from vibebot.claims import TRANSITIONS as _TR
+
+        def _g(clean: bool) -> dict:
+            # two DEX passes: methods via 'method' nodes (dexmapper), native
+            # nodes via access flags — the falsifier cross-checks them
+            native_flag = False if clean else False
+            return {
+                "package": "com.x",
+                "nodes": {
+                    "artifact": [{"path": "/t/x.apk"}],
+                    "component": [],
+                    "class": [{"id": "C1", "dex": "d", "name": "com.x.Main"}],
+                    "method": [
+                        {"id": "M1", "dex": "d", "class": "com.x.Main",
+                         "name": "onCreate", "native": False},
+                        {"id": "M2", "dex": "d", "class": "com.x.Main",
+                         "name": "nativeThing", "native": native_flag},
+                    ],
+                    "string": [
+                        {"id": "S1", "value": "hi",
+                         "refs": [{"class": "com.x.Main", "method": "onCreate"}]},
+                        *([] if clean else [
+                            {"id": "S2", "value": "ghost",
+                             "refs": [{"class": "com.x.Main",
+                                       "method": "DOES_NOT_EXIST"}]}]),
+                    ],
+                    "native": [
+                        *([] if clean else
+                          [{"id": "N1", "class": "com.x.Main",
+                            "method": "nativeThing"}]),
+                    ],
+                    "field": [],
+                },
+                "counts": {
+                    "class": 1, "method": 2,
+                    "string": 1 if clean else 2, "native": 0 if clean else 1,
+                    "component": 0, "call": 1,
+                },
+                "calls": [
+                    {"sourceClass": "com.x.Main", "targetClass": "com.x.Main"},
+                    *([] if clean else
+                      [{"sourceClass": "com.x.Main", "targetClass": "java.lang.Object"}]),
+                ],
+                "dex_integrity": [],
+            }
+
+        gc = _g(True)
+        cl = C.build_claims(gc, gc["dex_integrity"])
+        f_clean = F.falsify_graph(gc) + F.falsify_claims(cl, gc)
+        check("falsifier: clean graph -> ZERO findings (no false positives)",
+              f_clean == [], str(f_clean))
+        r = F.render_falsifications([], "aabbccddeeff0011")
+        check("falsifier: clean board says 'no contradictions'",
+              "no contradictions" in r, r)
+
+        gb = _g(False)
+        # also make the counts stale vs. the lists (corruption case 1)
+        gb["counts"]["call"] = 99          # 2 edges exist
+        clb = C.build_claims(gb, gb["dex_integrity"])
+        fb = F.falsify_graph(gb) + F.falsify_claims(clb, gb)
+        kinds = {x["kind"] for x in fb}
+        check("falsifier: stale counts['call'] caught (tier1, graph-level)",
+              "count:call" in kinds, str(kinds))
+        check("falsifier: native pass-divergence caught (two DEX passes disagree)",
+              "native:flag" in kinds, str(kinds))
+        check("falsifier: dangling string ref caught (graph-level)",
+              "string:dangling_ref" in kinds, str(kinds))
+        check("falsifier: claim-level call-edge recount caught",
+              any(x["claim_id"] and x["kind"] == "call:edges" for x in fb),
+              str(fb))
+        check("falsifier: claim-level dangling ref caught on the string claim",
+              any(x["claim_id"] and x["kind"] == "string:dangling_ref" for x in fb),
+              str(fb))
+
+        applied = F.apply_falsifications(clb, fb)
+        changed = [(c["id"], c["state"], a["state"]) for c, a in zip(clb, applied)
+                   if c["state"] != a["state"]]
+        check("falsifier: at least one claim moved to CONFLICTED",
+              any(t == "CONFLICTED" for _, _, t in changed), str(changed))
+        check("falsifier: every state move is a LEGAL transition (no skips)",
+              all(t in _TR[s] for _, s, t in changed), str(changed))
+        check("falsifier: untouched claims keep their state + evidence",
+              all(c["state"] == a["state"] for c, a in zip(clb, applied)
+                  if c["id"] not in {i for i, _, _ in changed}), "")
+        hit = next(a for c, a in zip(clb, applied)
+                   if c["state"] != a["state"])
+        check("falsifier: contradiction recorded as F1 evidence on the claim",
+              any(e["ref"] == "falsifier" and e["level"] == "F1"
+                  for e in hit["contradicting"]), str(hit["contradicting"]))
+
+        # /why renders the falsifier contradiction without crashing on the
+        # non-E level tag
+        w = C.why(applied, hit["id"], "aabbccddeeff0011")
+        check("/why shows the [F1] falsifier contradiction",
+              "[F1]" in w and "falsifier" in w, w)
+
+        # advisory (note-severity) findings never change a claim's state
+        gn = _g(True)
+        gn["calls"].append({"sourceClass": "com.x.Main",
+                            "targetClass": "com.someobf.Single"})
+        gn["counts"]["call"] = 2  # keep the count honest — isolate the advisory
+        cln = C.build_claims(gn, gn["dex_integrity"])
+        fn = F.falsify_graph(gn) + F.falsify_claims(cln, gn)
+        check("falsifier: external/framework class is advisory, not refutation",
+              all(x["severity"] != F.TIER1 for x in fn if x["kind"].startswith("call:")),
+              str(fn))
+        check("falsifier: advisory findings change nothing",
+              F.apply_falsifications(cln, fn) == cln or
+              all(c["state"] == a["state"] for c, a in
+                  zip(cln, F.apply_falsifications(cln, fn))), "")
+
+        if HAVE_ANDROGUARD:
+            print("== P11 e2e: /falsify through gateway (real fixture) ==")
+            gwf = gateway.Gateway(td)
+            reply, jf = gwf.handle(f"/apk {FIXTURE}", user="test")
+            gwf.process_pending()
+            if jf is not None and jf.state == core.Job.COMPLETED and jf.result is not None:
+                sha_f = jf.result.intake["sha256"][:16]
+                r, _ = gwf.handle(f"/falsify --sha {sha_f}")
+                check("/falsify renders the board on a real session",
+                      "FALSIFIER" in r and ("no contradictions" in r
+                                             or "REFUTED" in r), r)
+                r2, _ = gwf.handle("/falsify")
+                check("/falsify no-arg falls back to last session",
+                      "FALSIFIER" in r2, r2)
+                r3, _ = gwf.handle(f"/claims --sha {sha_f}")
+                check("/claims now carries the FALSIFIER section",
+                      "FALSIFIER" in r3, r3[-400:])
+                check("help lists /falsify", "/falsify" in gateway.HELP, "")
+            else:
+                check("P11 e2e: fixture job COMPLETED", False,
+                      (jf.error or "no job") if jf is not None else "no job")
+
         if HAVE_ANDROGUARD:
             print("== P4: /find TargetFinder + canonical EntityResolver ==")
             # fresh gateway (stateful /find needs a prior /apk in the SAME gw)
