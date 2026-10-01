@@ -1,0 +1,50 @@
+{
+  "note": "Reduced fingerprint DB — class/package prefixes and manifest meta-data keys for ad/analytics/consent SDKs. ORIGINAL reduced signals (short prefixes + well-known public manifest keys), not copied SDK code. Extend additively; keep entries short.",
+  "sdkClassPrefixes": {
+    "ADMOB": ["com/google/android/gms/ads/", "com/google/android/ads/identifier/"],
+    "APPLOVIN": ["com/applovin/"],
+    "UNITY_ADS": ["com/unity3d/ads/"],
+    "IRONSOURCE": ["com/ironsource/", "com/ironsource/admob/"],
+    "VUNGLE": ["com/vungle/"],
+    "STARTAPP": ["com/startapp/"],
+    "MINTOGEAR": ["com/mintegral/"],
+    "PANGLE": ["com/pangle/", "com/bytevane/"],
+    "INMOBI": ["com/inmobi/"],
+    "META_ADS": ["com/facebook/ads/"],
+    "CHARTBOOST": ["com/chartboost/"],
+    "ADCOLONY": ["com/unity3d/services/ads/colony/", "com/colony/"],
+    "ADVIEW_GENERIC": ["adview/", "bannerad/", "interstitialad/", "rewardedvideoad/"]
+  },
+  "analyticsClassPrefixes": {
+    "FIREBASE": ["com/google/firebase/analytics/", "com/google/android/gms/analytics/"],
+    "APPLOVIN_ANALYTICS": ["com/applovin/analytics/"],
+    "FLURRY": ["com/flurry/"],
+    "MIXPANEL": ["com/mixpanel/"],
+    "AMPLITUDE": ["com/amplitude/"]
+  },
+  "consentKeys": [
+    "com.google.android.ump",
+    "com.applovin.sdk.consent",
+    "AppLovin-SDK-Key"
+  ],
+  "manifestMetaKeys": {
+    "ADMOB": ["com.google.android.gms.ads.APPLICATION_ID", "com.google.android.gms.ads.flag.OPTIMIZE_INITIALIZATION", "com.google.android.gms.ads.flag.OPTIMIZE_AD_LOADING"],
+    "APPLOVIN": ["AppLovin-SDK-Key", "applovin.sdk.key", "com.applovin.sdk.API_KEY"],
+    "UNITY_ADS": ["com.unity3d.ads.app.id"],
+    "IRONSOURCE": ["com.ironsource.adapters."],
+    "VUNGLE": ["com.vungle.ads.api_id"],
+    "STARTAPP": ["com.startapp"],
+    "MINTOGEAR": ["com.mintegral.sharesdk"],
+    "PANGLE": ["com.bytedance.sdk.openadsdk"],
+    "INMOBI": ["com.inmobi.sdk"],
+    "META_ADS": ["com.facebook.ads", "com.facebook.sdk.ApplicationId"],
+    "CHARTBOOST": ["com.chartboost.sdk"]
+  },
+  "chokepointMethods": [
+    "initialize", "init", "load", "loadAd", "show", "showAd", "showInterstitial",
+    "showBanner", "showRewarded", "showAdaptiveBanner", "track", "trackScreen",
+    "requestInterstitial", "requestConsentInfoUpdate"
+  ],
+  "adUiClassHints": ["AdView", "BannerAd", "BannerView", "InterstitialAd", "RewardedVideoAd", "NativeAd", "AdRequest", "AdSize"],
+  "rewardsHints": ["reward", "Reward", "SKADNETWORK", "skadnetwork", "attribution"]
+}

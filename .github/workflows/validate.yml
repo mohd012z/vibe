@@ -44,3 +44,11 @@ jobs:
           assert "no verdict changes" in out.stdout, out.stdout
           print("harness self-test OK:", s1, "| failed-target:", s2["failed"], "STABLE")
           EOF
+      - name: APK mod menu self-test (fixture APK)
+        run: |
+          # Proves the authorized-APK module end-to-end against a committed,
+          # self-built fixture: intake identity, E1/E2/E3 evidence, call-graph
+          # chokepoints, authorization gate, exit codes, dry-run plan shape.
+          set -e
+          python3 -m pip install --quiet androguard
+          python3 tools/apkmod_test.py

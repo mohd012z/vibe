@@ -23,9 +23,48 @@ It is **not** a payload collection. It contains:
   loop)
 - a **versioned manifest** (SHA-256 + schema gate) so an app can download and
   verify this knowledge instead of hard-coding it
+- **`tools/apkmod.py` — the APK mod menu**: authorized-APK analysis +
+  dry-run patch planning (intake → E1–E3 ad/analytics/consent detection →
+  DEX call-graph → patch candidates with rollback metadata). Read-only for
+  any APK; `--plan` is a dry-run manifest gated on `--authorized`; applying
+  patches is a separately-gated later stage (`SPEC.md` + `studies/`)
 - `SPEC.md` — the language-agnostic implementation contract, so any
   implementation (Python CLI, or an in-app "mode menu" in Kotlin testing the
   model behind any APK) produces comparable results
+
+## APK mod menu (authorized-APK analysis + dry-run patch planning)
+
+`tools/apkmod.py` implements the first slice of the study note
+(`studies/2026-10-01-apk-ad-removal.md`) as an offline workbench:
+
+```
+apkmod.py <apk> --menu                     # interactive: INTAKE/DETECT/GRAPH/PLAN/REPORT
+apkmod.py <apk> --detect --graph           # read-only, any APK
+apkmod.py <apk> --plan --authorized "..."  # DRY-RUN patch manifest (authorization recorded)
+apkmod.py <apk> --report                   # markdown report card in apk-runs/
+```
+
+- **Authorization boundary**: intake/detect/graph/report are read-only for
+  any APK. `--plan` requires `--authorized '<rights statement>'` (recorded in
+  the plan) and only writes a dry-run manifest — this slice never modifies an
+  APK. Applying patches (smali/dex edit → rebuild → sign → runtime verify) is
+  a separately-gated later stage.
+- **Evidence levels**: E1 SDK class present · E2 manifest meta-data
+  correlation · E3 application-owned caller via DEX call graph ·
+  E4 runtime-observed (out of static reach → `runtime: UNKNOWN`).
+- **Falsification is a step**: every finding lists the counter-evidence that
+  would weaken it (no app caller, presence-only, generic hint).
+- **Fingerprints** (`apk/fingerprints.json`) are reduced ORIGINAL signals —
+  short class prefixes + well-known public manifest keys; extend per-target
+  with `--fingerprints <extra.json>` (same schema, see
+  `apk/fingerprints.example-extra.json`).
+- **Patch candidates** name the narrowest application-owned chokepoint,
+  default action STUB-NOOP (avoids ClassNotFoundException), alternatives
+  (REMOVE-CALL / DOMAIN-BLOCK / UI-HIDE) with risk notes, rollback
+  metadata, and the runtime verification to run later.
+
+Requires `androguard` for DEX/binary-XML parsing (`uv pip install
+androguard`); `--intake` alone works with stdlib + AXML fallback.
 
 ## General APK / target model
 

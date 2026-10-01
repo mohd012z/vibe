@@ -1,0 +1,13 @@
+{
+  "note": "Example EXTRA fingerprint DB (for proprietary/obfuscated SDKs not in the built-in reduced DB). Merge with --fingerprints. Keep entries short; original only.",
+  "sdkClassPrefixes": {
+    "FIXTURE_SDK": ["com/fixture/sdkads/"]
+  },
+  "analyticsClassPrefixes": {
+    "FIXTURE_ANALYTICS": ["com/fixture/analytics/"]
+  },
+  "manifestMetaKeys": {
+    "FIXTURE_SDK": ["fixture.sdk.key"]
+  },
+  "chokepointMethods": []
+}
