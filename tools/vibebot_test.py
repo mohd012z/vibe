@@ -365,6 +365,66 @@ def main() -> int:
             print("== P3a graph: SKIP (androguard not installed) ==")
 
         if HAVE_ANDROGUARD:
+            print("== P4: /find TargetFinder + canonical EntityResolver ==")
+            # fresh gateway (stateful /find needs a prior /apk in the SAME gw)
+            gwf = gateway.Gateway(td)
+            reply, jf = gwf.handle(f"/apk {FIXTURE}", user="test")
+            gwf.process_pending()
+            if jf is not None and jf.result is not None:
+                sha_f = jf.result.intake["sha256"][:16]
+                # the signature Phase-6 query: where does this text come from
+                r, _ = gwf.handle(f"/find ad-unit --sha {sha_f}")
+                check("find 'ad-unit' resolves to a string target",
+                      "S" in r and "DemoApp" in r and "onCreate" in r, r)
+                check("find 'ad-unit' carries evidence + claim state",
+                      "evidence E2" in r and "claim SUPPORTED" in r, r)
+                check("find 'ad-unit' gives the location chain",
+                      "classes.dex" in r, r)
+                r, _ = gwf.handle(f"/find MobileAds --sha {sha_f}")
+                check("find 'MobileAds' hits class layer",
+                      "[class]" in r and "C" in r, r)
+                r, _ = gwf.handle(f"/find zzz-no-such --sha {sha_f}")
+                check("find no-match is honest (no fake target)",
+                      "no match" in r, r)
+                r, _ = gwf.handle("/find ad-unit --sha ZZZZ")
+                check("find rejects bad sha", "hex, 8..64" in r, r)
+                r, _ = gwf.handle("/find")
+                check("find with no query is honest", "TargetFinder" in r or "--sha" in r, r)
+
+            # EntityResolver — the deterministic cross-provider identity service
+            from vibebot import graphutil as gu
+            known = [
+                {"provider": "androguard", "name": "com.x.Foo.bar", "canonical_id": "M1",
+                 "fingerprints": gu._fp_fingerprints("com.x.foo.bar")},
+                {"provider": "radare2", "name": "fcn.001234", "canonical_id": "N1",
+                 "fingerprints": {"name_sha1": "deadbeef"}},
+            ]
+            r = gu.resolve_entity(known, "androguard", "com.x.Foo.bar")
+            check("resolver EXACT (same provider+name)",
+                  r["status"] == "EXACT" and r["canonical_id"] == "M1", str(r))
+            r = gu.resolve_entity(known, "jadx", "com.x.Foo.bar",
+                                  fingerprints=known[0]["fingerprints"])
+            check("resolver STRONG (cross-provider fingerprint)",
+                  r["status"] == "STRONG" and r["canonical_id"] == "M1", str(r))
+            r = gu.resolve_entity(known, "jadx", "totallyDifferent",
+                                  fingerprints={"name_sha1": "deadbeef"})
+            check("resolver CONFLICT (fp matches, name differs)",
+                  r["status"] == "CONFLICT" and r["canonical_id"] is None, str(r))
+            k2 = [{"provider": "p", "name": "foo", "canonical_id": "A", "fingerprints": {}},
+                  {"provider": "p", "name": "foobar", "canonical_id": "B", "fingerprints": {}}]
+            r = gu.resolve_entity(k2, "q", "foo")
+            check("resolver AMBIGUOUS (name hits >1, no fp)",
+                  r["status"] == "AMBIGUOUS" and r["canonical_id"] is None, str(r))
+            r = gu.resolve_entity(known, "x", "Foo.bar.baz")
+            check("resolver PROBABLE (single partial, low trust)",
+                  r["status"] in ("PROBABLE", "UNRESOLVED"), str(r))
+            r = gu.resolve_entity(known, "x", "nothing-here-at-all")
+            check("resolver UNRESOLVED", r["status"] == "UNRESOLVED", str(r))
+            check("mapping states are the canonical six",
+                  set(gu.MAPPING_STATUS) ==
+                  {"EXACT", "STRONG", "PROBABLE", "AMBIGUOUS", "CONFLICT", "UNRESOLVED"})
+
+        if HAVE_ANDROGUARD:
             print("== P2: dexmapper engine (androguard decoder) ==")
             from vibebot import dexmapper
             gwd = gateway.Gateway(td)

@@ -372,6 +372,178 @@ def cross_layer_paths(graph: dict, limit: int = 10) -> list[dict]:
     return paths
 
 
+# ======================================================================
+# P4 — TargetFinder  +  canonical EntityResolver (deterministic service)
+# ======================================================================
+
+def find_targets(graph: dict, query: str, limit: int = 10) -> list[dict]:
+    """Phase 6 /find: locate where a query string comes from, androguard-only.
+
+    Cheapest-capable search over the Vibe IR layers:
+      string (S) → resource (R) → class (C) → method (M) → component (K)
+    Substring, case-insensitive. Every hit returns a TARGET with:
+      layer, entity id(s), location chain (A1 → dex → class → method),
+      references, evidence level + claim state (CodeTransparent #14).
+    """
+    q = (query or "").strip().lower()
+    if not q:
+        return []
+    targets: list[dict] = []
+    nodes = graph["nodes"]
+
+    # method/class name lookup needs a class -> dex map
+    class_dex = {c["name"]: c["dex"] for c in nodes["class"]}
+
+    # --- strings (the Phase-6 signature layer) --------------------------
+    for s in nodes["string"]:
+        if q in s["value"].lower():
+            refs = s.get("refs", [])
+            evid = "E2" if refs else "E1"   # E2 = DEX instruction ref; E1 = in table only
+            state = "SUPPORTED" if refs else "PROPOSED"
+            locs = []
+            for r in refs[:5]:
+                cls = r["class"]
+                locs.append(f"A1 → {class_dex.get(cls, '?')} → {cls} → {r['method']}()")
+            targets.append({
+                "query": query, "layer": "string", "id": s["id"],
+                "value": s["value"], "count": s["count"],
+                "location": locs, "refs": refs,
+                "evidence": evid, "claim": state,
+                "detail": f"string in {len(refs)} method(s) (of {s['count']} refs)",
+            })
+
+    # --- resources -----------------------------------------------------
+    for r in nodes["resource"]:
+        if q in r["value"].lower():
+            targets.append({
+                "query": query, "layer": "resource", "id": r["id"],
+                "value": r["value"], "count": 1,
+                "location": [f"A1 → res → {r['value']}"],
+                "refs": [], "evidence": "E1", "claim": "PROPOSED",
+                "detail": f"resource ({r['source']})",
+            })
+
+    # --- classes -------------------------------------------------------
+    for c in nodes["class"]:
+        if q in c["name"].lower():
+            mids = [m["id"] for m in nodes["method"] if m["class"] == c["name"]]
+            targets.append({
+                "query": query, "layer": "class", "id": c["id"],
+                "value": c["name"], "count": len(mids),
+                "location": [f"A1 → {c['dex']} → {c['name']}"],
+                "refs": [], "evidence": "E2", "claim": "SUPPORTED",
+                "detail": f"class with {len(mids)} method(s): {', '.join(mids[:4])}",
+            })
+
+    # --- methods -------------------------------------------------------
+    for m in nodes["method"]:
+        if q in (m["class"] + "." + m["name"]).lower():
+            targets.append({
+                "query": query, "layer": "method", "id": m["id"],
+                "value": f"{m['class']}.{m['name']}", "count": 1,
+                "location": [f"A1 → {m['dex']} → {m['class']} → {m['name']}()"],
+                "refs": [], "evidence": "E2",
+                "claim": "SUPPORTED",
+                "detail": "native" if m["native"] else "dex method",
+            })
+
+    # --- components (manifest-declared) --------------------------------
+    for k in nodes["component"]:
+        if q in k["name"].lower() or q in k["kind"].lower():
+            targets.append({
+                "query": query, "layer": "component", "id": k["id"],
+                "value": k["name"], "count": 1,
+                "location": [f"A1 → manifest → {k['kind']} {k['name']}"],
+                "refs": [], "evidence": "E1", "claim": "SUPPORTED",
+                "detail": f"manifest {k['kind']}",
+            })
+
+    # rank: strings/resources (Phase-6 answer) first, then structural
+    order = {"string": 0, "resource": 1, "class": 2, "method": 3, "component": 4}
+    targets.sort(key=lambda t: (order.get(t["layer"], 9), t["id"]))
+    return targets[:limit]
+
+
+def render_find(targets: list[dict], query: str, sha: str) -> str:
+    if not targets:
+        return (f"find '{query}': no match in Vibe IR (strings, resources, "
+                f"classes, methods, components) — sha[:8]={sha[:8]}")
+    lines = [f"TARGETS for '{query}'  (sha[:8]={sha[:8]}  — /find is cheapest-capable)"]
+    for i, t in enumerate(targets, 1):
+        lines.append(f"  T-{i}  [{t['layer']}] {t['id']}  {t['value']}")
+        for loc in t["location"]:
+            lines.append(f"         {loc}")
+        lines.append(f"         evidence {t['evidence']}  claim {t['claim']}  {t['detail']}")
+    return "\n".join(lines)
+
+
+# ---------------- canonical EntityResolver (deterministic) -------------
+
+MAPPING_STATUS = ("EXACT", "STRONG", "PROBABLE", "AMBIGUOUS", "CONFLICT", "UNRESOLVED")
+
+
+def _fp_fingerprints(name: str) -> dict:
+    """Cheap structural fingerprints for cross-provider matching.
+
+    These are NOT byte-level (a real provider supplies module_sha256 /
+    instruction bytes); for the skeleton they are name-derived so the
+    STRONG-vs-PROBABLE logic is exercised and testable. A real Radare/Ghidra
+    provider will replace this with true byte/instruction/cfg fingerprints.
+    """
+    import hashlib
+    return {"name_sha1": hashlib.sha1(name.lower().encode()).hexdigest()[:16]}
+
+
+def resolve_entity(known: list[dict], provider: str, name: str,
+                   fingerprints: dict | None = None) -> dict:
+    """Map a provider entity to a canonical entity — deterministically.
+
+    known: list of {"provider","name","canonical_id","fingerprints"}.
+    Returns {"status","canonical_id","candidates","note"}.
+
+    Rules (CodeTransparent-safe — never merge PROBABLE as EXACT):
+      EXACT      same provider + same name (deterministic provider)
+      STRONG     another provider + matching structural fingerprint
+      CONFLICT   fingerprint matches but candidate already EXACT-matched to a
+                 DIFFERENT name
+      AMBIGUOUS  name matches >1 candidate with no fingerprint to disambiguate
+      PROBABLE   no other candidate, name similar (last resort, low trust)
+      UNRESOLVED nothing close
+    """
+    name_l = (name or "").lower()
+    fp = fingerprints or _fp_fingerprints(name)
+    # EXACT
+    for k in known:
+        if k["provider"] == provider and (k["name"] or "").lower() == name_l:
+            return {"status": "EXACT", "canonical_id": k["canonical_id"],
+                    "candidates": [k["canonical_id"]],
+                    "note": "same provider + same name"}
+    # STRONG / CONFLICT by fingerprint
+    fp_hits = [k for k in known
+               if (k.get("fingerprints") or {}).get("name_sha1") == fp.get("name_sha1")]
+    if fp_hits:
+        if any((k["name"] or "").lower() != name_l for k in fp_hits):
+            return {"status": "CONFLICT", "canonical_id": None,
+                    "candidates": [k["canonical_id"] for k in fp_hits],
+                    "note": "fingerprint matches but name differs (provider disagreement)"}
+        return {"status": "STRONG", "canonical_id": fp_hits[0]["canonical_id"],
+                "candidates": [k["canonical_id"] for k in fp_hits],
+                "note": "cross-provider structural fingerprint match"}
+    # AMBIGUOUS by name (multiple, no fingerprint)
+    name_hits = [k for k in known if name_l and name_l in (k["name"] or "").lower()]
+    if len(name_hits) > 1:
+        return {"status": "AMBIGUOUS", "canonical_id": None,
+                "candidates": [k["canonical_id"] for k in name_hits],
+                "note": f"{len(name_hits)} candidates share the name; need a fingerprint"}
+    # PROBABLE (single partial name, low trust)
+    if name_hits:
+        return {"status": "PROBABLE", "canonical_id": name_hits[0]["canonical_id"],
+                "candidates": [name_hits[0]["canonical_id"]],
+                "note": "single name-similarity candidate (low trust — do not treat as EXACT)"}
+    return {"status": "UNRESOLVED", "canonical_id": None, "candidates": [],
+            "note": "no matching known entity"}
+
+
 def render_overview(graph: dict, sha: str) -> str:
     """/apk Phase-1 card: situational awareness, not deep RE.
 

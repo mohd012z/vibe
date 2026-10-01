@@ -40,6 +40,7 @@ from . import engines
 HELP = """vibebot commands
   /apk <path>            APK overview + Vibe IR entity graph (stable IDs)
   /map <path>            entity graph tree + cross-layer paths (or --sha <…>)
+  /find <text> --sha <…> TargetFinder: strings/resources/classes/methods/components
   /analyze <path> [--engine apkmod|dexmapper] [--fingerprints <json>]
   /dex <path>            DEX Mapper job: class->method->call map + JNI + integrity
   /smali <name|0x..|substr>   query the Dalvik opcode table
@@ -102,8 +103,8 @@ class Gateway:
         """Parse one command, ACK immediately. Returns (reply, accepted job)."""
         parts = (text or "").strip().split()
         if not parts or parts[0] not in (
-                "/apk", "/map", "/analyze", "/dex", "/smali", "/base", "/hash",
-                "/dexcheck", "/dexrepair", "/status", "/jobs", "/sessions",
+                "/apk", "/map", "/find", "/analyze", "/dex", "/smali", "/base",
+                "/hash", "/dexcheck", "/dexrepair", "/status", "/jobs", "/sessions",
                 "/deepdive", "/report", "/cancel", "/help", "/start"):
             return HELP, None
         cmd = parts[0]
@@ -114,6 +115,8 @@ class Gateway:
         # ---- synchronous utility commands (fast; no heavy work) ---------
         if cmd == "/map":
             return self._map(parts[1:])
+        if cmd == "/find":
+            return self._find(parts[1:])
         if cmd == "/smali":
             return self._smali(parts[1:])
         if cmd == "/base":
@@ -265,6 +268,43 @@ class Gateway:
             return (f"session {sha[:8]}… has no Vibe IR graph layer yet "
                     f"(engines: {', '.join(sess.get('engines', []) or ['?'])}) — run /apk <path>"), None
         return graphutil.render_map(graph, sha), None
+
+    def _find(self, parts: list[str]) -> tuple[str, None]:
+        from . import graphutil
+        sha = self._arg(parts, "--sha")
+        # query = every token that isn't a flag or the --sha value
+        skip = set()
+        for i, p in enumerate(parts):
+            if p == "--sha":
+                skip.update({i, i + 1})
+            elif p.startswith("--"):
+                skip.add(i)
+        query = " ".join(p for i, p in enumerate(parts) if i not in skip).strip()
+        if not query:
+            return ("/find <text> --sha <sha256[:16]>   (TargetFinder over the Vibe IR: "
+                    "strings, resources, classes, methods, components — run /apk <path> first)"), None
+        if not sha:
+            last = self._last_job_sha()
+            hint = last[:16] if last else "<sha from /apk>"
+            return ("no --sha: run /apk <path> first, then /find <text> --sha "
+                    f"{hint}"), None
+        if not SHA_RE.match(sha.lower()):
+            return "/find <text> --sha <sha256[:16]> (hex, 8..64 chars)", None
+        sess = self.sessions.load(sha)
+        if not sess:
+            return f"no session for {sha[:8]}… — run /apk <path> first", None
+        graph = (sess.get("structural") or {}).get("graph")
+        if not graph:
+            return (f"session {sha[:8]}… has no Vibe IR graph layer yet — run /apk <path>"), None
+        targets = graphutil.find_targets(graph, query)
+        return graphutil.render_find(targets, query, sha), None
+
+    def _last_job_sha(self) -> str | None:
+        j = self._last_job_id()
+        if not j:
+            return None
+        job = self.jobs.get(j)
+        return (job.result.intake.get("sha256") if job and job.result else None)
 
     # ------------------------------------------------- P2 utility handlers
     def _smali(self, parts: list[str]) -> tuple[str, None]:
