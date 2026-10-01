@@ -310,6 +310,14 @@ P25 self-improvement eval.
   + `/why` CLAIM→EVIDENCE→REF→ARTIFACT trace. NOT OBSERVED ≠ IMPOSSIBLE
   (orphan strings PROPOSED; native = "backing .so NOT OBSERVED"); coverage
   is a statement, never a fake confidence %. 172 checks.
+- **P6 (CapabilityRouter + AnalysisBudget/stop-controller)** — DONE:
+  `tools/vibebot/router.py` = live provider registry (honest detection) +
+  METHOD_CATALOG (cheapest-capable ranking by evidence/cost, unavailable
+  degrades honestly) + Budget (wall/calls/depth + stall detector) +
+  watchdog for non-cooperative engines. `core.Job` enforces the budget at
+  every progress/checkpoint; `JobManager._run` wraps each engine in the
+  watchdog; `/plan <goal>` + `/capabilities` + `--max-wall` flags. Every job
+  now has a default 300s wall cap — nothing hangs. 194 checks.
 - **P0 (CI + regression)** — STILL OPEN: PR #5 has
   `tests/test_apk_pipeline.py` + `tools/apk_pipeline.py` but CI runs only the
   legacy `tools/apkmod_test.py`. The new pipeline suite never executes in CI.
