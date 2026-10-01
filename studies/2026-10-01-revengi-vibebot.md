@@ -400,6 +400,22 @@ P25 self-improvement eval.
   shows "none"); the positive case is covered by pure synthetic-record tests
   (a real shrunken-enum APK is the ground-truth to add, like xmatch's branch
   limitation).
+- **P14 (hybrid / JS-layer detector)** — DONE (v0.13, `c52937c`):
+  `tools/vibebot/hybridscan.py` — deterministic hybrid-app JS-layer detector
+  (lupoxyz technique #4). Recognizes WHERE a hybrid APK keeps its REAL logic:
+  uni-app (`assets/apps/_UNI_*/www/app-service.js`), Cordova (`www/cordova.js`),
+  React Native (`assets/index.android.bundle`), Flutter (`flutter_assets/`,
+  flagged as a `.so` — not a JS layer). Pure core (`classify` over ZIP entry
+  names) = unit-testable on synthetic name lists; thin zip + DEX-bridge glue
+  adds DEX-side signals (WebView instantiated, `addJavascriptInterface` /
+  JsInterface use). Wired into `build_graph` as a `hybrid` layer: `/apk`
+  overview gains a `logic layer` line, `/map` gains a full HYBRID / JS LAYER
+  section with the "Patch the JS entry, not the smali" directive. NOT OBSERVED
+  degrades honestly. Cordova's bare `plugins/` marker removed (would
+  false-positive on any path containing `plugins/`). 322 checks (+12). Note:
+  the fixture is a minimal native APK (no assets/), so the e2e verifies the
+  NEGATIVE path; positive detection is covered by pure synthetic-name-list
+  tests (uni-app/Cordova/RN/Flutter).
 - **Kotlin @Metadata name recovery** — STILL DEFERRED (honest disclosure):
   message-level field numbers verified against the authoritative
   `core/metadata/src/metadata.proto` (Function.name=2, Class.function=9,
