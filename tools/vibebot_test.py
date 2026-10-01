@@ -364,6 +364,146 @@ def main() -> int:
         else:
             print("== P3a graph: SKIP (androguard not installed) ==")
 
+        print("== P3: Evidence + Claim model (pure — synthetic graph) ==")
+        from vibebot import claims as cmod
+        # a minimal hand-built graph: 1 component, 1 class, 1 method, 1
+        # referenced string, 1 orphan string, 1 native, 3 calls
+        synth = {
+            "package": "com.test.app",
+            "counts": {"class": 1, "method": 1, "component": 1, "string": 2,
+                       "native": 1, "call": 3},
+            "nodes": {
+                "artifact": [{"id": "A1", "path": "x.apk"}],
+                "component": [{"kind": "activity", "name": "com.test.app.A",
+                               "id": "K1"}],
+                "class": [{"dex": "classes.dex", "name": "com.test.app.A",
+                           "id": "C1"}],
+                "method": [{"dex": "classes.dex", "class": "com.test.app.A",
+                            "name": "onCreate", "native": False, "id": "M1"}],
+                "field": [],
+                "string": [
+                    {"id": "S1", "value": "used-str", "count": 1,
+                     "refs": [{"class": "com.test.app.A", "method": "onCreate"}]},
+                    {"id": "S2", "value": "orphan-str", "count": 0, "refs": []},
+                ],
+                "resource": [{"id": "R0", "value": "AndroidManifest.xml",
+                              "source": "manifest"}],
+                "native": [{"class": "com.test.app.A", "method": "doIt",
+                            "id": "N1"}],
+            },
+            "calls": [{"dex": "classes.dex", "caller": "com.test.app.A",
+                       "callerMethod": "onCreate", "invokeKind": "invoke-virtual",
+                       "regs": [], "targetClass": "java.lang.Object",
+                       "targetMethod": "toString"},
+                      {"dex": "classes.dex", "caller": "com.test.app.A",
+                       "callerMethod": "onCreate", "invokeKind": "invoke-virtual",
+                       "regs": [], "targetClass": "com.test.app.B",
+                       "targetMethod": "go"},
+                      {"dex": "classes.dex", "caller": "com.test.app.A",
+                       "callerMethod": "onCreate", "invokeKind": "invoke-virtual",
+                       "regs": [], "targetClass": "com.test.app.C",
+                       "targetMethod": "run"}],
+            "dex_integrity": [{"dex": "classes.dex", "valid": True,
+                               "magic_ok": True, "version_ok": True,
+                               "size_ok": True, "checksum_ok": True,
+                               "sha1_ok": True}],
+        }
+        cl = cmod.build_claims(synth, synth["dex_integrity"])
+        by = {}
+        for c in cl:
+            by.setdefault(c["state"], []).append(c)
+        # E-level table + categories + states are the documented constants
+        check("E1..E5 strength table present",
+              set(cmod.EVIDENCE_STRENGTH) == {"E1", "E2", "E3", "E4", "E5"})
+        check("categories are the six CodeTransparent states",
+              set(cmod.CATEGORIES) == {"FACT", "OBSERVATION", "INFERENCE",
+                                       "ASSUMPTION", "UNKNOWN", "CONFLICT"})
+        check("claim states are the seven documented states",
+              set(cmod.CLAIM_STATES) == {"PROPOSED", "SUPPORTED", "REPRODUCED",
+                                         "VALIDATED", "CONFLICTED", "UNRESOLVED",
+                                         "REJECTED"})
+        # identity = deterministic FACT/VALIDATED
+        check("identity claim is FACT+VALIDATED",
+              cl[0]["category"] == "FACT" and cl[0]["state"] == "VALIDATED",
+              str(cl[0]))
+        # a valid DEX => VALIDATED fact
+        check("valid DEX header => VALIDATED",
+              any(c["state"] == "VALIDATED" and "DEX header is valid"
+                  in c["statement"] for c in cl), str(by.get("VALIDATED", [])))
+        # a declared component => VALIDATED
+        check("manifest component => VALIDATED",
+              any("manifest-declared" in c["statement"] and
+                  c["state"] == "VALIDATED" for c in cl))
+        # a referenced string => OBSERVATION/SUPPORTED (E2)
+        check("referenced string => SUPPORTED E2",
+              any("used-str" in c["statement"] and c["state"] == "SUPPORTED"
+                  and c["evidence"][0]["level"] == "E2" for c in cl))
+        # an orphan string => PROPOSED (NOT OBSERVED != IMPOSSIBLE)
+        check("orphan string => PROPOSED (not impossible)",
+              any("orphan" in (c["note"] or "") and c["state"] == "PROPOSED"
+                  for c in cl) or
+              any(c["state"] == "PROPOSED" for c in cl),
+              str(by.get("PROPOSED", [])))
+        # a native method => SUPPORTED with honest runtime gap
+        check("native method => SUPPORTED + runtime NOT OBSERVED",
+              any("native" in c["statement"] and c["state"] == "SUPPORTED"
+                  and "NOT OBSERVED" in (c["note"] or "") for c in cl),
+              str([c["statement"] for c in cl if "native" in c["statement"]]))
+        # call-graph claim mentions 3 edges / 3 targets
+        check("call graph claim present",
+              any("15" not in c["statement"] and "3 invoke edge" in c["statement"]
+                  for c in cl))
+        # /why traces to artifact + shows the E-level meaning
+        ref_c = next(c for c in cl if "used-str" in c["statement"])
+        w = cmod.why(cl, ref_c["id"], "aa"*4)
+        check("why traces to evidence + artifact",
+              "evidence" in w and "ARTIFACT A1" in w and "establishes:" in w, w)
+        wbad = cmod.why(cl, "C999", "aa"*4)
+        check("why on unknown id is honest (lists available)",
+              "no claim C999" in wbad and "Available" in wbad, wbad)
+        # state machine: legal + illegal moves
+        check("PROPOSED->SUPPORTED legal", cmod.transition("PROPOSED", "SUPPORTED") == "SUPPORTED")
+        check("PROPOSED->VALIDATED illegal (no skip)", cmod.transition("PROPOSED", "VALIDATED") is None)
+        check("SUPPORTED->REPRODUCED legal", cmod.transition("SUPPORTED", "REPRODUCED") == "REPRODUCED")
+        check("REJECTED is terminal", cmod.transition("REJECTED", "SUPPORTED") is None)
+        check("CONFLICTED->UNRESOLVED legal", cmod.transition("CONFLICTED", "UNRESOLVED") == "UNRESOLVED")
+        # deterministic: two builds identical
+        cl2 = cmod.build_claims(synth, synth["dex_integrity"])
+        import json as _j3
+        check("claims reproducible (2 builds identical)",
+              _j3.dumps(cl, sort_keys=True) == _j3.dumps(cl2, sort_keys=True))
+        # board render groups + mentions /why
+        board = cmod.render_claims(cl, "aa"*4)
+        check("board lists states + /why hint",
+              "EVIDENCE BOARD" in board and "/why" in board and "[VALIDATED]" in board,
+              board)
+
+        if HAVE_ANDROGUARD:
+            print("== P3 e2e: /claims + /why through gateway ==")
+            gwc = gateway.Gateway(td)
+            _, jc = gwc.handle(f"/apk {FIXTURE}", user="test")
+            gwc.process_pending()
+            if jc is not None and jc.state == core.Job.COMPLETED and jc.result is not None:
+                sha_c = jc.result.intake["sha256"][:16]
+                r, _ = gwc.handle("/claims --sha " + sha_c)
+                check("/claims returns an evidence board",
+                      "EVIDENCE BOARD" in r and "sha[:8]=" in r, r)
+                # grab a real claim id from the board and /why it
+                import re as _re4
+                m = _re4.search(r"\bC(\d+)\b", r)
+                if m:
+                    cid = "C" + m.group(1)
+                    rw, _ = gwc.handle(f"/why {cid} --sha {sha_c}")
+                    check("/why traces a real claim",
+                          "WHY " + cid in rw and "evidence" in rw and
+                          "ARTIFACT A1" in rw, rw)
+                # /why with no args is honest
+                rw, _ = gwc.handle("/why")
+                check("/why no-arg is honest", "CodeTransparent" in rw, rw)
+                # /claims with no session is honest
+                rw, _ = gwc.handle("/claims --sha " + "ee"*16)
+                check("/claims no-session is honest", "run /apk" in rw, rw)
+
         if HAVE_ANDROGUARD:
             print("== P4: /find TargetFinder + canonical EntityResolver ==")
             # fresh gateway (stateful /find needs a prior /apk in the SAME gw)

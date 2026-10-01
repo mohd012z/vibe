@@ -82,6 +82,19 @@ def build_graph(artifact: str) -> dict:
              "calls": [...]} — every node dict carries a stable "id".
     """
     dexes = dexmapper._dex_bytes(artifact)
+    # per-DEX byte-level integrity (E2) — feeds the claim builder
+    from . import dexutil
+    dex_integrity = []
+    for dname, db in dexes:
+        try:
+            rep = dexutil.check_header(db)
+        except Exception as e:
+            rep = {"valid": False, "dex": dname,
+                   "error": f"header check failed: {e}", "details": []}
+        rep.setdefault("dex", dname)
+        dex_integrity.append({k: rep.get(k) for k in
+                              ("dex", "valid", "magic_ok", "version_ok",
+                               "size_ok", "checksum_ok", "sha1_ok")})
     # ---- manifest / components (apk only) -----------------------------
     components: list[dict] = []
     package = None
@@ -214,6 +227,7 @@ def build_graph(artifact: str) -> dict:
         "library_files": [],  # populated by the engine from intake
         "certificates": [],   # populated by the engine
         "counts": counts,
+        "dex_integrity": dex_integrity,
         "nodes": {
             "artifact": [{"id": "A1", "path": None}],  # path set by caller
             "component": components,
@@ -316,16 +330,23 @@ class ApkGraphEngine(core.Engine):
             }
             findings.append(core.normalize_finding(raw, self.spec.name, 2))
 
+        # P3: derive the first-class claim set from the graph (+ DEX integrity)
+        from . import claims as _claims
+        claims_list = _claims.build_claims(g, g.get("dex_integrity"))
+
         return core.EngineResult(
             intake={"sha256": sha, "package": g.get("package"),
                     "dexCount": len(g.get("dex_files", [])),
                     "classCount": g["counts"]["class"],
                     "methodCount": g["counts"]["method"]},
-            structural={"graph": g, "overview": render_overview(g, sha)},
+            structural={"graph": g, "overview": render_overview(g, sha),
+                        "claims": claims_list,
+                        "claims_board": _claims.render_claims(claims_list, sha)},
             findings=findings,
             report_md=render_overview(g, sha) + "\n\n" + render_map(g, sha),
             outputs={"report": rep, "overview": render_overview(g, sha),
-                     "map": render_map(g, sha)},
+                     "map": render_map(g, sha),
+                     "claims": _claims.render_claims(claims_list, sha)},
         )
 
 

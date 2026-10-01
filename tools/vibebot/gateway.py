@@ -41,6 +41,8 @@ HELP = """vibebot commands
   /apk <path>            APK overview + Vibe IR entity graph (stable IDs)
   /map <path>            entity graph tree + cross-layer paths (or --sha <…>)
   /find <text> --sha <…> TargetFinder: strings/resources/classes/methods/components
+  /claims [--sha <…>]    Evidence board: every claim + state + E-level
+  /why <C-id> [--sha <…>] CodeTransparent trace: claim -> evidence -> bytes
   /analyze <path> [--engine apkmod|dexmapper] [--fingerprints <json>]
   /dex <path>            DEX Mapper job: class->method->call map + JNI + integrity
   /smali <name|0x..|substr>   query the Dalvik opcode table
@@ -103,9 +105,10 @@ class Gateway:
         """Parse one command, ACK immediately. Returns (reply, accepted job)."""
         parts = (text or "").strip().split()
         if not parts or parts[0] not in (
-                "/apk", "/map", "/find", "/analyze", "/dex", "/smali", "/base",
-                "/hash", "/dexcheck", "/dexrepair", "/status", "/jobs", "/sessions",
-                "/deepdive", "/report", "/cancel", "/help", "/start"):
+                "/apk", "/map", "/find", "/claims", "/why", "/analyze", "/dex",
+                "/smali", "/base", "/hash", "/dexcheck", "/dexrepair", "/status",
+                "/jobs", "/sessions", "/deepdive", "/report", "/cancel",
+                "/help", "/start"):
             return HELP, None
         cmd = parts[0]
 
@@ -117,6 +120,10 @@ class Gateway:
             return self._map(parts[1:])
         if cmd == "/find":
             return self._find(parts[1:])
+        if cmd == "/claims":
+            return self._claims(parts[1:])
+        if cmd == "/why":
+            return self._why(parts[1:])
         if cmd == "/smali":
             return self._smali(parts[1:])
         if cmd == "/base":
@@ -305,6 +312,41 @@ class Gateway:
             return None
         job = self.jobs.get(j)
         return (job.result.intake.get("sha256") if job and job.result else None)
+
+    def _claims(self, parts: list[str]) -> tuple[str, None]:
+        from . import claims as cmod
+        sha = self._arg(parts, "--sha")
+        if not sha:
+            last = self._last_job_sha()
+            if not last:
+                return "run /apk <path> first, then /claims --sha <…>", None
+            sha = last
+        if not SHA_RE.match(sha.lower()):
+            return "/claims --sha <sha256[:16]>", None
+        sess = self.sessions.load(sha)
+        cl = (sess or {}).get("structural", {}).get("claims")
+        if not cl:
+            return (f"session {sha[:8]}… has no claim set yet — run /apk <path>"), None
+        return cmod.render_claims(cl, sha), None
+
+    def _why(self, parts: list[str]) -> tuple[str, None]:
+        from . import claims as cmod
+        if not parts:
+            return "/why <C-id> --sha <…>   (CodeTransparent trace for a claim)", None
+        claim_id = parts[0]
+        sha = self._arg(parts, "--sha")
+        if not sha:
+            last = self._last_job_sha()
+            if not last:
+                return "/why <C-id> --sha <…>", None
+            sha = last
+        if not SHA_RE.match(sha.lower()):
+            return "/why <C-id> --sha <sha256[:16]>", None
+        sess = self.sessions.load(sha)
+        cl = (sess or {}).get("structural", {}).get("claims")
+        if not cl:
+            return (f"session {sha[:8]}… has no claim set yet — run /apk <path>"), None
+        return cmod.why(cl, claim_id, sha), None
 
     # ------------------------------------------------- P2 utility handlers
     def _smali(self, parts: list[str]) -> tuple[str, None]:
