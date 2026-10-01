@@ -134,5 +134,11 @@ def default_capabilities() -> tuple[Capability, ...]:
         Capability("CLAIM_VALIDATE", "Validate the selected claim", providers=("vibe",)),
         Capability("CONTRADICTION_SEARCH", "Search for contradictory evidence", providers=("vibe",)),
         Capability("ANALYZE_IMPACT", "Analyze dependency impact", requires_target=True, providers=("vibe",)),
+        Capability("RUNTIME_MODULES", "Observe loaded runtime modules", providers=("runtime", "frida-gum")),
+        Capability("RUNTIME_SYMBOL_LOOKUP", "Resolve a runtime symbol", requires_target=True, providers=("runtime", "frida-gum")),
+        Capability("RUNTIME_TRACE", "Observe execution of an authorized runtime target", requires_target=True, providers=("runtime", "frida-gum")),
+        Capability("RUNTIME_BACKTRACE", "Collect an observed runtime call chain", requires_target=True, providers=("runtime", "frida-gum")),
+        Capability("RUNTIME_MEMORY_MAP", "Observe runtime memory regions", providers=("runtime", "frida-gum")),
+        Capability("RUNTIME_THREAD_MAP", "Observe runtime threads", providers=("runtime", "frida-gum")),
         Capability("PATCH_COMMIT", "Commit an authorized ChangeSet", access=Access.WRITE, requires_target=True, providers=("apk_pipeline",)),
     )
