@@ -38,14 +38,23 @@ from . import core
 from . import engines
 
 HELP = """vibebot commands
-  /analyze <path> [--engine apkmod|mock] [--fingerprints <json>]
-  /status [job-id]                         job state + progress
-  /jobs                                    all jobs
-  /sessions                                stored analysis sessions
-  /deepdive <target> --sha <sha>           stateful traverse (callers|native|references|<name>)
-  /report --sha <sha>                      stored report card
-  /cancel <job-id>                         cancel queued/running job
-  /help                                    this text"""
+  /analyze <path> [--engine apkmod|dexmapper] [--fingerprints <json>]
+  /dex <path>            DEX Mapper job: class->method->call map + JNI + integrity
+  /smali <name|0x..|substr>   query the Dalvik opcode table
+  /base <value> <from> <to>   convert between number bases (2..36)
+  /hash <text>           sha256 of a text string
+  /dexcheck <path>       validate DEX headers (sha1 + adler32 + version)
+  /dexrepair <path>      report what /dexrepair would fix (dry-run, read-only)
+  /status [job-id]       job state + progress
+  /jobs                  all jobs
+  /sessions              stored analysis sessions
+  /deepdive <target> --sha <sha>   stateful traverse (callers|native|references|<name>|jni)
+  /report --sha <sha>    stored report card
+  /cancel <job-id>       cancel queued/running job
+  /help                  this text
+
+P2 note: /asm and raw-hex /disasm are deferred to P3 (bit-level Dalvik
+encode/decode needs a ground-truth decoder cross-check; see study note)."""
 
 SHA_RE = re.compile(r"^[0-9a-f]{8,64}$")
 
@@ -66,24 +75,48 @@ class Gateway:
         self.work_dir = work_dir
         os.makedirs(work_dir, exist_ok=True)
         self.sessions = core.SessionStore(work_dir)
-        self.engines = engines_map or {
-            "apkmod": engines.ApkModEngine(os.path.join(work_dir, "reports")),
-            "mock": engines.MockEngine(),
-        }
+        self.engines = engines_map or self._default_engines()
         self.jobs = core.JobManager(self.engines, self.sessions)
+
+    def _default_engines(self) -> dict[str, core.Engine]:
+        m = {"apkmod": engines.ApkModEngine(os.path.join(self.work_dir, "reports")),
+             "mock": engines.MockEngine()}
+        # DEX Mapper needs androguard; register only if present so a
+        # stdlib-only env still works (mock + apkmod-intake).
+        try:
+            from . import dexmapper
+            if dexmapper._androguard():
+                m["dexmapper"] = dexmapper.DexMapperEngine(
+                    os.path.join(self.work_dir, "reports"))
+        except Exception:
+            pass
+        return m
 
     # ------------------------------------------------------------------ api
     def handle(self, text: str, user: str = "cli") -> tuple[str, core.Job | None]:
         """Parse one command, ACK immediately. Returns (reply, accepted job)."""
         parts = (text or "").strip().split()
         if not parts or parts[0] not in (
-                "/analyze", "/status", "/jobs", "/sessions", "/deepdive",
+                "/analyze", "/dex", "/smali", "/base", "/hash", "/dexcheck",
+                "/dexrepair", "/status", "/jobs", "/sessions", "/deepdive",
                 "/report", "/cancel", "/help", "/start"):
             return HELP, None
         cmd = parts[0]
 
         if cmd in ("/help", "/start"):
             return HELP, None
+
+        # ---- synchronous utility commands (fast; no heavy work) ---------
+        if cmd == "/smali":
+            return self._smali(parts[1:])
+        if cmd == "/base":
+            return self._base(parts[1:])
+        if cmd == "/hash":
+            return self._hash(parts[1:])
+        if cmd == "/dexcheck":
+            return self._dexcheck(parts[1:])
+        if cmd == "/dexrepair":
+            return self._dexrepair(parts[1:])
 
         if cmd == "/jobs":
             lines = [f"{j['id']}  {j['state']:<10} {j['command']:<12} "
@@ -102,6 +135,9 @@ class Gateway:
 
         if cmd == "/analyze":
             return self._analyze(parts[1:], user)
+
+        if cmd == "/dex":
+            return self._dex(parts[1:], user)
 
         if cmd == "/status":
             jid = parts[1] if len(parts) > 1 else self._last_job_id()
@@ -162,6 +198,132 @@ class Gateway:
             return f"error: {e}", None
         return (f"ACK {job.id}  engine={job.engine}\n"
                 f"  queued — /status {job.id}  /cancel {job.id}"), job
+
+    def _dex(self, parts: list[str], user: str) -> tuple[str, core.Job | None]:
+        if not parts:
+            return "/dex <path>   (DEX Mapper: class->method->call + JNI + integrity)", None
+        if "dexmapper" not in self.engines:
+            return ("error: DEX Mapper needs androguard "
+                    "(uv pip install androguard); /smali /base /hash /dexcheck "
+                    "/dexrepair still work on stdlib"), None
+        path = os.path.abspath(os.path.expanduser(parts[0]))
+        if not os.path.exists(path):
+            return f"error: artifact not found (refused: {os.path.basename(path)})", None
+        try:
+            job = self.jobs.submit("dex", path, user, "dexmapper")
+        except (KeyError, FileNotFoundError, RuntimeError) as e:
+            return f"error: {e}", None
+        return (f"ACK {job.id}  engine=dexmapper\n"
+                f"  queued — /status {job.id}  /cancel {job.id}"), job
+
+    # ------------------------------------------------- P2 utility handlers
+    def _smali(self, parts: list[str]) -> tuple[str, None]:
+        from . import smali
+        if not parts:
+            return ("/smali <name|0x..|substr> — query the Dalvik opcode "
+                    f"table ({smali.opcode_count()} opcodes). "
+                    "Examples: /smali invoke-virtual  /smali const  /smali 0x1a  /smali invoke"), None
+        q = parts[0]
+        # exact name
+        if q in smali.NAME_TO_OPCODE:
+            code = smali.NAME_TO_OPCODE[q]
+            r = smali.query(q)
+            row = r[0]
+            return (f"{row['name']}  0x{row['code']:02x}  fmt={row['format']}\n  {row['desc']}\n"
+                    f"  {smali.opcode_count()} opcodes in reduced table"), None
+        # hex code
+        if q.lower().startswith("0x") or q.isdigit():
+            try:
+                code = int(q, 16)
+            except ValueError:
+                return f"error: bad hex '{q}'", None
+            if code in smali.OPCODE_TABLE:
+                row = smali.query(q)[0]
+                return (f"{row['name']}  0x{code:02x}  fmt={row['format']}\n  {row['desc']}\n"
+                        f"  {smali.opcode_count()} opcodes in reduced table"), None
+            return f"error: 0x{code:02x} not in reduced opcode table", None
+        # substring
+        rows = smali.query(q)
+        if not rows:
+            return f"error: no opcode matching '{q}'", None
+        lines = [f"{len(rows)} opcodes matching '{q}':"]
+        for r in rows[:40]:
+            lines.append(f"  {r['name']:<18} 0x{r['code']:02x}  {r['format']}")
+        if len(rows) > 40:
+            lines.append(f"  … {len(rows) - 40} more")
+        return "\n".join(lines), None
+
+    def _base(self, parts: list[str]) -> tuple[str, None]:
+        from . import smali
+        if len(parts) < 3:
+            return "/base <value> <from> <to>  (bases 2..36; from/to as '10','16','2')", None
+        val_s, from_s, to_s = parts[0], parts[1], parts[2]
+        try:
+            from_b, to_b = int(from_s), int(to_s)
+        except ValueError:
+            return f"error: bases must be integers, got '{from_s}'/'{to_s}'", None
+        if not (2 <= from_b <= 36 and 2 <= to_b <= 36):
+            return "error: bases must be 2..36", None
+        try:
+            n = int(val_s, from_b)
+        except ValueError:
+            return f"error: '{val_s}' is not a valid base-{from_b} value", None
+        neg = n < 0
+        out = smali.to_base(abs(n), to_b)
+        return (f"{val_s} (base {from_b}) = "
+                f"{'-' if neg else ''}{out} (base {to_b})", None)
+
+    def _hash(self, parts: list[str]) -> tuple[str, None]:
+        if not parts:
+            return "/hash <text>  — sha256 of the text", None
+        import hashlib
+        text = " ".join(parts)
+        return f"sha256(\"{text}\") = {hashlib.sha256(text.encode()).hexdigest()}", None
+
+    def _dexcheck(self, parts: list[str]) -> tuple[str, None]:
+        from . import dexmapper
+        if not parts:
+            return "/dexcheck <path>  — validate DEX header(s)", None
+        path = os.path.abspath(os.path.expanduser(parts[0]))
+        if not os.path.exists(path):
+            return f"error: artifact not found (refused: {os.path.basename(path)})", None
+        try:
+            rows = dexmapper.dex_integrity(path)
+        except Exception as e:
+            return f"error: {e}", None
+        lines = ["DEX header check:"]
+        for r in rows:
+            lines.append(f"  {r['dex']}  valid={r['valid']}  version={r['version'].replace(chr(0), '')!r}")
+            for d in r["details"]:
+                lines.append(f"      {d}")
+        return "\n".join(lines), None
+
+    def _dexrepair(self, parts: list[str]) -> tuple[str, None]:
+        from . import dexmapper
+        if not parts:
+            return "/dexrepair <path>  — dry-run report (read-only; does not write)", None
+        path = os.path.abspath(os.path.expanduser(parts[0]))
+        if not os.path.exists(path):
+            return f"error: artifact not found (refused: {os.path.basename(path)})", None
+        try:
+            rows = dexmapper.dex_repair(path)
+        except Exception as e:
+            return f"error: {e}", None
+        lines = ["DEX repair (DRY-RUN — input not modified):"]
+        for r in rows:
+            rep = r["report"]
+            changed = "yes" if rep["changed"] else "no"
+            lines.append(f"  {r['dex']}  changed={changed}  "
+                         f"version={rep['version'].replace(chr(0), '')!r}")
+            if rep.get("magic_changed"):
+                lines.append(f"      magic: {rep['magic_changed']}")
+            if rep.get("sig_recomputed"):
+                lines.append("      sha1 signature: recomputed")
+            if rep.get("chk_recomputed"):
+                lines.append("      adler32 checksum: recomputed")
+        lines.append("  (a real /dexrepair writes the fixed bytes to a NEW file; "
+                     "this tool is read-only here)")
+        return "\n".join(lines), None
 
     def _deepdive(self, parts: list[str]) -> tuple[str, None]:
         if not parts:

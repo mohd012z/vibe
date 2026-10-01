@@ -75,7 +75,7 @@ apkmod.py <apk> --report                   # markdown report card in apk-runs/
 Requires `androguard` for DEX/binary-XML parsing (`uv pip install
 androguard`); `--intake` alone works with stdlib + AXML fallback.
 
-## VibeBot (RevEngi-style analysis gateway, v0.1)
+## VibeBot (RevEngi-style analysis gateway, v0.2)
 
 Study: `studies/2026-10-01-revengi-vibebot.md`. Architecture learned from
 RevEngiBot (detect format → select specialist engine → normalize result →
@@ -84,14 +84,23 @@ provenance**, and engines stay swappable behind one contract:
 
 ```
 client (CLI / Telegram)
-   -> gateway:      /analyze /status /jobs /sessions /deepdive /report /cancel
+   -> gateway:      /analyze /dex /smali /base /hash /dexcheck /dexrepair
+                    /status /jobs /sessions /deepdive /report /cancel
    -> job manager:  ACK immediately, queue, progress + checkpoints, cancel
-   -> engines:      apkmod adapter (INTAKE→DETECT→GRAPH→REPORT), mock
+   -> engines:      apkmod (INTAKE→DETECT→GRAPH→REPORT), dexmapper
+                    (class→method→call + JNI + integrity), mock
    -> Finding:      artifact → location → evidence → confidence →
                     alternatives → verification (runtime UNKNOWN until observed)
    -> sessions:     sha256 → structural map + findings + deepdive history
    -> /deepdive:    stateful traverse of the stored graph (no rescan)
 ```
+
+v0.2 (P2) adds the **DEX Mapper** (`/dex`) — a class → method → call map
+plus JNI/native inventory and DEX-header integrity, built on androguard's
+own decoder — and the static toolbox: `/smali` (Dalvik opcode table),
+`/base`, `/hash`, `/dexcheck`, `/dexrepair` (dry-run, read-only, byte-
+verified against the fixture). `/deepdive` is now engine-agnostic:
+`/deepdive calls | jni | <class> --sha <…>` traverses the stored DEX map.
 
 ```bash
 # one-shot: analyze the fixture APK + sample deepdive (needs androguard)
@@ -99,9 +108,9 @@ python3 tools/vibebot_cli.py --demo
 
 # interactive (type /help) or scripted (one command per line)
 python3 tools/vibebot_cli.py
-echo "/analyze /path/app.apk --engine apkmod
+echo "/dex /path/app.apk
 /sessions
-/deepdive callers --sha <sha256[:16]>" | python3 tools/vibebot_cli.py
+/deepdive calls --sha <sha256[:16]>" | python3 tools/vibebot_cli.py
 
 # Telegram transport (optional, off by default; token from env ONLY,
 # allowlist via VIBE_BOT_ALLOWED_USERS=123,456 — recommended)

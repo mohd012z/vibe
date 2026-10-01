@@ -27,7 +27,13 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOKEN_FILE = "/opt/data/vibebot/token.env"
 
 COMMANDS = [
-    ("analyze", "analysis job: /analyze <path> [--engine apkmod|mock]"),
+    ("analyze", "analysis job: /analyze <path> [--engine apkmod|dexmapper]"),
+    ("dex", "DEX Mapper: /dex <path> (class->method->call + JNI + integrity)"),
+    ("smali", "query Dalvik opcode table: /smali <name|0x..|substr>"),
+    ("dexcheck", "validate DEX header: /dexcheck <path>"),
+    ("dexrepair", "dry-run DEX repair report: /dexrepair <path>"),
+    ("base", "convert number bases: /base <value> <from> <to>"),
+    ("hash", "sha256 of text: /hash <text>"),
     ("status", "job state + progress"),
     ("jobs", "all jobs"),
     ("sessions", "stored analysis sessions"),

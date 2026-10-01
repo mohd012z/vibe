@@ -361,17 +361,21 @@ def _first_artifact(ev: list[dict]) -> str | None:
 def deepdive(session: dict, target: str) -> dict:
     """Traverse an EXISTING session for `target` without rescanning.
 
-    target forms:
-      * a class/method name (substring match across findings + location)
+    target forms (engine-agnostic; reads whatever the engine stored):
+      * a class/method name — substring match across findings + location +
+        (for dexmapper) the stored call graph
       * "callers"     — every application-owned caller referenced in findings
-      * "native"      — native libs from the structural map
+      * "native"/"jni" — native libs (apkmod) OR JNI inventory (dexmapper)
       * "references"  — all evidence rows (class/method refs)
-    Returns {"target":..., "matches":[...], "traversed":N} — matches are
-    normalized findings / structural entries with the path that linked them.
+      * "calls"       — dexmapper: every recorded method invocation
+    Returns {"target":..., "matches":[...], "traversed":N}.
     """
     t = (target or "").strip().lower()
     matches: list[dict] = []
     findings = session.get("findings", [])
+    structural = session.get("structural", {}) or {}
+    jni = structural.get("jni", [])
+    calls = structural.get("calls", [])
 
     if t in ("callers", "caller"):
         for f in findings:
@@ -385,8 +389,14 @@ def deepdive(session: dict, target: str) -> dict:
             for e in f.get("evidence", []):
                 if e.get("level") == "E3" and not f.get("callGraph"):
                     matches.append({"via": "E3 caller", "finding": f["id"],
-                                     "class": e.get("class"), "method": e.get("method"),
-                                     "detail": e.get("detail")})
+                                    "class": e.get("class"), "method": e.get("method"),
+                                    "detail": e.get("detail")})
+        # dexmapper: callers = every call where the caller is app-owned
+        for c in calls:
+            matches.append({"via": "caller", "class": c.get("caller"),
+                            "method": c.get("callerMethod"),
+                            "detail": f"{c.get('invokeKind')} -> "
+                                      f"{c.get('targetClass')}.{c.get('targetMethod')}"})
     elif t in ("references", "reference", "refs"):
         for f in findings:
             for e in f.get("evidence", []):
@@ -394,10 +404,20 @@ def deepdive(session: dict, target: str) -> dict:
                                 "class": e.get("class"), "method": e.get("method"),
                                 "artifact": e.get("artifact"),
                                 "detail": e.get("detail")})
-    elif t in ("native", "so", "elf"):
-        structural = session.get("structural", {})
+    elif t in ("native", "so", "elf", "jni"):
         for lib in structural.get("nativeLibs", []):
             matches.append({"via": "structural", "artifact": lib})
+        for j in jni:
+            matches.append({"via": "jni", "class": j.get("class"),
+                            "method": j.get("method"), "artifact": j.get("dex"),
+                            "detail": "native method (JNI entry point)"})
+    elif t in ("calls", "call"):
+        for c in calls:
+            matches.append({"via": "call", "class": c.get("caller"),
+                            "method": c.get("callerMethod"),
+                            "detail": f"{c.get('invokeKind')} "
+                                      f"{'{'+','.join(c.get('regs', []))+'} ' if c.get('regs') else ''}-> "
+                                      f"{c.get('targetClass')}.{c.get('targetMethod')}"})
     else:
         # substring match over findings (sdk/title/location)
         for f in findings:
@@ -409,10 +429,25 @@ def deepdive(session: dict, target: str) -> dict:
                 matches.append({"via": "substring", "finding": f["id"],
                                 "location": f.get("location"),
                                 "evidenceLevel": f.get("evidenceLevel")})
+        # dexmapper: substring over the stored call graph (caller or target)
+        for c in calls:
+            hay = f"{c.get('caller','')}.{c.get('callerMethod','')} " \
+                  f"{c.get('targetClass','')}.{c.get('targetMethod','')}".lower()
+            if t and t in hay:
+                matches.append({"via": "call", "class": c.get("caller"),
+                                "method": c.get("callerMethod"),
+                                "detail": f"{c.get('invokeKind')} -> "
+                                          f"{c.get('targetClass')}.{c.get('targetMethod')}"})
+        # dexmapper: substring over JNI inventory
+        for j in jni:
+            if t and t in f"{j.get('class','')}.{j.get('method','')}".lower():
+                matches.append({"via": "jni", "class": j.get("class"),
+                                "method": j.get("method"),
+                                "detail": "native method (JNI entry point)"})
 
     return {"target": target, "matchCount": len(matches), "matches": matches,
             "note": "traversed stored session (no rescan)" if matches
-                    else "no stored matches — run /analyze first"}
+                    else "no stored matches — run /analyze or /dex first"}
 
 
 def record_deepdive(store: SessionStore, sha256: str, target: str) -> dict:

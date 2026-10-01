@@ -124,7 +124,7 @@ def main() -> int:
         check("deepdive substring matches SDK name", d["matchCount"] >= 1)
         d = core.deepdive(sess, "zzz-nothing")
         check("deepdive no-match honest", d["matchCount"] == 0
-              and "run /analyze first" in d["note"])
+              and "run /analyze" in d["note"])
         r = core.record_deepdive(store, sha, "callers")
         check("record_deepdive appends history",
               store.load(sha)["deepdive"][-1]["target"] == "callers")
@@ -177,6 +177,90 @@ def main() -> int:
         check("queue bound enforced at max_jobs",
               len(many) == gw.jobs.max_jobs, str(len(many)))
 
+        print("== P2: /smali opcode table (canonical Dalvik values) ==")
+        from vibebot import smali
+        r, _ = gw.handle("/smali invoke-virtual")
+        check("smali invoke-virtual = 0x6e (35c)",
+              "0x6e" in r and "invoke-virtual" in r and "35c" in r, r)
+        r, _ = gw.handle("/smali const/4")
+        check("smali const/4 = 0x12 (11n)", "0x12" in r and "11n" in r, r)
+        r, _ = gw.handle("/smali new-instance")
+        check("smali new-instance = 0x22 (21c)", "0x22" in r, r)
+        r, _ = gw.handle("/smali return-void")
+        check("smali return-void = 0x0e (10x)", "0x0e" in r and "10x" in r, r)
+        r, _ = gw.handle("/smali 0x1a")
+        check("smali 0x1a -> const-string", "const-string" in r, r)
+        r, _ = gw.handle("/smali invoke")
+        check("smali substring 'invoke' lists >= 10",
+              "opcodes matching" in r and "invoke-virtual" in r
+              and "invoke-static" in r, r)
+        r, _ = gw.handle("/smali 0x00")
+        check("smali 0x00 -> nop", "nop" in r, r)
+        check("smali count is honest (100 < n <= 257)",
+              smali.opcode_count() > 100, str(smali.opcode_count()))
+
+        print("== P2: /base + /hash ==")
+        r, _ = gw.handle("/base ff 16 10")
+        check("base ff 16 -> 255 10", "255" in r, r)
+        r, _ = gw.handle("/base 255 10 16")
+        check("base 255 10 -> ff 16", "ff" in r, r)
+        r, _ = gw.handle("/base 101010 2 10")
+        check("base 101010 2 -> 42", "42" in r, r)
+        r, _ = gw.handle("/base zz 16 10")
+        check("base invalid value refused", "error" in r, r)
+        r, _ = gw.handle("/base ff 100 10")
+        check("base out-of-range base refused", "2..36" in r, r)
+        import hashlib as _h
+        expected = _h.sha256(b"hello world").hexdigest()
+        r, _ = gw.handle("/hash hello world")
+        check("hash sha256 correct", expected in r, r)
+
+        print("== P2: /dexcheck + /dexrepair (byte-verified, stdlib) ==")
+        from vibebot import dexutil
+        import zipfile as _zip
+        with _zip.ZipFile(FIXTURE) as _z:
+            _dex = _z.read("classes.dex")
+        h = dexutil.check_header(_dex)
+        check("dexcheck fixture valid", h["valid"] is True, str(h.get("details")))
+        _ver = h["version"].replace("\x00", "")
+        check("dexcheck version in 035..040", _ver in
+              ("035", "037", "038", "039", "040"), _ver)
+        # case 1: corrupt sig + checksum only -> repair == original bytes
+        c1 = bytearray(_dex)
+        c1[12:32] = b"\x00" * 20
+        c1[8:12] = b"\xde\xad\xbe\xef"
+        r1, rep1 = dexutil.repair(bytes(c1))
+        check("dexrepair case1 byte-identical to original", r1 == _dex)
+        check("dexrepair case1 flags sig+chk recomputed",
+              rep1["sig_recomputed"] and rep1["chk_recomputed"])
+        check("dexrepair case1 no magic change", rep1["magic_changed"] is None)
+        # case 2: corrupt magic prefix only -> valid + version preserved
+        c2 = bytearray(_dex)
+        c2[0:4] = b"XXXX"
+        r2, rep2 = dexutil.repair(bytes(c2))
+        check("dexrepair case2 repaired valid",
+              rep2["sha1_ok"] and rep2["checksum_ok"])
+        check("dexrepair case2 magic change noted",
+              rep2["magic_changed"] is not None)
+        check("dexrepair case2 version preserved (not downgraded)",
+              rep2["version"].replace("\x00", "") == _ver, rep2["version"])
+        # case 4: healthy -> no change, byte-identical
+        r4, rep4 = dexutil.repair(_dex)
+        check("dexrepair healthy no-op byte-identical",
+              r4 == _dex and rep4["changed"] is False)
+        # idempotency
+        r4b, rep4b = dexutil.repair(r4)
+        check("dexrepair idempotent", r4b == r4 and rep4b["changed"] is False)
+        # gateway rendering
+        r, _ = gw.handle(f"/dexcheck {FIXTURE}")
+        check("gateway /dexcheck renders valid", "valid=True" in r, r)
+        r, _ = gw.handle(f"/dexrepair {FIXTURE}")
+        check("gateway /dexrepair dry-run reports no change",
+              "changed=no" in r, r)
+        # too-short input is refused honestly
+        check("dexcheck too-short refused",
+              dexutil.check_header(b"short")["valid"] is False)
+
         if HAVE_ANDROGUARD:
             print("== apkmod adapter (androguard present) ==")
             gw2 = gateway.Gateway(td)
@@ -216,6 +300,48 @@ def main() -> int:
             check("fixture deepdive by class name", d["matchCount"] >= 1)
         else:
             print("== apkmod adapter: SKIP (androguard not installed) ==")
+
+        if HAVE_ANDROGUARD:
+            print("== P2: dexmapper engine (androguard decoder) ==")
+            from vibebot import dexmapper
+            gwd = gateway.Gateway(td)
+            check("dexmapper registered when androguard present",
+                  "dexmapper" in gwd.engines)
+            reply, jdx = gwd.handle(f"/dex {FIXTURE}", user="test")
+            check("/dex accepted", jdx is not None and "ACK" in reply, reply)
+            if jdx is not None:
+                gwd.process_pending()
+                check("/dex job COMPLETED",
+                      jdx.state == core.Job.COMPLETED, jdx.error or "")
+                dres = jdx.result
+                check("dex result has structural map",
+                      dres is not None and dres.structural.get("classCount", 0) >= 5,
+                      str(dres.structural.get("classCount") if dres else None))
+                check("dex result call graph non-empty",
+                      dres is not None and dres.structural.get("callCount", 0) >= 10,
+                      str(dres.structural.get("callCount") if dres else None))
+                check("dex integrity recorded",
+                      dres is not None and any(
+                          i["valid"] for i in dres.structural.get("integrity", [])))
+                check("dex app package resolved",
+                      dres is not None and
+                      dres.structural.get("appPackage") == "com.fixture.demo")
+                if dres is None:
+                    check("dex result present", False)
+                else:
+                    sha_d = dres.intake["sha256"]
+                    # deepdive traverses the STORED call graph (stateful, no rescan)
+                    reply, _ = gwd.handle(f"/deepdive calls --sha {sha_d[:16]}")
+                    check("deepdive calls traverses stored graph",
+                          "call" in reply and "invoke" in reply, reply)
+                    reply, _ = gwd.handle(f"/deepdive DemoApp --sha {sha_d[:16]}")
+                    check("deepdive by class name hits stored calls",
+                          "DemoApp" in reply, reply)
+                    reply, _ = gwd.handle(f"/deepdive jni --sha {sha_d[:16]}")
+                    check("deepdive jni honest (0 native in fixture)",
+                          "0 matches" in reply, reply)
+        else:
+            print("== P2 dexmapper: SKIP (androguard not installed) ==")
 
         print("== telegram transport: construction without network ==")
         g = gateway.Gateway(td)

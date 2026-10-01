@@ -74,6 +74,27 @@ digest here)
   auto-unregister TTL; /smali exact-vs-partial interactive match with
   20s timeout; every mutation command carries an explicit "only on APKs
   you have permission to modify" warning; reply-to-file vs inline input.
+- **LIVE bot menu (captured 2026-10-02 from the running RevEngi bot,
+  Anam's screenshots — authoritative, ~40 commands, alphabetical):**
+  /aab2apk convert AAB→APK · /apk interact with APK · /apkdl download APK
+  (playstore) · /apkid identify compilers/packers/obfuscators/trackers ·
+  /apkref resource anti-confusion · /apksign sign · /askai (+_exit/_new/
+  _model) AI chat · /asm asm→hex · /base number-base convert · /blutter
+  (Flutter) · /cancel · /cff obfuscate (control-flow flatten) dex ·
+  /cocos2d decrypt .jsc · /credits · /dex2c APK→C · /dex2jar · /dex2java ·
+  /dexrepair repair dex · /disasm hex→asm · /flutter_sub release subs ·
+  /frida_compile script→agent · /hash hash text/file · /hbc HBC tools ·
+  /inject DP/DexDumper/Sotap/Il2CppDumper · /java2smali · /jni_info extract
+  JNI signatures · /pairip patch PairIP split-APKs · /protect protect
+  apk/lib · /regex smart regex · /s2f smali→frida · /smali query smali
+  grammar · /smali2java · /ssl_patch SSL pinning · /testsign patch sign
+  verify · /toapk APKs/XAPKs/APKM→apk · /xml XML tools.
+  **Static-analysis subset to implement in vibe (P2/P3):** /apkid,
+  /dex2java, /dex2jar, /smali, /smali2java, /dexrepair, /jni_info, /hash,
+  /base, /asm, /disasm, /apk info. **Mutation/runtime (out of static
+  boundary, PLAN-level only):** /aab2apk, /apksign, /cff, /cocos2d, /inject,
+  /pairip, /protect, /s2f, /ssl_patch, /testsign, /frida_compile, /askai,
+  /apkdl (network), /toapk, /apkref, /hbc, /xml (compile).
 - `revengi-app` (MIT, Flutter v1.3.0): per-feature pattern
   `<feat>.dart / _base / _io / _web`; dio client defaulting to
   api.revengi.in; MethodChannel `flutter.native/helper` + EventChannel
@@ -147,12 +168,29 @@ REJECT / defer (evidence-based, not by vibe's DNA):
   sanitized filename (traversal-safe) → 200MB bound → analyze job →
   ACK + result (multipart sendDocument for smoke tests); allowlist
   enforced in the transport; deploy/validate script
-- **P2 (next)** — DEX Mapper + Smali Inspector engines: class → method →
-  reference map as first-class outputs; smali grammar from `smalig`
-  (MIT, 257-instruction yaml — track upstream, CI-sync pattern); DEX
-  repair salvage in INTAKE (magic 035-040, SHA-1@12, Adler-32@8 LE —
-  portable algorithm from revengi-app, reimplemented, ~15 lines);
-  `/graph` rendering, search over the evidence graph
+- **P2 (DONE, this PR)** — DEX Mapper + Smali Inspector engines:
+  - `tools/vibebot/dexutil.py` — DEX header validate + repair (stdlib, no
+    androguard). **Byte-verified** against the committed fixture: corrupt
+    sig+checksum → repair is byte-identical to original; corrupt magic →
+    valid + version preserved (not downgraded); healthy → no-op; idempotent.
+    Original reimplementation of the public DEX format facts.
+  - `tools/vibebot/smali.py` — canonical Dalvik opcode table + `/smali`
+    query (name / 0x../decimal / substring), plus `/base` + `/hash`.
+  - `tools/vibebot/dexmapper.py` — DEX Mapper engine built on androguard's
+    OWN instruction decoder (correct-by-construction): class → method →
+    call map, JNI/native inventory, DEX integrity; feeds the session for
+    stateful `/deepdive calls|jni|<class>`.
+  - gateway: `/dex <path>` (job), `/smali /base /hash /dexcheck /dexrepair`
+    (sync utilities).
+  - **EVIDENCE (bug caught by ground truth):** the first hand-remembered
+    opcode table had wrong values (e.g. `new-instance` 0x1f→0x22,
+    `invoke-virtual` 0x6e0→0x6e, `return-void` 0x3e→0x0e). Corrected
+    against the official Dalvik spec (source.android.com) + androguard's
+    decode of the real fixture. Also dropped the hand-rolled raw-hex
+    `/asm` + `/disasm`: Dalvik bit-level encode/decode (35c register layout,
+    signed branch offsets) is exactly the class of bug that needs a
+    ground-truth decoder cross-check → deferred to P3 (the DEX Mapper
+    already uses androguard directly, which is the correct path).
 - **P3** — native ELF/JNI inventory engine; Flutter/Dart detector
   (engine-ID regex + VM-snapshot hash from .rodata, offline-first);
   signature-block reporter (v1/v2/v3 + cert digests)
