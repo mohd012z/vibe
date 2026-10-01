@@ -294,9 +294,14 @@ P25 self-improvement eval.
 - **P3 (LocationResolver)** — the graph carries the DEX-side location chain
   (A1 → dex → class C → method M → string S refs); native-side location
   (.so → .text → N → B → I) is the next step (needs Radare/ELF provider).
-- **P4 (Search + TargetFinder)** — S-corpus + const-string refs make
-  "find where this text comes from" feasible androguard-only; not yet wired
-  to a command.
+- **P4 (Search + TargetFinder)** — DONE: `/find <text> --sha <…>` runs
+  resource → DEX-string → reference → class/method ownership over the IR,
+  returns T-ids with location chains + E-level/claim + honest no-match.
+- **canonical EntityResolver (P0-level)** — DONE: `graphutil.resolve_entity`
+  maps provider entities → canonical ids via the six mapping states
+  (EXACT/STRONG/PROBABLE/AMBIGUOUS/CONFLICT/UNRESOLVED); enforces
+  "never merge PROBABLE as EXACT" + "fp match w/ different name = CONFLICT".
+  The contract future Radare/JADX/Ghidra providers route through.
 - **P0 (CI + regression)** — STILL OPEN: PR #5 has
   `tests/test_apk_pipeline.py` + `tools/apk_pipeline.py` but CI runs only the
   legacy `tools/apkmod_test.py`. The new pipeline suite never executes in CI.
