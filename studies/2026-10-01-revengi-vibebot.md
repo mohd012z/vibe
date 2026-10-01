@@ -203,6 +203,105 @@ REJECT / defer (evidence-based, not by vibe's DNA):
   PLAN-stage schema modeled on declarative config
   {ClassName, MethodName, ParamTypes, args, ReturnValue}
 
+## /360 stress-test corrections (2026-10-02, Anam) — what the design must enforce
+The revised /360 (message 10855 + follow-ups) is the current source of truth.
+The headline correction: **"less AI at the bottom, more AI at the top."** AI is
+an uncertainty resolver at the top; everything underneath is deterministic.
+Corrections that change how we build (not just what we build):
+
+1. **EntityResolver is P0-level.** Tool names are NOT identities: Radare
+   `fcn.001234` ≠ Ghidra `FUN_001234` ≠ Frida runtime address. Need
+   `CanonicalEntity {artifact_sha256, module_sha256, canonical_location,
+   provider_entities[], fingerprints{bytes,instructions,cfg,callers,callees},
+   mapping_status, confidence}` with states EXACT / STRONG / PROBABLE /
+   AMBIGUOUS / CONFLICT / UNRESOLVED. Never merge PROBABLE as EXACT.
+2. **Claim ≠ Evidence.** Evidence *supports* a Claim; tool output ≠ truth.
+   Claim state machine: PROPOSED → SUPPORTED → REPRODUCED → VALIDATED
+   (or → CONFLICTED → UNRESOLVED/REJECTED). This is what makes CodeTransparent
+   real.
+3. **Evidence strength is qualitative, not "%".** DEX instruction *establishes*
+   "instruction exists" and does *not* establish "instruction executed"; runtime
+   observation *establishes* "executed in run R17" and not "all paths". Never
+   fabricate confidence percentages.
+4. **Replace "confidence %" with coverage.** Show per-facet state: Identity
+   VALIDATED / Location VALIDATED / Static refs REPRODUCED / Call graph
+   PARTIAL / JNI mapping SUPPORTED / Runtime NOT TESTED / Unknowns 2 /
+   Conflicts 0. This is the honest unit of reporting.
+5. **Progressive analysis tiers** L0 INVENTORY (sec) → L1 TARGETED STATIC
+   (cheap) → L2 DEEP STATIC (moderate) → L3 RUNTIME (expensive). Stop at the
+   first tier that resolves the unknown. Cheapest-method-capsable rule.
+6. **Hard budgets + loop detection.** Every investigation has
+   `AnalysisBudget {wall_time, cpu, memory, provider_calls, model_calls,
+   max_depth, max_hypotheses, max_retries}`; stop when `evidence_gain <
+   threshold`; detect stalls via a StateFingerprint (goal+target+known+
+   unresolved+attempted) — don't hang, report STALLED with the remaining
+   unknown.
+7. **Ghidra/Frida are controlled escalation workers** (pools with
+   concurrency/CPU/timeout), not always-on. Frida Stalker is aggressively
+   scoped (RuntimePlan {target, scope, duration, event_filter, stop_condition}).
+8. **DEX source-of-truth hierarchy:** JADX = readable *reconstruction* (never
+   claim it's original source); dexlib2 = structural truth; Smali/Baksmali =
+   instruction representation. Escalate JADX → dexlib2 when exact proof needed.
+9. **Memory quarantine + scope + expiry.** Scratch → Candidate → Validated
+   (only Validated in default retrieval); scope ARTIFACT / ARTIFACT_FAMILY /
+   TOOL_VERSION / ANDROID_PLATFORM / GENERAL_METHOD; procedural knowledge
+   carries `validated_against {tool versions}` and goes STALE on upgrade.
+10. **Internet = data, never instructions.** External content quarantined
+   through a research sandbox; community posts generate hypotheses, never
+   policy. Trust order: artifact evidence > tool output > upstream > official
+   docs > research > community.
+11. **Reduce LLM agents to four** (COMMANDER, INVESTIGATOR, RESEARCHER,
+    CRITIC); everything else (EntityResolver, EvidenceValidator,
+    ConflictDetector, MemoryManager, Scheduler, CapabilityRouter,
+    BuildValidator, RegressionRunner) is a **deterministic service**.
+12. **Investigation DAG** (not free-form chat), **typed blackboard messages**
+    (TASK_REQUEST / EVIDENCE_FOUND / UNKNOWN_FOUND / CONFLICT_FOUND / …),
+    **deterministic-work cache** keyed on
+    artifact_sha256 + provider_version + method_version + params,
+    **incremental deltas** (v17 + Delta → v18), **reproducibility bundles**.
+13. **Analysis ≠ Modification correctness** — two separate validation
+    pipelines; never auto-promote analysis confidence into modification
+    confidence. Baseline round-trip before patching a hard APK.
+14. **Benchmark Vibe itself** — fixtures A–F (simple Java, multi-DEX, JNI,
+    stripped native, obfuscated DEX, dynamic loading) + known questions
+    (find string/resource owner, callers, JNI target, native XREF, CFG,
+    map, runtime) measured on target precision/recall, entity-mapping
+    precision, evidence correctness, false claims/conflicts, unknown
+    recognition, wall/CPU/RAM, provider+LLM calls, cache hit rate. This is
+    the only way to prove "smarter" vs "bigger".
+
+Revised /360 priority (supersedes the older P0–P18): P0 CI + regression
+foundation, P1 Toolchain doctor (PR #5), P2 APK/Manifest/Resource/DEX/Native
+IR, P3 LocationResolver, P4 Search + TargetFinder, P5 RadareProvider, P6
+Dex/Smali/JADX Provider, P7 JNI Resolver, P8 Ghidra escalation, P9
+EvidenceGraph, P10 Code360+CodeTransparent, P11 MethodKnowledge, P12
+Unknown/Hypothesis/EvidenceGain planner, P13 multi-agent protocol +
+blackboard, P14 Commander + specialists, P15 Evidence/Falsifier, P16 Frida,
+P17 static↔runtime, P18 Vibe Memory + AttemptLedger, P19 Research + MethodLab,
+P20 Telegram controller, P21 WorkingCopy+ChangeSet, P22 rebuild/align/sign/
+verify, P23 ADB/emulator validation, P24 benchmark+regression corpus,
+P25 self-improvement eval.
+
+### Mapped to what's already on the branch (as of this note)
+- **P2 (IR)** — DONE in this branch as the Vibe IR: `tools/vibebot/graphutil.py`
+  (stable A/C/M/F/S/R/N/K IDs, reproducible per SHA-256, `/apk` overview card,
+  `/map` tree + cross-layer paths, string S-corpus = full DEX string table,
+  honest JNI boundary).
+- **P9 (EvidenceGraph) — partial**: the session store now MERGES engine
+  layers (union structural + findings-by-id + intake), so `/apk` + `/dex` +
+  `/analyze` on one SHA compose into one growing graph instead of clobbering.
+  That was a real latent bug (upsert previously overwrote `structural`).
+- **P3 (LocationResolver)** — the graph carries the DEX-side location chain
+  (A1 → dex → class C → method M → string S refs); native-side location
+  (.so → .text → N → B → I) is the next step (needs Radare/ELF provider).
+- **P4 (Search + TargetFinder)** — S-corpus + const-string refs make
+  "find where this text comes from" feasible androguard-only; not yet wired
+  to a command.
+- **P0 (CI + regression)** — STILL OPEN: PR #5 has
+  `tests/test_apk_pipeline.py` + `tools/apk_pipeline.py` but CI runs only the
+  legacy `tools/apkmod_test.py`. The new pipeline suite never executes in CI.
+  This is the real P0 and it is a few lines in the workflow.
+
 ## Open items (need Fatah/Anam decision)
 
 1. **Bot identity** — new Telegram bot via BotFather (token never

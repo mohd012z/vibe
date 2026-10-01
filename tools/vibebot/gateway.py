@@ -38,6 +38,8 @@ from . import core
 from . import engines
 
 HELP = """vibebot commands
+  /apk <path>            APK overview + Vibe IR entity graph (stable IDs)
+  /map <path>            entity graph tree + cross-layer paths (or --sha <…>)
   /analyze <path> [--engine apkmod|dexmapper] [--fingerprints <json>]
   /dex <path>            DEX Mapper job: class->method->call map + JNI + integrity
   /smali <name|0x..|substr>   query the Dalvik opcode table
@@ -48,7 +50,7 @@ HELP = """vibebot commands
   /status [job-id]       job state + progress
   /jobs                  all jobs
   /sessions              stored analysis sessions
-  /deepdive <target> --sha <sha>   stateful traverse (callers|native|references|<name>|jni)
+  /deepdive <target> --sha <sha>   stateful traverse (callers|native|references|<name>|jni|calls)
   /report --sha <sha>    stored report card
   /cancel <job-id>       cancel queued/running job
   /help                  this text
@@ -81,12 +83,15 @@ class Gateway:
     def _default_engines(self) -> dict[str, core.Engine]:
         m = {"apkmod": engines.ApkModEngine(os.path.join(self.work_dir, "reports")),
              "mock": engines.MockEngine()}
-        # DEX Mapper needs androguard; register only if present so a
+        # graph + dexmapper need androguard; register only if present so a
         # stdlib-only env still works (mock + apkmod-intake).
         try:
             from . import dexmapper
             if dexmapper._androguard():
                 m["dexmapper"] = dexmapper.DexMapperEngine(
+                    os.path.join(self.work_dir, "reports"))
+                from . import graphutil
+                m["graph"] = graphutil.ApkGraphEngine(
                     os.path.join(self.work_dir, "reports"))
         except Exception:
             pass
@@ -97,9 +102,9 @@ class Gateway:
         """Parse one command, ACK immediately. Returns (reply, accepted job)."""
         parts = (text or "").strip().split()
         if not parts or parts[0] not in (
-                "/analyze", "/dex", "/smali", "/base", "/hash", "/dexcheck",
-                "/dexrepair", "/status", "/jobs", "/sessions", "/deepdive",
-                "/report", "/cancel", "/help", "/start"):
+                "/apk", "/map", "/analyze", "/dex", "/smali", "/base", "/hash",
+                "/dexcheck", "/dexrepair", "/status", "/jobs", "/sessions",
+                "/deepdive", "/report", "/cancel", "/help", "/start"):
             return HELP, None
         cmd = parts[0]
 
@@ -107,6 +112,8 @@ class Gateway:
             return HELP, None
 
         # ---- synchronous utility commands (fast; no heavy work) ---------
+        if cmd == "/map":
+            return self._map(parts[1:])
         if cmd == "/smali":
             return self._smali(parts[1:])
         if cmd == "/base":
@@ -135,6 +142,9 @@ class Gateway:
 
         if cmd == "/analyze":
             return self._analyze(parts[1:], user)
+
+        if cmd == "/apk":
+            return self._apk(parts[1:], user)
 
         if cmd == "/dex":
             return self._dex(parts[1:], user)
@@ -215,6 +225,46 @@ class Gateway:
             return f"error: {e}", None
         return (f"ACK {job.id}  engine=dexmapper\n"
                 f"  queued — /status {job.id}  /cancel {job.id}"), job
+
+    def _apk(self, parts: list[str], user: str) -> tuple[str, core.Job | None]:
+        if not parts:
+            return ("/apk <path>   (APK overview + Vibe IR entity graph; "
+                    "then /map --sha <…>)"), None
+        if "graph" not in self.engines:
+            return ("error: Vibe IR needs androguard "
+                    "(uv pip install androguard); /smali /base /hash /dexcheck "
+                    "/dexrepair still work on stdlib"), None
+        path = os.path.abspath(os.path.expanduser(parts[0]))
+        if not os.path.exists(path):
+            return f"error: artifact not found (refused: {os.path.basename(path)})", None
+        try:
+            job = self.jobs.submit("apk", path, user, "graph")
+        except (KeyError, FileNotFoundError, RuntimeError) as e:
+            return f"error: {e}", None
+        return (f"ACK {job.id}  engine=graph\n"
+                f"  queued — /status {job.id}  /cancel {job.id}"), job
+
+    def _map(self, parts: list[str]) -> tuple[str, None]:
+        from . import graphutil
+        sha = self._arg(parts, "--sha")
+        if not sha:
+            if parts and not parts[0].startswith("--"):
+                path = os.path.abspath(os.path.expanduser(parts[0]))
+                if not os.path.exists(path):
+                    return f"error: artifact not found (refused: {os.path.basename(path)})", None
+                sha = core._sha256(path)
+            else:
+                return "/map <path>|--sha <sha256[:16]>   (Vibe IR graph + cross-layer paths)", None
+        if not SHA_RE.match(sha.lower()):
+            return "/map <path>|--sha <sha256[:16]> (hex, 8..64 chars)", None
+        sess = self.sessions.load(sha)
+        if not sess:
+            return f"no session for {sha[:8]}… — run /apk <path> first", None
+        graph = (sess.get("structural") or {}).get("graph")
+        if not graph:
+            return (f"session {sha[:8]}… has no Vibe IR graph layer yet "
+                    f"(engines: {', '.join(sess.get('engines', []) or ['?'])}) — run /apk <path>"), None
+        return graphutil.render_map(graph, sha), None
 
     # ------------------------------------------------- P2 utility handlers
     def _smali(self, parts: list[str]) -> tuple[str, None]:

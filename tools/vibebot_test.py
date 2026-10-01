@@ -302,6 +302,69 @@ def main() -> int:
             print("== apkmod adapter: SKIP (androguard not installed) ==")
 
         if HAVE_ANDROGUARD:
+            print("== P3a: Vibe IR graph engine (androguard decoder) ==")
+            from vibebot import graphutil
+            gwf = gateway.Gateway(td)
+            check("graph engine registered when androguard present",
+                  "graph" in gwf.engines)
+            reply, jg = gwf.handle(f"/apk {FIXTURE}", user="test")
+            check("/apk accepted", jg is not None and "ACK" in reply, reply)
+            if jg is not None:
+                gwf.process_pending()
+                check("/apk job COMPLETED",
+                      jg.state == core.Job.COMPLETED, jg.error or "")
+                gres = jg.result
+                if gres is None:
+                    check("apk result present", False)
+                else:
+                    check("apk result has graph layer",
+                          "graph" in gres.structural)
+                    graph = gres.structural.get("graph", {})
+                    check("graph has stable C-ids",
+                          all(c["id"].startswith("C") for c in
+                              graph["nodes"]["class"]), str(graph["nodes"]["class"][:2]))
+                    check("graph S-corpus >= 30 (full string table, not just refs)",
+                          graph["counts"]["string"] >= 30, str(graph["counts"]))
+                    # reproducible: two raw builds of the same SHA are identical
+                    # (the engine adds libs/certs on top, but the core graph is
+                    # deterministic — that's the stable-ID guarantee)
+                    g_a = graphutil.build_graph(FIXTURE)
+                    g_b = graphutil.build_graph(FIXTURE)
+                    import json as _json2
+                    check("graph reproducible (2 builds identical)",
+                          _json2.dumps(g_a, sort_keys=True)
+                          == _json2.dumps(g_b, sort_keys=True))
+                    sha_g = gres.intake["sha256"]
+                    # /map renders from the stored session (stateful)
+                    reply, _ = gwf.handle(f"/map --sha {sha_g[:16]}")
+                    check("/map renders VIBE MAP from session", "VIBE MAP" in reply, reply)
+                    reply, _ = gwf.handle(f"/map {FIXTURE}")
+                    check("/map by path reuses session", "VIBE MAP" in reply)
+                    # overview card
+                    check("overview card has package",
+                          "com.fixture.demo" in gres.outputs["overview"])
+                    # SESSION MERGE: /dex after /apk on same SHA must coexist
+                    reply, jd = gwf.handle(f"/dex {FIXTURE}", user="test")
+                    if jd is not None:
+                        gwf.process_pending()
+                    sess = gwf.sessions.load(sha_g)
+                    if sess is None:
+                        check("session persisted for /map + merge", False)
+                    else:
+                        check("session merge: engines accumulate (graph+dexmapper)",
+                              "graph" in sess["engines"] and "dexmapper" in sess["engines"],
+                              str(sess.get("engines")))
+                        check("session merge: graph layer intact after /dex",
+                              (sess["structural"].get("graph") or {}).get("counts", {})
+                              .get("class") == graph["counts"]["class"])
+                        check("session merge: dexmapper jni layer present",
+                              "jni" in sess["structural"])
+                        check("session merge: intake package preserved",
+                              sess["intake"].get("package") == "com.fixture.demo")
+        else:
+            print("== P3a graph: SKIP (androguard not installed) ==")
+
+        if HAVE_ANDROGUARD:
             print("== P2: dexmapper engine (androguard decoder) ==")
             from vibebot import dexmapper
             gwd = gateway.Gateway(td)

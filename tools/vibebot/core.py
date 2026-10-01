@@ -257,18 +257,49 @@ class SessionStore:
         return os.path.join(self.root, f"session-{self.key(sha256)}.json")
 
     def upsert(self, sha256: str, engine: str, res: EngineResult) -> dict:
+        """Persist an engine result under the artifact's fingerprint.
+
+        The session is the artifact's GROWING evidence graph: each engine
+        (apkmod, dexmapper, graph, …) adds its own structural layer and
+        findings WITHOUT clobbering the others, so /apk + /dex + /map on the
+        same SHA-256 compose into one session. `engine` = last run (back-compat);
+        `engines` = all engines that have contributed.
+        """
         prev = self.load(sha256) or {}
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+        # structural: union of keys (new engine adds its layer, keeps others)
+        merged_structural = dict(prev.get("structural") or {})
+        merged_structural.update(res.structural or {})
+
+        # findings: union by id (a re-run refreshes its own, keeps others')
+        byid = {f["id"]: f for f in (prev.get("findings") or [])}
+        for f in (res.findings or []):
+            byid[f["id"]] = f
+
+        # intake: merge, but a None in the new result must not erase a value
+        # an earlier engine established (e.g. package resolved by apkmod)
+        intake = dict(prev.get("intake") or {})
+        for k, v in (res.intake or {}).items():
+            if v is not None:
+                intake[k] = v
+
+        engines = list(prev.get("engines") or ([prev["engine"]]
+                                               if prev.get("engine") else []))
+        if engine and engine not in engines:
+            engines.append(engine)
+
         data = {
             "sha256": sha256,
             "engine": engine,
-            "intake": res.intake,
-            "structural": res.structural,
-            "findings": res.findings,
-            "report": res.outputs.get("report"),
+            "engines": engines,
+            "intake": intake,
+            "structural": merged_structural,
+            "findings": list(byid.values()),
+            "report": (res.outputs or {}).get("report") or prev.get("report"),
             "deepdive": prev.get("deepdive", []),
-            "updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "created": prev.get("created") or time.strftime("%Y-%m-%dT%H:%M:%SZ",
-                                                            time.gmtime()),
+            "updated": now,
+            "created": prev.get("created") or now,
         }
         self.save(data)
         return data
