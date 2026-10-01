@@ -80,3 +80,21 @@ jobs:
           # fixture (androguard already installed by the previous step).
           set -e
           python3 tools/vibebot_test.py
+      - name: APK pipeline + Vibe AI suite (PR #5, when present)
+        run: |
+          # Forward-compatible: runs the android-apk-toolchain PR's pytest
+          # suite when those files exist on the tree. No-op on a branch that
+          # lacks them. VERIFIED green on the combined tree (PR #5 head +
+          # VibeBot): 45 passed. Prevents the merge from silently dropping the
+          # pipeline suite from CI.
+          set -e
+          if [ -f tests/test_apk_pipeline.py ]; then
+            python3 -m pip install --quiet pytest
+            python3 -m pytest -q \
+              tests/test_apk_pipeline.py tests/test_vibe_conversation.py \
+              tests/test_vibe_capabilities.py tests/test_vibe_evidence.py \
+              tests/test_vibe_claims.py tests/test_vibe_memory.py \
+              tests/test_vibe_orchestrator.py tests/test_vibe_apk_adapters.py
+          else
+            echo "apk pipeline suite not present on this branch — skipping"
+          fi
