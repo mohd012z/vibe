@@ -71,3 +71,10 @@ jobs:
           set -e
           python3 -m pip install --quiet androguard
           python3 tools/apkmod_test.py
+      - name: APK pipeline provenance and authorization tests
+        run: |
+          # Exercises the new SHA-scoped pipeline directly: inventory,
+          # read-only extraction, provenance records, and mutation authorization.
+          set -e
+          python3 -m pip install --quiet pytest
+          python3 -m pytest -q tests/test_apk_pipeline.py
