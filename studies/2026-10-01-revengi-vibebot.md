@@ -334,6 +334,16 @@ P25 self-improvement eval.
   IMPOSSIBLE"; 15 Unknowns lists exactly what was not established.
   `/investigate <path> [target]`; legacy synchronous `/deepdive` preserved
   (still used by mock tests). run_deepdive reproducible. 228 checks.
+- **P5 (pluggable Radare native provider)** — DONE:
+  `tools/vibebot/native.py` — r2 as a SUBPROCESS (never linked), wall-capped,
+  with a RadareLike Protocol injection seam so every parser/resolver/matcher
+  is unit-tested with a FakeRunner (CI runs it with NO r2 installed).
+  LocationResolver (ELF64 va<->file-offset, honest "approx" flag),
+  provider-version provenance, JNI bridge via the UNIQUE underscore form
+  (missing export = NOT OBSERVED, never a fake bridge), resolve_native_entity
+  maps r2/ghidra/Frida entities to canonical N-ids via the SAME six-state
+  EntityResolver. /native <path> (job): .so direct or APK .so extraction;
+  degrades to a COMPLETED "not installed — NOT OBSERVED" marker. 252 checks.
 - **P0 (CI + regression)** — STILL OPEN: PR #5 has
   `tests/test_apk_pipeline.py` + `tools/apk_pipeline.py` but CI runs only the
   legacy `tools/apkmod_test.py`. The new pipeline suite never executes in CI.
