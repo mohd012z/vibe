@@ -69,3 +69,23 @@ patching). Treated as DATA. Method distilled here; no code or text copied.
 - The thread's "floating bubble LIVE" runtime capture presumes an
   instrumented/authorized app; static-only (apktool/jadx) is the safe first
   slice.
+
+## Resolution (2026-10-01) — first slice built in vibe v1.3.0
+Anam: "proceed to build apk mod menu". Built as **static slice** inside vibe
+(FATAH flagged; interpretation: authorized-APK analysis + patch planning,
+not a UI menu app): `tools/apkmod.py` with INTAKE/DETECT/GRAPH/PLAN/REPORT +
+interactive menu; `apk/fingerprints.json` (reduced original signals,
+extensible via `--fingerprints`); E1–E3 evidence model + falsification lists;
+`--plan` is a DRY-RUN manifest gated on `--authorized` (authorization
+recorded); no APK bytes modified by design. Verified end-to-end on a
+self-built fixture APK (tests/fixtures/fixture-demo.apk): intake identity,
+E1/E2/E3 findings, real DEX call-graph chokepoints (DemoApp.onCreate →
+MobileAds.initialize/InterstitialAd.load; MainActivity.onResume →
+show/trackScreen), 5-candidate dry-run plan, 26-check CI smoke green.
+**Still open:** (a) patch APPLICATION stage (smali/dex edit → rebuild →
+sign → runtime verify → before/after report) — separately gated, needs the
+Android build chain (available locally: build-tools 37 + platform 35);
+(b) in-app Kotlin "mode menu" (the study's floating-bubble LIVE runtime
+capture) — needs the app target decision; (c) real-world APK validation —
+fixture is self-built; run against an authorized third-party APK to
+validate fingerprint DB coverage.
