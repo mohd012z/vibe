@@ -27,6 +27,11 @@ from __future__ import annotations
 import os
 import re
 import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
 from typing import Any
 
 from . import core
@@ -43,6 +48,17 @@ HELP = """vibebot commands
   /help                                    this text"""
 
 SHA_RE = re.compile(r"^[0-9a-f]{8,64}$")
+
+MAX_UPLOAD_BYTES = 200 * 1024 * 1024
+
+
+def sanitize_filename(name: str, max_len: int = 80) -> str:
+    """Reduce an inbound file name to a safe on-disk name (no path, no
+    shell metachars, bounded length). Returns 'upload.bin' if nothing safe."""
+    base = os.path.basename(name or "").strip()
+    base = re.sub(r"[^A-Za-z0-9._-]", "_", base)
+    base = base[:max_len].strip("._")
+    return base or "upload.bin"
 
 
 class Gateway:
@@ -197,20 +213,94 @@ class TelegramTransport:
         self.token = token
         self.allowed = allowed_user_ids
         self.api = f"https://api.telegram.org/bot{token}"
+        self.inbound_dir = os.path.join(gateway.work_dir, "inbound")
 
     def _call(self, method: str, payload: dict) -> dict:
-        import urllib.parse
-        import urllib.request
-        data = urllib.parse.urlencode(payload).encode()
-        req = urllib.request.Request(self.api + "/" + method, data=data)
-        with urllib.request.urlopen(req, timeout=70) as r:
-            return __import__("json").loads(r.read())
+        import json as _json
+        last = None
+        for attempt in range(4):
+            req = self._request(method, payload)
+            try:
+                with urllib.request.urlopen(req, timeout=120) as r:
+                    return _json.loads(r.read())
+            except (urllib.error.URLError, ConnectionResetError,
+                    TimeoutError, urllib.error.HTTPError) as e:
+                # HTTP 4xx (bad token, bad file_id) must not be retried
+                if isinstance(e, urllib.error.HTTPError) and e.code < 500 \
+                        and e.code != 429:
+                    body = e.read()[:300]
+                    raise RuntimeError(f"{method} -> HTTP {e.code}: {body}")
+                last = e
+                time.sleep(2 * (attempt + 1))
+        raise RuntimeError(f"telegram {method} failed after retries: {last}")
+
+    def _request(self, method: str, payload: dict) -> urllib.request.Request:
+        # binary values go as multipart; everything else form-urlencoded
+        files = {k: v for k, v in payload.items()
+                 if isinstance(v, (bytes, bytearray))}
+        if files:
+            boundary = "----vibe" + uuid.uuid4().hex
+            body = b""
+            for k, v in payload.items():
+                if isinstance(v, (bytes, bytearray)):
+                    continue
+                body += (f"--{boundary}\r\nContent-Disposition: form-data; "
+                         f"name={k}\r\n\r\n{v}\r\n").encode()
+            for k, v in files.items():
+                body += (f"--{boundary}\r\nContent-Disposition: form-data; "
+                         f'name="{k}"; filename="upload"\r\n'
+                         f"Content-Type: application/octet-stream\r\n\r\n").encode()
+                body += v
+            body += f"--{boundary}--\r\n".encode()
+            return urllib.request.Request(
+                self.api + "/" + method, data=body,
+                headers={"Content-Type":
+                         f"multipart/form-data; boundary={boundary}"})
+        return urllib.request.Request(self.api + "/" + method,
+                                      data=urllib.parse.urlencode(payload).encode())
+
+    def fetch_file(self, file_id: str, filename: str) -> str:
+        """Download a Telegram file (e.g. an uploaded APK) into the inbound
+        dir. Sanitized name, bounded size, returns the local path."""
+        os.makedirs(self.inbound_dir, exist_ok=True)
+        safe = sanitize_filename(filename)
+        fr = self._call("getFile", {"file_id": file_id})
+        if not fr.get("ok"):
+            raise RuntimeError(f"getFile failed: {fr.get('description')}")
+        size = fr["result"].get("file_size", 0)
+        if size > MAX_UPLOAD_BYTES:
+            raise RuntimeError(f"file too large ({size} B > {MAX_UPLOAD_BYTES} bound)")
+        url = "https://api.telegram.org/file/bot" + self.token + "/" + fr["result"]["file_path"]
+        path = os.path.join(self.inbound_dir, safe)
+        # CDN download with retry (transient resets are common)
+        last = None
+        for attempt in range(4):
+            try:
+                with urllib.request.urlopen(url, timeout=180) as r, \
+                        open(path, "wb") as out:
+                    while True:
+                        chunk = r.read(1 << 20)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                return path
+            except (urllib.error.URLError, ConnectionResetError,
+                    TimeoutError) as e:
+                last = e
+                time.sleep(2 * (attempt + 1))
+        raise RuntimeError(f"file download failed after retries: {last}")
 
     def _reply(self, chat_id: int, text: str) -> None:
         self._call("sendMessage", {"chat_id": chat_id, "text": text[:4000]})
 
     def poll_once(self, timeout_s: int = 25) -> int:
-        """One getUpdates cycle. Returns number of updates handled."""
+        """One getUpdates cycle. Returns number of updates handled.
+
+        Handles text commands AND inbound documents (APK/DEX uploads):
+        document is fetched (sanitized name, 200MB bound) and submitted as
+        an /analyze job. ACK-first: the user gets the job id immediately,
+        then the completion message — heavy work never blocks the reply.
+        """
         ups = self._call("getUpdates", {
             "timeout": timeout_s, "allowed_updates": ["message"],
         }).get("result", [])
@@ -220,19 +310,42 @@ class TelegramTransport:
             user_id = str((msg.get("from") or {}).get("id", ""))
             chat_id = (msg.get("chat") or {}).get("id")
             text = (msg.get("text") or "").strip()
-            if chat_id is None or not text:
+            doc = msg.get("document")
+            if chat_id is None:
                 continue
             if self.allowed is not None and user_id not in self.allowed:
                 self._reply(chat_id, "not authorized (user not in allowlist)")
+                continue
+            if doc is not None:
+                # inbound APK/DEX upload -> analyze job
+                try:
+                    path = self.fetch_file(doc["file_id"],
+                                           doc.get("file_name", "upload.bin"))
+                except Exception as e:  # noqa: BLE001 — report, don't crash the loop
+                    self._reply(chat_id, f"could not fetch upload: {e}")
+                    continue
+                reply, job = self.gw.handle(f"/analyze {path}", user=f"tg:{user_id[:6]}")
+                self._reply(chat_id, reply)
+                n += 1
+                if job is not None:
+                    self._work_and_finalize(chat_id, job)
+                continue
+            if not text:
                 continue
             reply, job = self.gw.handle(text, user=f"tg:{user_id[:6]}")
             self._reply(chat_id, reply)
             n += 1
             if job is not None:
-                for j in self.gw.process_pending():
-                    if j is job:
-                        self._finalize(chat_id, j)
+                self._work_and_finalize(chat_id, job)
         return n
+
+    def _work_and_finalize(self, chat_id: int, job: core.Job) -> None:
+        for j in self.gw.process_pending():
+            if j is job:
+                self._finalize(chat_id, j)
+                return
+        # job still queued behind other work — pollers of later cycles pick it
+        # up via /status; (v0.1: sequential queue, single operator expected)
 
     def _finalize(self, chat_id: int, job: core.Job) -> None:
         if job.state == core.Job.FAILED:

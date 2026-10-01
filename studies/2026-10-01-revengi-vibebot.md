@@ -56,21 +56,63 @@ Useful sub-concepts, adopted for vibe (see "Mapping"):
    COPY (unavailable or private backend). README claims of upstream
    projects are project claims, not verified behavior.
 
-## Org inventory (as surfaced by Anam, 2026-10-01)
+## Org inventory (verified repo-by-repo, 2026-10-01 — full mapping in
+`/opt/data/cache/delegation/subagent-summary-0-20261001_142928_139033.txt`;
+digest here)
 
-- `docs` — official RevEngiBot documentation (TypeScript/Next.js, MIT
-  claim) — command → engine → result map.
-- `revengi-app` — main all-in-one Dart app (MIT claim) — architecture
-  reference for module/parse layout.
-- `yarax_android` — YARA-X Android integration (Rust, BSD-3 claim).
-- `PineHookPlus` — **runtime hooking research** (config-driven
-  class/method/param/action descriptors; auto ARM32/ARM64 library select).
-  Different domain: runtime modification vs. static analysis.
-- Conversion utilities outside the org by the same developer:
-  understand-smali, smalisp, smalig, java2smali (uses d8, MIT claim),
-  Fine, pyxamstore, LYADI.
-- Forks (not original RevEngi tech): garlic, catcher_2, kterm.dart,
-  dataset, installed_apps, ApkDataMultiplex — classified accordingly.
+- **Bot backend is NOT open source** — RevEngiBot + api.revengi.in behavior
+  is known only from `RevEngiSquad/docs` (MIT, Next.js/Fumadocs site).
+  43 documented commands (`content/docs/commands.mdx`, 37KB, README-
+  verified): /apk (+info/permissions/activities/sign), /apkid, /smali,
+  /dex2c /dex2java /dex2jar /dexrepair, /smali2java /java2smali, /blutter,
+  /jni_info, /aab2apk, /apksign, /apkprotect, /ssl_patch, /cff, /mthook,
+  /pairip, /asm /disasm /base /hash, /scan androbugs|deeplens, /cocos2d,
+  /s2f, /askai, /frida_compile, /toapk, /xml de|compile, /regex, /credits.
+  Backend tool choices: jadx, APKiD, AndroBugs, APKDeepLens, dex2c,
+  BlackObfuscator, DPT Shell, APKEditor.
+- UX invariants worth mirroring: /apk registers a target with 30-min
+  auto-unregister TTL; /smali exact-vs-partial interactive match with
+  20s timeout; every mutation command carries an explicit "only on APKs
+  you have permission to modify" warning; reply-to-file vs inline input.
+- `revengi-app` (MIT, Flutter v1.3.0): per-feature pattern
+  `<feat>.dart / _base / _io / _web`; dio client defaulting to
+  api.revengi.in; MethodChannel `flutter.native/helper` + EventChannel
+  logs. Portable algorithms inside: DEX repair (magic 035-040;
+  SHA-1(bytes[32:])@12; Adler-32(bytes[12:])@8 LE — ~15 stdlib lines) and
+  Flutter/Dart fingerprinting (libflutter.so .rodata engine-ID regex
+  `\x00([a-f0-9]{40})(?=\x00)`, '(stable)' marker, VM-snapshot hash+flags
+  at vmDataSymbol+20, optional 4KB Range-request dart-sdk zip probe).
+- `yarax_android` (BSD-3): first Android YARA-X; opaque-pointer JNI;
+  results cross FFI as JSON — the `scan_results_to_json` shape
+  (identifier/namespace/tags/metadata/patterns/matches[offset,length,
+  hex,data_str,xor_key] + nonMatching + {error}) is the YARA evidence
+  contract to adopt, backed by upstream yara-x python instead of the
+  Android FFI code.
+- `smalig` (MIT): canonical 257-instruction Dalvik grammar.yaml (11 fields
+  per instruction) — single source of truth, CI-synced to
+  understand-smali (MIT) + smalisp (MIT, LSP) + revengi-app. The
+  maintenance model (one dataset, many consumers, CI auto-PR) is the
+  pattern for any reference data vibe bundles.
+- `java2smali` (MIT, derived izgzhen): javac → R8 d8 (DexIndexed,
+  minApi 21) → baksmali; pipeline reference for P5.
+- `PineHookPlus` (MIT): declarative runtime hooks via config.json
+  {ClassName, MethodName, ParamTypes, args, ReturnValue} — the data model
+  for the PLAN stage (planning only; runtime execution stays out).
+- `LYADI` (MIT, personal): FastMCP/SSE tool server (androguard+APKiD+
+  yara+r2pipe+adb) with a `validate_command` guardrail — reference shape
+  for an authorized-tools surface.
+- `ApkDataMultiplex` (MIT, derived): split-APK asset dedup via ZIP extra
+  records + in-repo V2/V3 signer (demo -24.11% size).
+- UNLICENSED (do not copy, format facts only): Fine (rootless Pine+Frida
+  demo), pyxamstore (Xamarin AssemblyStore: XABA/XALZ, V2/V3 ELF
+  .payload Header <5I>/IndexEntry/EntryDescriptor <7I>, LZ4 framing),
+  yarax_patches (DEX string_ids table restore — check upstream yara-x).
+- Forks, not original tech: cfr, Fern (FernFlower mirror), dart-elf,
+  garlic, dataset, yara-java, catcher_2, kterm.dart, installed_apps.
+- **License hygiene lesson**: RevEngi's MIT app bundles a GPLv3 component
+  (revengi) — the anti-pattern to avoid. Keep vibe stdlib-clean; run
+  JVM/copyleft tools (jadx, APKEditor, ApkDataMultiplex, CFR/Fern) as
+  isolated subprocesses with provenance credits.
 
 ## What vibe adopts / rejects
 
@@ -101,15 +143,27 @@ REJECT / defer (evidence-based, not by vibe's DNA):
 
 - **P1 (v0.1, DONE)** — core engine contract + job manager + session store
   + stateful deepdive + CLI + mock engine + apkmod adapter + tests
-- **P2 (next)** — DEX Mapper + Smali Inspector engines (class → method →
-  reference map as first-class outputs), `/graph` rendering, search over
-  the evidence graph
-- **P3** — native ELF/JNI inventory engine, Flutter detector engine
+- **P1.1 (DONE, same PR)** — Telegram upload handling: inbound document →
+  sanitized filename (traversal-safe) → 200MB bound → analyze job →
+  ACK + result (multipart sendDocument for smoke tests); allowlist
+  enforced in the transport; deploy/validate script
+- **P2 (next)** — DEX Mapper + Smali Inspector engines: class → method →
+  reference map as first-class outputs; smali grammar from `smalig`
+  (MIT, 257-instruction yaml — track upstream, CI-sync pattern); DEX
+  repair salvage in INTAKE (magic 035-040, SHA-1@12, Adler-32@8 LE —
+  portable algorithm from revengi-app, reimplemented, ~15 lines);
+  `/graph` rendering, search over the evidence graph
+- **P3** — native ELF/JNI inventory engine; Flutter/Dart detector
+  (engine-ID regex + VM-snapshot hash from .rodata, offline-first);
+  signature-block reporter (v1/v2/v3 + cert digests)
 - **P4** — Telegram deployment (token + allowlist + hosting decision),
-  `/diff` engine (two builds), YARA-style rule engine (license check first)
-- **P5 (separately gated)** — conversion adapters (java2smali-class, d8
-  based), AI correlation layer on normalized findings, runtime observation
-  stage (authorized targets only)
+  `/diff` engine (two builds), YARA engine adopting the
+  scan_results_to_json evidence contract (upstream yara-x python, BSD-3)
+- **P5 (separately gated)** — conversion adapters (java2smali pipeline:
+  javac → d8 DexIndexed → baksmali), AI correlation layer on normalized
+  findings, runtime observation stage (authorized targets only),
+  PLAN-stage schema modeled on declarative config
+  {ClassName, MethodName, ParamTypes, args, ReturnValue}
 
 ## Open items (need Fatah/Anam decision)
 

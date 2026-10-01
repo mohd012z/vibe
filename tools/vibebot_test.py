@@ -226,6 +226,140 @@ def main() -> int:
         check("token never in gateway help", "TEST-TOKEN-NOT-USED"
               not in g.handle("/help")[0])
 
+        print("== telegram transport: upload + allowlist (mocked network) ==")
+        g3 = gateway.Gateway(td)
+        t3 = gateway.TelegramTransport(g3, token="TEST-TOKEN-NOT-USED",
+                                       allowed_user_ids={"123"})
+        check("sanitize_filename strips path (traversal-safe basename)",
+              gateway.sanitize_filename("/tmp/evil ../../app.apk") == "app.apk")
+        check("sanitize_filename neutralizes metachars in basename",
+              gateway.sanitize_filename("evil name $(x).apk") == "evil_name___x_.apk")
+        check("sanitize_filename rejects shell metachars",
+              all(ch not in gateway.sanitize_filename("a b$(rm)`.apk")
+                  for ch in " $`()"))
+        check("sanitize_filename empty -> upload.bin",
+              gateway.sanitize_filename("...") == "upload.bin")
+        check("inbound dir under work dir",
+              t3.inbound_dir == os.path.join(td, "inbound"))
+
+        # the "downloaded" file must be a real APK so the apkmod engine
+        # can actually run: serve the committed fixture bytes
+        if HAVE_ANDROGUARD:
+            fixture_bytes = open(FIXTURE, "rb").read()
+        else:
+            fixture_bytes = b"x"
+
+        sent = []  # (method, payload) log
+
+        def fake_call(method, payload):
+            sent.append((method, payload))
+            if method == "getUpdates":
+                return {"ok": True, "result": [
+                    {"message": {"chat": {"id": 1},
+                                 "from": {"id": 999},          # NOT in allowlist
+                                 "text": "/analyze x"}},
+                    {"message": {"chat": {"id": 1},
+                                 "from": {"id": 123},          # in allowlist
+                                 "document": {"file_id": "FID1",
+                                              "file_name": "bad name/../../x.apk"}}},
+                ]}
+            if method == "getFile":
+                return {"ok": True, "result": {"file_path": "x/y.bin",
+                                               "file_size": len(fixture_bytes)}}
+            if method == "sendMessage":
+                return {"ok": True, "result": {"message_id": 1}}
+            return {"ok": True}
+
+        t3._call = fake_call
+        import urllib.request
+        orig_urlopen = urllib.request.urlopen
+
+        class _FakeResp:
+            def __init__(self):
+                self.pos = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self, n=-1):
+                data = fixture_bytes
+                if n < 0:
+                    out, self.pos = data[self.pos:], len(data)
+                else:
+                    out = data[self.pos:self.pos + n]
+                    self.pos += len(out)
+                return out
+
+        urllib.request.urlopen = lambda *a, **k: _FakeResp()
+        try:
+            n = t3.poll_once(timeout_s=1)
+        finally:
+            urllib.request.urlopen = orig_urlopen
+        check("upload handled (unauthorized update refused, not counted)",
+              n == 1, str(n))
+        refusal_texts = [p.get("text", "") for m, p in sent if m == "sendMessage"]
+        check("unauthorized user got refusal reply",
+              any("not authorized" in t for t in refusal_texts),
+              str(refusal_texts))
+        inbound = os.path.join(t3.inbound_dir, "x.apk")
+        check("upload fetched to sanitized inbound path", os.path.exists(inbound))
+        if HAVE_ANDROGUARD and os.path.exists(inbound):
+            check("inbound bytes identical to fixture (no tampering)",
+                  open(inbound, "rb").read() == fixture_bytes)
+        jobs = g3.jobs.all()
+        check("upload produced exactly one job", len(jobs) == 1, str(jobs))
+        if HAVE_ANDROGUARD:
+            check("upload job COMPLETED via apkmod",
+                  bool(jobs) and jobs[0]["state"] == core.Job.COMPLETED, str(jobs))
+            check("upload job user is telegram-scoped",
+                  bool(jobs) and jobs[0]["user"].startswith("tg:"))
+            ack_texts = [p.get("text", "") for m, p in sent if m == "sendMessage"]
+            check("user got ACK then result (2 messages)",
+                  any("ACK" in t for t in ack_texts)
+                  and any("COMPLETE" in t for t in ack_texts),
+                  str(ack_texts))
+
+        print("== telegram transport: multipart upload body (mocked network) ==")
+        g4 = gateway.Gateway(td)
+        t4 = gateway.TelegramTransport(g4, token="TEST-TOKEN-NOT-USED")
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["content_type"] = req.headers.get("Content-type") or \
+                req.headers.get("Content-Type", "")
+            captured["body"] = req.data
+
+            class _R:
+                def read(self, n=-1):
+                    return b'{"ok": true}'
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+
+            return _R()
+
+        orig2 = urllib.request.urlopen
+        urllib.request.urlopen = fake_urlopen
+        try:
+            t4._call("sendDocument", {"chat_id": 1, "document": b"ABCD",
+                                      "caption": "x"})
+        finally:
+            urllib.request.urlopen = orig2
+        body = captured.get("body", b"")
+        check("multipart used for binary payload",
+              "multipart/form-data; boundary=" in captured.get("content_type", ""),
+              captured.get("content_type", ""))
+        check("document bytes present in multipart body", b"ABCD" in body)
+        check("document field name present", b'name="document"' in body)
+        check("caption field present", b"caption" in body and b"x" in body)
+        check("boundary terminator present", body.rstrip().endswith(b"--"))
+
     finally:
         shutil.rmtree(td, ignore_errors=True)
 
