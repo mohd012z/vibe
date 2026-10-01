@@ -71,3 +71,12 @@ jobs:
           set -e
           python3 -m pip install --quiet androguard
           python3 tools/apkmod_test.py
+      - name: VibeBot self-test (gateway + jobs + evidence + stateful deepdive)
+        run: |
+          # Proves the RevEngi-style analysis core: job lifecycle, finding
+          # normalization invariants (provenance/confidence/runtime=UNKNOWN),
+          # session persistence, stateful /deepdive (no rescan), gateway
+          # command surface, queue bound, and the apkmod adapter over the
+          # fixture (androguard already installed by the previous step).
+          set -e
+          python3 tools/vibebot_test.py

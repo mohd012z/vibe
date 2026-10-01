@@ -28,6 +28,15 @@ It is **not** a payload collection. It contains:
   DEX call-graph → patch candidates with rollback metadata). Read-only for
   any APK; `--plan` is a dry-run manifest gated on `--authorized`; applying
   patches is a separately-gated later stage (`SPEC.md` + `studies/`)
+- **`tools/vibebot/` — VibeBot core (v0.1)**: a RevEngi-style analysis
+  gateway (study: `studies/2026-10-01-revengi-vibebot.md`) — command
+  router + async job queue (ACK → work → progress/checkpoints) + engine
+  contract with a normalized Finding schema (provenance, derived
+  confidence, `runtime: UNKNOWN` static ceiling) + session store keyed by
+  artifact fingerprint + **stateful `/deepdive`** (traverses the stored
+  evidence graph, never rescans). `apkmod.py` plugs in as the first engine
+  adapter; the Telegram transport is optional and off by default
+  (`--serve`, token via `VIBE_TELEGRAM_TOKEN` env var only)
 - `SPEC.md` — the language-agnostic implementation contract, so any
   implementation (Python CLI, or an in-app "mode menu" in Kotlin testing the
   model behind any APK) produces comparable results
@@ -66,6 +75,45 @@ apkmod.py <apk> --report                   # markdown report card in apk-runs/
 Requires `androguard` for DEX/binary-XML parsing (`uv pip install
 androguard`); `--intake` alone works with stdlib + AXML fallback.
 
+## VibeBot (RevEngi-style analysis gateway, v0.1)
+
+Study: `studies/2026-10-01-revengi-vibebot.md`. Architecture learned from
+RevEngiBot (detect format → select specialist engine → normalize result →
+one interface), independently implemented — **every result keeps
+provenance**, and engines stay swappable behind one contract:
+
+```
+client (CLI / Telegram)
+   -> gateway:      /analyze /status /jobs /sessions /deepdive /report /cancel
+   -> job manager:  ACK immediately, queue, progress + checkpoints, cancel
+   -> engines:      apkmod adapter (INTAKE→DETECT→GRAPH→REPORT), mock
+   -> Finding:      artifact → location → evidence → confidence →
+                    alternatives → verification (runtime UNKNOWN until observed)
+   -> sessions:     sha256 → structural map + findings + deepdive history
+   -> /deepdive:    stateful traverse of the stored graph (no rescan)
+```
+
+```bash
+# one-shot: analyze the fixture APK + sample deepdive (needs androguard)
+python3 tools/vibebot_cli.py --demo
+
+# interactive (type /help) or scripted (one command per line)
+python3 tools/vibebot_cli.py
+echo "/analyze /path/app.apk --engine apkmod
+/sessions
+/deepdive callers --sha <sha256[:16]>" | python3 tools/vibebot_cli.py
+
+# Telegram transport (optional, off by default; token from env ONLY,
+# allowlist via VIBE_BOT_ALLOWED_USERS=123,456 — recommended)
+python3 tools/vibebot_cli.py --serve
+```
+
+Rules carried from the study: heavy analysis never blocks the transport
+(the "hang" fix); static analysis never claims execution; patch planning
+stays behind `apkmod.py`'s `--authorized` boundary (the bot is analysis,
+not modification); the token is never in source, arguments, or logs.
+Tested by `tools/vibebot_test.py` (CI step).
+
 ## General APK / target model
 
 The harness is **target-agnostic**: the only integration surface is
@@ -100,6 +148,12 @@ rubric/        grading + report format
 tools/
   validate.py      offline payload validator (structure, axes, manifest sha256)
   redteam.py       reference runner (stdlib only; --endpoint/--mock/--replay)
+  redteam_test.py  32 regression tests (CI gate)
+  apkmod.py        authorized-APK analysis + dry-run patch planning
+  apkmod_test.py   APK smoke test (fixture, CI gate)
+  vibebot/         VibeBot core v0.1 (RevEngi-style analysis gateway)
+  vibebot_cli.py   VibeBot CLI (+ optional --serve Telegram transport)
+  vibebot_test.py  VibeBot regression suite (CI gate)
 studies/     dated study notes (method distilled from external sources, no text copied)
 SPEC.md      implementation contract for any language / in-app harness
 manifest.json  versioned knowledge manifest (sha256 + schema gate)
