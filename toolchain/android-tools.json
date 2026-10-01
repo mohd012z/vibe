@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "purpose": "Reproducible tool registry for authorized Android APK inspection, decompilation, rebuild, signing and validation.",
+  "tools": {
+    "apktool": {
+      "version": "3.0.3",
+      "role": ["decode-resources", "decode-smali", "rebuild-apk"],
+      "source": "https://github.com/iBotPeaches/Apktool",
+      "release": "https://github.com/iBotPeaches/Apktool/releases/tag/v3.0.3",
+      "notes": "Apktool 3.x uses AAPT2. Keep downloaded artifacts outside git and verify release checksums."
+    },
+    "jadx": {
+      "version": "latest-stable",
+      "role": ["dex-to-java-view", "resource-view", "find-usage", "deobfuscation-assist"],
+      "source": "https://github.com/skylot/jadx",
+      "release": "https://github.com/skylot/jadx/releases/latest",
+      "notes": "Decompiler output is a readability view, not guaranteed original source."
+    },
+    "smali": {
+      "version": "3.0.7",
+      "role": ["dex-disassemble", "dex-assemble", "dexlib2-programmatic-dex"],
+      "source": "https://github.com/google/smali",
+      "release": "https://github.com/google/smali/releases/tag/3.0.7",
+      "maven": [
+        "com.android.tools.smali:smali:3.0.7",
+        "com.android.tools.smali:smali-baksmali:3.0.7",
+        "com.android.tools.smali:smali-dexlib2:3.0.7"
+      ]
+    },
+    "radare2": {
+      "version": "6.2.x",
+      "role": ["native-elf-analysis", "xrefs", "cfg", "binary-search", "native-code-view"],
+      "source": "https://github.com/radareorg/radare2",
+      "notes": "Pin a tested release/commit in CI before production use."
+    },
+    "android-build-tools": {
+      "version": "sdkmanager-managed",
+      "role": ["aapt2", "apksigner", "zipalign", "d8", "adb-validation"],
+      "source": "https://developer.android.com/tools",
+      "notes": "Install through sdkmanager; do not vendor SDK binaries into this repository."
+    },
+    "androguard": {
+      "version": "python-environment",
+      "role": ["binary-manifest", "dex-analysis", "certificate-metadata"],
+      "source": "https://github.com/androguard/androguard",
+      "notes": "Existing tools/apkmod.py already uses androguard when available."
+    }
+  },
+  "pipeline": [
+    "inventory",
+    "manifest-resources",
+    "dex-index",
+    "readability-view",
+    "native-index",
+    "authorized-working-copy",
+    "rebuild",
+    "zipalign",
+    "sign",
+    "verify",
+    "optional-emulator-smoke-test"
+  ]
+}
