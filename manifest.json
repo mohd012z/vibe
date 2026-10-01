@@ -1,0 +1,10 @@
+{
+  "knowledgeVersion": "1.0.0",
+  "schemaVersion": 1,
+  "created": "2026-10-01",
+  "description": "vibe \u2014 defensive LLM red-team methodology (8 technique families, reduced synthetic probes, grading rubric).",
+  "payload": "probes/probes.json",
+  "sha256": "a61bd04d2016d5d75dbb932540d98a5eee647fca54879b8e132aac3f887efb2e",
+  "minimumAppVersion": "2.0",
+  "notes": "Payload is reduced synthetic templates + original prose only; no verbatim text from any external corpus. Consumers must verify sha256 before loading (stage -> verify -> load -> health check -> commit; ROLLBACK on invalid)."
+}
