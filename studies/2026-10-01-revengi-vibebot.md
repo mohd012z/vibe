@@ -325,6 +325,15 @@ P25 self-improvement eval.
   "no static xref" reported as such (absence != non-use). `/xref`
   `/callers` `/callees` wired. Completes /find → /xref → Used By/Uses.
   204 checks.
+- **P10 (/investigate — orchestrated 18-stage)** — DONE:
+  `tools/vibebot/deepdive.py` runs 01 Identity … 18 Summary as a bounded,
+  cancellable JOB that reuses the Vibe IR + xref + claims + router under the
+  P6 budget (per-stage progress → transport shows 01..18 live). Honest
+  marks: deterministic stages ✓; native stages (11 Blocks / 12 CFG) "n/a —
+  requires Radare/Ghidra" when absent; JNI carries "NOT OBSERVED !=
+  IMPOSSIBLE"; 15 Unknowns lists exactly what was not established.
+  `/investigate <path> [target]`; legacy synchronous `/deepdive` preserved
+  (still used by mock tests). run_deepdive reproducible. 228 checks.
 - **P0 (CI + regression)** — STILL OPEN: PR #5 has
   `tests/test_apk_pipeline.py` + `tools/apk_pipeline.py` but CI runs only the
   legacy `tools/apkmod_test.py`. The new pipeline suite never executes in CI.
