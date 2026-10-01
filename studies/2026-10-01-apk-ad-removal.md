@@ -140,3 +140,17 @@ compliance; review queue). `mock_fail` → 21F all STABLE, C2/C3 FAILED
 
 Governance P2 (branch protection, signed commits, GitHub Releases) = repo
 settings outside the code; left for Fatah's call.
+
+### P2 governance status (2026-10-01, Fatah approved "continue")
+- **Branch protection on main: ENABLED** — required status check `validate`
+  (strict: must pass on tip), force-push disabled, branch deletion disabled,
+  rules enforced on admins. (Free-tier personal repos allow direct pushes by
+  the owner; PR merges are gated by the required check.)
+- **GitHub Release: PUBLISHED** — `v1.4.0` tag + release notes at
+  https://github.com/mohd012z/vibe/releases/tag/v1.4.0 (this tag SHA is now
+  the trust anchor referenced by manifest v2's corruption-detection hashes).
+- **Signed commits: PARTIAL** — dedicated ed25519 commit-signing keypair
+  generated; registration on the GitHub account is pending (the API route
+  needs a token scope the current `gh` auth lacks — `gh auth refresh -s
+  admin:public_key` or add the public key under GitHub Settings →
+  Signing keys). Until then commits verify as `verified:false`.
