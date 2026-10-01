@@ -302,6 +302,14 @@ P25 self-improvement eval.
   (EXACT/STRONG/PROBABLE/AMBIGUOUS/CONFLICT/UNRESOLVED); enforces
   "never merge PROBABLE as EXACT" + "fp match w/ different name = CONFLICT".
   The contract future Radare/JADX/Ghidra providers route through.
+- **P3 (Evidence + Claim model)** — DONE: `tools/vibebot/claims.py` derives
+  first-class Claim objects (pure, deterministic) from the IR + DEX
+  byte-integrity: E1–E5 strength table (what each *can* establish), 6
+  CodeTransparent categories, 7-state machine enforced by `transition()`
+  (no skipping — "Found" never silently becomes "proved"), `/claims` board
+  + `/why` CLAIM→EVIDENCE→REF→ARTIFACT trace. NOT OBSERVED ≠ IMPOSSIBLE
+  (orphan strings PROPOSED; native = "backing .so NOT OBSERVED"); coverage
+  is a statement, never a fake confidence %. 172 checks.
 - **P0 (CI + regression)** — STILL OPEN: PR #5 has
   `tests/test_apk_pipeline.py` + `tools/apk_pipeline.py` but CI runs only the
   legacy `tools/apkmod_test.py`. The new pipeline suite never executes in CI.
