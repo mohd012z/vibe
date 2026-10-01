@@ -344,10 +344,38 @@ P25 self-improvement eval.
   maps r2/ghidra/Frida entities to canonical N-ids via the SAME six-state
   EntityResolver. /native <path> (job): .so direct or APK .so extraction;
   degrades to a COMPLETED "not installed — NOT OBSERVED" marker. 252 checks.
-- **P0 (CI + regression)** — STILL OPEN: PR #5 has
-  `tests/test_apk_pipeline.py` + `tools/apk_pipeline.py` but CI runs only the
-  legacy `tools/apkmod_test.py`. The new pipeline suite never executes in CI.
-  This is the real P0 and it is a few lines in the workflow.
+- **P0 (CI + regression)** — DONE (this branch's half): `2925d83` added a
+  GUARDED step to `validate.yml` that runs PR #5's pytest suite when its
+  test files exist on the tree (no-op here); verified on the combined tree
+  (PR #5 head + VibeBot) that both suites pass together (252 + 45, no module
+  collision). The `validate.yml` conflict at merge time is now de-risked;
+  final resolution is a deliberate human choice at merge (Fatah).
+- **P11 (Falsifier — deterministic mechanical refutation)** — DONE:
+  `tools/vibebot/falsify.py` — after claims are derived, each falsifiable
+  fact is re-checked against an INDEPENDENT reading of the graph (counts
+  vs. lists; native-flag divergence between the two DEX passes in
+  build_graph; dangling string refs; claim-level recounts of call edges /
+  string refs / native nodes). Ported from ghidra-mcp's falsify.py +
+  DOC_REFUTED pattern (study of bethington/ghidra-mcp, 2026-10-02).
+  Severity-graded: tier1 hard contradiction moves the claim to CONFLICTED
+  (or REJECTED if only PROPOSED) strictly via the claims.TRANSITIONS state
+  machine — the falsifier challenges, never skips a state, never deletes;
+  note-severity (e.g. framework/external call target) is advisory only.
+  `/falsify [--sha]` command + FALSIFIER section appended to `/claims` +
+  `[F1]` contradiction rendering in `/why`. Pure (no androguard), tested on
+  synthetic clean + corrupted graphs (zero false positives / every
+  corruption caught) + fixture e2e. 270 checks (+18).
+- **Kotlin @Metadata name recovery + cross-version fingerprinting** —
+  DEFERRED (honest disclosure): message-level field numbers verified
+  against the authoritative `core/metadata/src/metadata.proto`
+  (Function.name=2, Class.function=9, constructor=8, fq_name=3,
+  StringTable.string=1, PackageFragment.class=4, Property.name=2), but the
+  top-level `Metadata` envelope positions still need verification against a
+  REAL Kotlin APK — per the repo invariant "never hand-roll binary-format
+  constants from memory," the parser is held until a sample (or a JDK to
+  compile one) exists. Design for both items is in
+  `studies/2026-10-02-external-study-lupoxyz-ghidra-mcp.md` (backlog items
+  2–3).
 
 ## Open items (need Fatah/Anam decision)
 
