@@ -758,6 +758,150 @@ def main() -> int:
                   _j10.dumps(a, sort_keys=True)
                   == _j10.dumps(b, sort_keys=True))
 
+        print("== P5: Radare native provider (pure — injected runner) ==")
+        import struct as _struct
+        from vibebot import native as nat
+        # --- synthetic ELF64 with 2 LOAD segments ---
+        def _mk_elf():
+            b = bytearray(64); b[:4] = b"\x7fELF"; b[4] = 2; b[5] = 1; b[6] = 1
+            _struct.pack_into("<H", b, 0x10, 2); _struct.pack_into("<H", b, 0x12, 0xB7)
+            _struct.pack_into("<I", b, 0x18, 1)
+            _struct.pack_into("<I", b, 0x20, 64); _struct.pack_into("<H", b, 0x36, 56)
+            _struct.pack_into("<H", b, 0x38, 2)
+            def _ph(off, va, fsize, typ=1):
+                seg = bytearray(56); _struct.pack_into("<I", seg, 0, typ)
+                _struct.pack_into("<Q", seg, 8, off); _struct.pack_into("<Q", seg, 16, va)
+                _struct.pack_into("<Q", seg, 32, fsize); return seg
+            return bytes(b + _ph(0x1000, 0x400000, 0x100) + _ph(0x2000, 0x400100, 0x80))
+        elf = _mk_elf()
+        segs = nat.elf_segments_64(elf)
+        check("elf_segments_64 parses 2 segments", len(segs) == 2, str(segs))
+        off, exact = nat.va_to_offset(0x400050, segs)
+        check("va_to_offset exact (in segment)", off == 0x1050 and exact, f"{hex(off)} {exact}")
+        off2, exact2 = nat.va_to_offset(0xFFFF, segs)
+        check("va_to_offset approx (no segment) flagged", not exact2, str((off2, exact2)))
+        check("va_to_offset non-ELF -> []", nat.elf_segments_64(b"nope") == [])
+        # --- parsers (pure) ---
+        fns = nat.parse_functions("0x00400050  112  foo\n0x00400120  64  bar\n")
+        check("parse_functions rows + r2_id",
+              fns[0]["va"] == 0x400050 and fns[0]["name"] == "foo"
+              and fns[0]["r2_id"] == "fcn.00400050", str(fns))
+        check("parse_exports names",
+              nat.parse_exports("0x00400120  64  Java_a_b\n0x00400050  112  foo")
+              == ["Java_a_b", "foo"])
+        imps = nat.parse_imports("__cxa_finalize:libc.so.6\nprintf:libc.so.6\n")
+        check("parse_imports sym:module",
+              imps[0] == {"name": "__cxa_finalize", "module": "libc.so.6"}, str(imps))
+        # --- injected FakeRunner -> full analyze_native (no r2 needed) ---
+        class _FR:
+            bin = "r2"
+            def version(self):
+                return "radare2 6.2.4 fake"
+            def run(self, path, cmd):
+                return {"aflj": "0x00400050  112  foo\n0x00400120  64  Java_com_foo_Bar_doIt\n",
+                        "iEj": "0x00400120  64  Java_com_foo_Bar_doIt\n0x00400050  112  foo\n",
+                        "iI": "__cxa_finalize:libc.so.6\n"}.get(cmd, "")
+        tmp_so = os.path.join(td, "libfoo.so")
+        with open(tmp_so, "wb") as _f:
+            _f.write(elf)
+        n = nat.analyze_native(tmp_so, _FR(), segments=segs)
+        check("analyze_native counts", n["counts"] == {"function": 2, "export": 2,
+                                                       "import": 1}, str(n["counts"]))
+        check("analyze_native location chain va+file_offset",
+              n["functions"][0]["va"] == 0x400050
+              and n["functions"][0]["file_offset"] == 0x1050
+              and n["functions"][0]["offset_exact"] is True, str(n["functions"][0]))
+        check("analyze_native provenance (provider version + isolation)",
+              n["provenance"]["isolation"] == "subprocess"
+              and "radare2" in n["provider_version"], str(n["provenance"]))
+        check("render_native shows LIB + functions + imports",
+              "LIB libfoo.so" in nat.render_native(n) and "imports" in nat.render_native(n)
+              and "fcn.00400050" in nat.render_native(n))
+        # --- JNI bridge: EXACT for found, NOT OBSERVED for missing ---
+        natives = [{"id": "N1", "class": "com.foo.Bar", "method": "doIt"},
+                   {"id": "N2", "class": "com.foo.Baz", "method": "missing"}]
+        edges = nat.build_jni_map(natives, n["exports"])
+        check("JNI EXACT for matching export",
+              edges[0]["status"] == "EXACT" and edges[0]["export"]
+              == "Java_com_foo_Bar_doIt", str(edges[0]))
+        check("JNI NOT OBSERVED for missing export (no false positive)",
+              edges[1]["status"] == "NOT OBSERVED" and edges[1]["export"] is None
+              and "NOT OBSERVED != IMPOSSIBLE" in edges[1]["note"], str(edges[1]))
+        check("render_jni_map shows bridge + honest note",
+              "JNI BRIDGE" in nat.render_jni_map(edges) and "NOT OBSERVED" in nat.render_jni_map(edges))
+        # --- EntityResolver maps native entities to canonical N-ids ---
+        from vibebot import graphutil as _gu
+        fp_a = _gu._fp_fingerprints("com.foo.Bar.doIt")        # androguard name
+        fp_b = _gu._fp_fingerprints("java_com_foo_bar_doit")   # radare2 name
+        known = [{"provider": "androguard", "name": "com.foo.Bar.doIt",
+                  "canonical_id": "N1", "fingerprints": fp_a},
+                 {"provider": "radare2", "name": "Java_com_foo_Bar_doIt",
+                  "canonical_id": "N2", "fingerprints": fp_b}]
+        # EXACT: a provider's own entity (same provider + same name)
+        check("resolver: r2 own entity EXACT",
+              nat.resolve_native_entity(known, "Java_com_foo_Bar_doIt")["status"]
+              == "EXACT")
+        # STRONG: cross-provider, fingerprint match, single hit, name agrees
+        check("resolver: ghidra + r2 fp match -> STRONG",
+              nat.resolve_native_entity(known, "Java_com_foo_Bar_doIt",
+                                        fingerprints=fp_b,
+                                        provider="ghidra")["status"] == "STRONG")
+        # CONFLICT: fingerprint matches but the name disagrees (never merge)
+        check("resolver: fp match + different name -> CONFLICT",
+              nat.resolve_native_entity(known, "totallyDifferent",
+                                        fingerprints=fp_b,
+                                        provider="ghidra")["status"] == "CONFLICT")
+        # UNRESOLVED: nothing close
+        check("resolver: nothing close -> UNRESOLVED",
+              nat.resolve_native_entity(known, "zzz-no-match",
+                                        provider="ghidra")["status"] == "UNRESOLVED")
+        # --- honest degrade: ProviderUnavailable when r2 absent ---
+        class _RealNo:  # mimics the real runner when r2 is missing
+            bin = "definitely-not-a-real-bin-xyz"
+            def version(self): return "x"
+            def run(self, path, cmd):
+                raise nat.ProviderUnavailable("no bin")
+        try:
+            nat.analyze_native(tmp_so, _RealNo())
+            check("ProviderUnavailable raised for missing r2", False)
+        except nat.ProviderUnavailable:
+            check("ProviderUnavailable raised for missing r2", True)
+        # non-ELF rejected
+        bad = os.path.join(td, "bad.so"); open(bad, "wb").write(b"notanelf")
+        try:
+            nat.analyze_native(bad, _FR(), segments=[])
+            check("non-ELF rejected (ProviderError)", False)
+        except nat.ProviderError:
+            check("non-ELF rejected (ProviderError)", True)
+
+        if HAVE_ANDROGUARD:
+            print("== P5 e2e: /native through gateway (honest degrade) ==")
+            gwn = gateway.Gateway(td)
+            # APK with no native libs -> honest "no native libraries"
+            _, jn = gwn.handle(f"/native {FIXTURE}", user="test")
+            gwn.process_pending()
+            check("/native on APK (no native libs) COMPLETED honestly",
+                  jn is not None and jn.state == core.Job.COMPLETED
+                  and "no native libraries" in
+                  (jn.result.structural["native"].get("note") or ""),
+                  str(jn.result.structural["native"] if jn and jn.result else None))
+            # a real .so file -> provider NOT OBSERVED (r2 absent here)
+            so2 = os.path.join(td, "liby.so")
+            with open(so2, "wb") as _f:
+                _f.write(elf)
+            _, jn2 = gwn.handle(f"/native {so2}", user="test")
+            gwn.process_pending()
+            check("/native on .so degrades to 'not installed' (COMPLETED, honest)",
+                  jn2 is not None and jn2.state == core.Job.COMPLETED
+                  and jn2.result.structural["native"].get("available") is False
+                  and "NOT OBSERVED" in
+                  jn2.result.structural["native"].get("note", ""),
+                  str(jn2.result.structural["native"] if jn2 and jn2.result else None))
+            r, _ = gwn.handle("/native")
+            check("/native no-arg shows usage", "<path>" in r, r)
+            r, _ = gwn.handle("/native /nope/missing.so")
+            check("/native missing path refused", "not found" in r, r)
+
         if HAVE_ANDROGUARD:
             print("== P4: /find TargetFinder + canonical EntityResolver ==")
             # fresh gateway (stateful /find needs a prior /apk in the SAME gw)

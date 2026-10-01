@@ -50,6 +50,7 @@ HELP = """vibebot commands
   /capabilities          what's installed here (honest detection)
   /analyze <path> [--engine apkmod|dexmapper] [--fingerprints <json>]
   /dex <path>            DEX Mapper job: class->method->call map + JNI + integrity
+  /native <path>         Radare native provider: ELF fns/imports/exports + JNI bridge
   /smali <name|0x..|substr>   query the Dalvik opcode table
   /base <value> <from> <to>   convert between number bases (2..36)
   /hash <text>           sha256 of a text string
@@ -105,6 +106,9 @@ class Gateway:
                 from . import deepdive
                 m["deepdive"] = deepdive.DeepDiveEngine(
                     os.path.join(self.work_dir, "reports"))
+                from . import native
+                m["native"] = native.NativeEngine(
+                    os.path.join(self.work_dir, "reports"))
         except Exception:
             pass
         return m
@@ -116,6 +120,7 @@ class Gateway:
         if not parts or parts[0] not in (
                 "/apk", "/map", "/find", "/xref", "/callers", "/callees",
                 "/claims", "/why", "/plan", "/capabilities", "/analyze", "/dex",
+                "/native",
                 "/smali", "/base", "/hash", "/dexcheck", "/dexrepair", "/status",
                 "/jobs", "/sessions", "/deepdive", "/investigate", "/report",
                 "/cancel", "/help", "/start"):
@@ -178,6 +183,9 @@ class Gateway:
 
         if cmd == "/dex":
             return self._dex(parts[1:], user)
+
+        if cmd == "/native":
+            return self._native(parts[1:], user)
 
         if cmd == "/status":
             jid = parts[1] if len(parts) > 1 else self._last_job_id()
@@ -277,6 +285,26 @@ class Gateway:
         except (KeyError, FileNotFoundError, RuntimeError) as e:
             return f"error: {e}", None
         return (f"ACK {job.id}  engine=dexmapper\n"
+                f"  queued — /status {job.id}  /cancel {job.id}"), job
+
+    def _native(self, parts: list[str], user: str) -> tuple[str, core.Job | None]:
+        if not parts:
+            return ("/native <path>   (Radare native provider: ELF functions/"
+                    "imports/exports + LocationResolver + JNI bridge; "
+                    "path = .so or .apk)"), None
+        if "native" not in self.engines:
+            return ("error: native provider needs androguard (uv pip install "
+                    "androguard); degrades to 'not installed' if radare2 is "
+                    "also absent"), None
+        path = os.path.abspath(os.path.expanduser(parts[0]))
+        if not os.path.exists(path):
+            return f"error: artifact not found (refused: {os.path.basename(path)})", None
+        try:
+            job = self.jobs.submit("native", path, user, "native",
+                                   self._budget_params(parts))
+        except (KeyError, FileNotFoundError, RuntimeError) as e:
+            return f"error: {e}", None
+        return (f"ACK {job.id}  engine=native\n"
                 f"  queued — /status {job.id}  /cancel {job.id}"), job
 
     def _apk(self, parts: list[str], user: str) -> tuple[str, core.Job | None]:
