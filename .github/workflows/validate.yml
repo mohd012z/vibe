@@ -18,33 +18,31 @@ jobs:
         run: |
           set -e
           python3 tools/redteam.py --mock mock_resist --out-dir /tmp/rt-resist > /dev/null
-          python3 tools/redteam.py --mock mock_fail  --out-dir /tmp/rt-fail  > /dev/null
+          python3 tools/redteam.py --mock mock_fail --out-dir /tmp/rt-fail > /dev/null
           python3 - <<'EOF'
           import json, glob
           def stats(d):
-              recs = [json.loads(l) for l in open(sorted(glob.glob(d + "/evidence-*.jsonl"))[-1])]
-              r = [x for x in recs if not isinstance(x.get("_meta"), dict)]
-              s = json.load(open(d + "/report.json"))["summary"]
-              assert s["harness_error"] == 0, s
-              return s, r
-          for d in ("/tmp/rt-resist", "/tmp/rt-fail"):
-              _, r = stats(d)
+              recs=[json.loads(l) for l in open(sorted(glob.glob(d+"/evidence-*.jsonl"))[-1])]
+              r=[x for x in recs if not isinstance(x.get("_meta"),dict)]
+              s=json.load(open(d+"/report.json"))["summary"]
+              assert s["harness_error"]==0,s
+              return s,r
+          for d in ("/tmp/rt-resist","/tmp/rt-fail"):
+              _,r=stats(d)
               for rec in r:
-                  for t in rec.get("turns", []):
-                      assert "raw" not in t, f"raw leaked into evidence: {rec['id']}"
-                      assert len(t.get("snippet", "")) <= 160, f"snippet >160: {rec['id']}"
-                      assert "sha256" in t and "length" in t, f"missing hash/len: {rec['id']}"
-          s1, _ = stats("/tmp/rt-resist")
-          s2, _ = stats("/tmp/rt-fail")
-          assert s1["resisted"] == 29 and s1["failed"] == 0 and s1["partial"] == 1 and s1["controls_ok"], s1
-          assert s2["failed"] >= 15, s2
-          assert len(s2["stable_failed"]) == s2["failed"], (s2["stable_failed"], s2["failed"])
+                  for t in rec.get("turns",[]):
+                      assert "raw" not in t
+                      assert len(t.get("snippet",""))<=160
+                      assert "sha256" in t and "length" in t
+          s1,_=stats("/tmp/rt-resist"); s2,_=stats("/tmp/rt-fail")
+          assert s1["resisted"]==29 and s1["failed"]==0 and s1["partial"]==1 and s1["controls_ok"],s1
+          assert s2["failed"]>=15,s2
+          assert len(s2["stable_failed"])==s2["failed"]
           import subprocess
-          ev = sorted(glob.glob("/tmp/rt-resist/evidence-*.jsonl"))[-1]
-          out = subprocess.run(["python3", "tools/redteam.py", "--replay", ev, "--out-dir", "/tmp/rt-replay"], capture_output=True, text=True)
-          assert out.returncode == 0, out.stderr
-          assert "no verdict changes" in out.stdout, out.stdout
-          print("harness self-test OK:", s1, "| failed-target:", s2["failed"], "STABLE")
+          ev=sorted(glob.glob("/tmp/rt-resist/evidence-*.jsonl"))[-1]
+          out=subprocess.run(["python3","tools/redteam.py","--replay",ev,"--out-dir","/tmp/rt-replay"],capture_output=True,text=True)
+          assert out.returncode==0,out.stderr
+          assert "no verdict changes" in out.stdout
           EOF
       - name: Regression suite (audit P0/P1 defect tests)
         run: python3 tools/redteam_test.py
@@ -57,4 +55,4 @@ jobs:
         run: |
           set -e
           python3 -m pip install --quiet pytest
-          python3 -m pytest -q tests/test_apk_pipeline.py tests/test_vibe_conversation.py tests/test_vibe_capabilities.py tests/test_vibe_evidence.py tests/test_vibe_claims.py tests/test_vibe_memory.py
+          python3 -m pytest -q tests/test_apk_pipeline.py tests/test_vibe_conversation.py tests/test_vibe_capabilities.py tests/test_vibe_evidence.py tests/test_vibe_claims.py tests/test_vibe_memory.py tests/test_vibe_orchestrator.py
