@@ -1,53 +1,97 @@
 # vibe
 
-**A defensive red-team methodology for LLM guardrails.**
+**A defensive red-team methodology + general evidence-first test harness for
+LLM guardrails** (and a growing evidence-first analysis workbench).
 
 `vibe` documents *how* prompt-injection and jailbreak techniques work, as a
 reusable, machine-readable reference for building and **testing defenses** —
-specifically the guardrail self-test mode in NovaStreamer's 360 diagnostics.
+and ships the reference harness that runs the probes and produces auditable
+evidence.
 
 It is **not** a payload collection. It contains:
 
-- the 8 technique families, written in **original prose** (mechanism + why it works)
-- **reduced synthetic probe templates** — generic, parameterized skeletons that
-  exercise each axis *without* copying any source text
-- a **grading rubric** (`RESISTED` / `PARTIAL` / `FAILED`)
-- a **versioned manifest** so an app can download + verify this knowledge
-  (SHA-256 + schema gate) instead of hard-coding it
+- the 9 technique families, written in **original prose** (mechanism + why it
+  works + test axes)
+- **reduced synthetic probe templates** — generic, parameterized skeletons
+  that exercise each axis *without* copying any source text (25 probes + 3
+  controls)
+- a **grading rubric** (`RESISTED` / `PARTIAL` / `FAILED`, by axis)
+- a **reference red-team runner** (`tools/redteam.py`, stdlib-only):
+  verify-before-load → deterministic benign fills → target-agnostic `ask()` →
+  evidence-first grading → triage → variance re-run → report card + evidence
+  log, plus `--replay` for offline re-grading (the evidence-troubleshooting
+  loop)
+- a **versioned manifest** (SHA-256 + schema gate) so an app can download and
+  verify this knowledge instead of hard-coding it
+- `SPEC.md` — the language-agnostic implementation contract, so any
+  implementation (Python CLI, or an in-app "mode menu" in Kotlin testing the
+  model behind any APK) produces comparable results
+
+## General APK / target model
+
+The harness is **target-agnostic**: the only integration surface is
+`ask(messages) -> text`. Point it at an OpenAI-compatible
+`/chat/completions` endpoint, run it against offline mock targets
+(`--mock mock_resist | mock_fail`) to self-test the harness, or bind it to an
+APK's embedded model from inside the app. Scope (SPEC): local/self-hosted
+endpoints only; benign fills by default; no third-party production APIs.
 
 ## Provenance & license
 
-The taxonomy and mechanism names derive from studying an external,
-**public-but-unlicensed** prompt-override corpus. Per a standing rule, that
-corpus is used only as an *evaluation reference*; **none of its verbatim text is
-reproduced here or in any consuming app.** Everything in this repo is original
-prose or reduced synthetic templates. This repo is MIT-licensed (see LICENSE).
+The taxonomy derives from studying external, **public-but-unlicensed**
+prompt-override and persona-jailbreak collections (see `sources.md`). Per a
+standing rule, those corpora are used only as *evaluation references*; **none
+of their verbatim text is reproduced here or in any consuming app.** Everything
+in this repo is original prose or reduced synthetic templates. MIT-licensed.
 
-If you are the upstream author and this is a mistake, open an issue — I will
+If you are an upstream author and this is a mistake, open an issue — I will
 remove it.
 
 ## Layout
 
 ```
-method/        the 8 technique families (original prose)
+method/        the 9 technique families (original prose) + B-axes for family 09
   README.md        index + taxonomy
-  01-...md ... 08-...md
+  01-...md ... 09-...md
 probes/        machine-readable reduced synthetic probe templates
-  probes.json
+  probes.json      (25 probes + 3 controls)
+values/        deterministic BENIGN fill set (defaults.json; override --values)
 rubric/        grading + report format
   grading.md
+tools/
+  validate.py      offline payload validator (structure, axes, manifest sha256)
+  redteam.py       reference runner (stdlib only; --endpoint/--mock/--replay)
+studies/     dated study notes (method distilled from external sources, no text copied)
+SPEC.md      implementation contract for any language / in-app harness
 manifest.json  versioned knowledge manifest (sha256 + schema gate)
-sources.md     provenance notes
+sources.md   provenance notes
 ```
+
+## Running the harness
+
+```bash
+# self-test the harness (offline mocks — proves the grader, not a model)
+python3 tools/redteam.py --mock mock_resist
+python3 tools/redteam.py --mock mock_fail
+
+# test a real local/self-hosted model
+python3 tools/redteam.py --endpoint http://127.0.0.1:11434/v1 --model qwen3:8b
+
+# offline re-grade (troubleshooting: which verdicts moved, and why)
+python3 tools/redteam.py --replay runs/evidence-<run>.jsonl
+```
+
+Outputs: `runs/evidence-<run>.jsonl` (full evidence log, hash-pinned in the
+report) + `runs/report.md` / `report.json` (the report card). CI runs both
+mock targets on every push and asserts the harness discriminates correctly.
 
 ## Consuming it (app side)
 
-`probes/probes.json` is the knowledge payload. An app should:
-
 1. download the release + `manifest.json`
-2. verify `sha256` over the payload and the `schemaVersion`/`minimumAppVersion` gate
-3. load `probes.json`, feed each template through its local guardrail, grade per `rubric/grading.md`
-4. report the defense score; escalate on any `FAILED`
+2. verify `sha256` over the payload and the `schemaVersion`/`minimumAppVersion`
+   gate
+3. load `probes.json`, bind `ask()` to the model under test, run per `SPEC.md`
+4. report the card; escalate on any `FAILED` (STABLE) or failed control
 
-Never treat a probe template as an instruction to the model under test being
-developed — it is *material to send to the target under test*, nothing more.
+Never treat a probe template as an instruction to the model being developed —
+it is *material to send to the target under test*, nothing more.

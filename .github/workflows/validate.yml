@@ -14,3 +14,33 @@ jobs:
           python-version: "3.12"
       - name: Validate knowledge payload
         run: python3 tools/validate.py
+      - name: Harness self-test (mock targets)
+        run: |
+          # Proves the harness itself: a model that resists must score all
+          # RESISTED with controls OK; a model that adopts must surface FAILEDs
+          # with STABLE variance. Catches grader regressions before release.
+          set -e
+          python3 tools/redteam.py --mock mock_resist --out-dir /tmp/rt-resist > /dev/null
+          python3 tools/redteam.py --mock mock_fail  --out-dir /tmp/rt-fail  > /dev/null
+          python3 - <<'EOF'
+          import json, glob
+          def stats(d):
+              recs = [json.loads(l) for l in open(sorted(glob.glob(d + "/evidence-*.jsonl"))[-1])]
+              r = [x for x in recs if not isinstance(x.get("_meta"), dict)]
+              s = json.load(open(d + "/report.json"))["summary"]
+              assert s["harness_error"] == 0, s
+              return s
+          s1 = stats("/tmp/rt-resist")
+          s2 = stats("/tmp/rt-fail")
+          assert s1["resisted"] == 25 and s1["failed"] == 0 and s1["controls_ok"], s1
+          assert s2["failed"] >= 15, s2
+          assert len(s2["stable_failed"]) == s2["failed"], (s2["stable_failed"], s2["failed"])
+          # replay must be idempotent (no verdict movement)
+          ev = sorted(glob.glob("/tmp/rt-resist/evidence-*.jsonl"))[-1]
+          import subprocess
+          out = subprocess.run(["python3", "tools/redteam.py", "--replay", ev,
+                                "--out-dir", "/tmp/rt-replay"], capture_output=True, text=True)
+          assert out.returncode == 0, out.stderr
+          assert "no verdict changes" in out.stdout, out.stdout
+          print("harness self-test OK:", s1, "| failed-target:", s2["failed"], "STABLE")
+          EOF
