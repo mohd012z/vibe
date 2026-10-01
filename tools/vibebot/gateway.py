@@ -43,6 +43,8 @@ HELP = """vibebot commands
   /find <text> --sha <…> TargetFinder: strings/resources/classes/methods/components
   /claims [--sha <…>]    Evidence board: every claim + state + E-level
   /why <C-id> [--sha <…>] CodeTransparent trace: claim -> evidence -> bytes
+  /plan <goal>           cheapest-capable method plan (live providers)
+  /capabilities          what's installed here (honest detection)
   /analyze <path> [--engine apkmod|dexmapper] [--fingerprints <json>]
   /dex <path>            DEX Mapper job: class->method->call map + JNI + integrity
   /smali <name|0x..|substr>   query the Dalvik opcode table
@@ -105,7 +107,8 @@ class Gateway:
         """Parse one command, ACK immediately. Returns (reply, accepted job)."""
         parts = (text or "").strip().split()
         if not parts or parts[0] not in (
-                "/apk", "/map", "/find", "/claims", "/why", "/analyze", "/dex",
+                "/apk", "/map", "/find", "/claims", "/why", "/plan",
+                "/capabilities", "/analyze", "/dex",
                 "/smali", "/base", "/hash", "/dexcheck", "/dexrepair", "/status",
                 "/jobs", "/sessions", "/deepdive", "/report", "/cancel",
                 "/help", "/start"):
@@ -124,6 +127,10 @@ class Gateway:
             return self._claims(parts[1:])
         if cmd == "/why":
             return self._why(parts[1:])
+        if cmd == "/plan":
+            return self._plan(parts[1:])
+        if cmd == "/capabilities":
+            return self._capabilities(parts[1:])
         if cmd == "/smali":
             return self._smali(parts[1:])
         if cmd == "/base":
@@ -195,6 +202,25 @@ class Gateway:
                 return parts[i + 1]
         return None
 
+    def _budget_params(self, parts: list[str]) -> dict:
+        """Parse --max-wall / --max-calls / --max-depth / --stall-* into the
+        job params that JobManager feeds to router.budget_from_params."""
+        p: dict = {}
+        for flag, key, cast in (
+            ("--max-wall", "max_wall", float),
+            ("--max-calls", "max_calls", int),
+            ("--max-depth", "max_depth", int),
+            ("--stall-repeats", "stall_repeats", int),
+            ("--stall-window", "stall_window", float),
+        ):
+            v = self._arg(parts, flag)
+            if v is not None:
+                try:
+                    p[key] = cast(v)
+                except ValueError:
+                    p[key] = v  # let budget_from_params surface a bad value
+        return p
+
     # --------------------------------------------------------------- routes
     def _analyze(self, parts: list[str], user: str) -> tuple[str, core.Job | None]:
         if not parts:
@@ -204,7 +230,7 @@ class Gateway:
             return f"error: artifact not found (refused: {os.path.basename(path)})", None
         engine = self._arg(parts, "--engine") or None
         fp = self._arg(parts, "--fingerprints")
-        params = {}
+        params = self._budget_params(parts)
         if fp:
             fp_path = os.path.abspath(os.path.expanduser(fp))
             if not os.path.exists(fp_path):
@@ -230,7 +256,8 @@ class Gateway:
         if not os.path.exists(path):
             return f"error: artifact not found (refused: {os.path.basename(path)})", None
         try:
-            job = self.jobs.submit("dex", path, user, "dexmapper")
+            job = self.jobs.submit("dex", path, user, "dexmapper",
+                                   self._budget_params(parts))
         except (KeyError, FileNotFoundError, RuntimeError) as e:
             return f"error: {e}", None
         return (f"ACK {job.id}  engine=dexmapper\n"
@@ -248,7 +275,8 @@ class Gateway:
         if not os.path.exists(path):
             return f"error: artifact not found (refused: {os.path.basename(path)})", None
         try:
-            job = self.jobs.submit("apk", path, user, "graph")
+            job = self.jobs.submit("apk", path, user, "graph",
+                                   self._budget_params(parts))
         except (KeyError, FileNotFoundError, RuntimeError) as e:
             return f"error: {e}", None
         return (f"ACK {job.id}  engine=graph\n"
@@ -347,6 +375,44 @@ class Gateway:
         if not cl:
             return (f"session {sha[:8]}… has no claim set yet — run /apk <path>"), None
         return cmod.why(cl, claim_id, sha), None
+
+    def _plan(self, parts: list[str]) -> tuple[str, None]:
+        from . import router
+        if not parts:
+            goals = ", ".join(sorted(router.METHOD_CATALOG))
+            return (f"/plan <goal>   (cheapest-capable method plan)\n"
+                    f"  goals: {goals}"), None
+        goal = parts[0].lower()
+        if goal not in router.METHOD_CATALOG:
+            goals = ", ".join(sorted(router.METHOD_CATALOG))
+            return f"unknown goal '{goal}'. Goals: {goals}", None
+        p = router.plan(goal)
+        lines = [f"PLAN '{goal}'   (cheapest-capable; live providers)",
+                 f"  >> {p['summary']}"]
+        if p["available"]:
+            lines.append("  available:")
+            for r in p["available"]:
+                lines.append(f"    [{r['evidence']}/{r['cost']}] {r['method']}"
+                             f"  value={r['value']}  — {r['note']}")
+        if p["unavailable"]:
+            lines.append("  unavailable (honest — install to enable):")
+            for r in p["unavailable"]:
+                lines.append(f"    [{r['evidence']}/{r['cost']}] {r['method']}"
+                             f"  — {r['note']}")
+        lines.append("  budget: every job is capped (wall≤300s default, "
+                     "stall-detected) — /status shows it")
+        return "\n".join(lines), None
+
+    def _capabilities(self, parts: list[str]) -> tuple[str, None]:
+        from . import router
+        provs = router.detect_providers()
+        lines = ["CAPABILITIES on this host   (live detection)"]
+        for name, ok in provs.items():
+            note = router.PROVIDER_NOTES.get(name, "")
+            lines.append(f"  [{'x' if ok else ' '}] {name:<12} {note}")
+        lines.append("\n  only available providers are used; missing ones "
+                     "degrade honestly (never faked).")
+        return "\n".join(lines), None
 
     # ------------------------------------------------- P2 utility handlers
     def _smali(self, parts: list[str]) -> tuple[str, None]:

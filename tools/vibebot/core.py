@@ -116,13 +116,18 @@ class Job:
         self.started: float | None = None
         self.finished: float | None = None
         self._cancel = False
+        self.budget: Any = None  # router.Budget, attached by JobManager._run
 
     # -- reporting ----------------------------------------------------------
     def progress(self, step: str, pct: int, note: str = "") -> None:
+        if self.budget is not None:
+            self.budget.record_progress(step, pct, note)
         self.events.append({"ts": time.time(), "type": "progress",
                             "step": step, "pct": pct, "note": note})
 
     def checkpoint(self, step: str, state: Any) -> None:
+        if self.budget is not None:
+            self.budget.check_wall()
         self.checkpoints[step] = state
         self.events.append({"ts": time.time(), "type": "checkpoint",
                             "step": step})
@@ -201,12 +206,15 @@ class JobManager:
         return out
 
     def _run(self, job: Job) -> None:
+        from . import router
         eng = self.engines[job.engine]
         job.state = Job.RUNNING
         job.started = time.time()
+        job.budget = router.budget_from_params(job.params)
         try:
             job.progress("intake", 0, "starting")
-            res = eng.run(job)
+            res = router.run_with_watchdog(  # type: ignore[return-value]
+                lambda: eng.run(job), job.budget)
             if job.cancelled():
                 job.state = Job.CANCELLED
             else:
@@ -215,6 +223,9 @@ class JobManager:
                 self.sessions.upsert(sha, job.engine, res)
                 job.result = res
                 job.state = Job.COMPLETED
+        except router.BudgetExceeded as e:
+            job.error = f"budget: {e.reason}"
+            job.state = Job.FAILED
         except Exception as e:  # noqa: BLE001 — job boundary
             job.error = f"{type(e).__name__}: {e}"
             job.state = Job.FAILED

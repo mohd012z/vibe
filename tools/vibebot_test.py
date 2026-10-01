@@ -25,6 +25,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOOLS = os.path.dirname(os.path.abspath(__file__))
@@ -503,6 +504,126 @@ def main() -> int:
                 # /claims with no session is honest
                 rw, _ = gwc.handle("/claims --sha " + "ee"*16)
                 check("/claims no-session is honest", "run /apk" in rw, rw)
+
+        print("== P6: CapabilityRouter + AnalysisBudget + stop-controller ==")
+        from vibebot import router
+        # live provider detection is honest (androguard present on this host)
+        provs = router.detect_providers()
+        check("provider detection includes androguard=True",
+              provs.get("androguard") is True, str(provs))
+        check("native providers detected as absent (this host)",
+              all(provs.get(x) is False for x in
+                  ("radare2", "jadx", "ghidra", "frida")), str(provs))
+        # plan: cheapest-capable ranking, available first
+        p = router.plan("locate_string")
+        check("plan ranks available before unavailable",
+              len(p["available"]) >= 1 and
+              all(r["provider"] is None or provs.get(r["provider"])
+                  for r in p["available"]), str(p["available"]))
+        check("plan picks the cheapest capable as the lead",
+              "DEX string search" in p["summary"], p["summary"])
+        check("plan is honest about unavailable native method",
+              any("NOT AVAILABLE" in r["note"] for r in p["unavailable"]),
+              str(p["unavailable"]))
+        # plan: a goal with NO available provider degrades honestly
+        pn = router.plan("native_analysis")
+        check("plan with nothing available says NONE",
+              "NONE available" in pn["summary"], pn["summary"])
+        check("plan value scales with evidence tier / cost",
+              all(r["value"] >= 1.0 for r in p["available"]),
+              str(p["available"]))
+        # BUDGET: stall (repeated same step), wall, calls, depth
+        b = router.Budget(max_wall=5.0, stall_repeats=4, stall_window=5.0,
+                          now=time.monotonic)
+        for _ in range(3):
+            b.record_progress("stuck", 40)
+        try:
+            b.record_progress("stuck", 40)
+            check("stall detector raises on 4th repeat", False)
+        except router.BudgetExceeded as e:
+            check("stall detector raises on 4th repeat", "stall" in e.reason,
+                  e.reason)
+        # progress made clears the stall
+        b = router.Budget(max_wall=5.0, stall_repeats=4, stall_window=5.0,
+                          now=time.monotonic)
+        for _ in range(3):
+            b.record_progress("work", 40)
+        b.record_progress("work", 50)  # advanced -> no raise
+        check("stall cleared when progress advances", True)
+        # wall time
+        b = router.Budget(max_wall=0.05, now=time.monotonic)
+        time.sleep(0.08)
+        try:
+            b.check_wall(); check("wall-time budget raises", False)
+        except router.BudgetExceeded as e:
+            check("wall-time budget raises", "wall-time" in e.reason, e.reason)
+        # call cap
+        b = router.Budget(max_calls=2, now=time.monotonic)
+        b.note_call(); b.note_call()
+        try:
+            b.note_call(); check("call budget raises", False)
+        except router.BudgetExceeded as e:
+            check("call budget raises", "call" in e.reason, e.reason)
+        # depth cap
+        b = router.Budget(max_depth=1, now=time.monotonic)
+        b.enter_depth()
+        try:
+            b.enter_depth(); check("depth budget raises", False)
+        except router.BudgetExceeded as e:
+            check("depth budget raises", "depth" in e.reason, e.reason)
+        # watchdog abandons a NON-cooperative job past max_wall + grace
+        b = router.Budget(max_wall=0.05, now=time.monotonic)
+        def _hang():
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < 2:
+                time.sleep(0.01)
+            return "done"
+        t0 = time.monotonic()
+        try:
+            router.run_with_watchdog(_hang, b, grace=0.05)
+            check("watchdog abandons non-cooperative job", False)
+        except router.BudgetExceeded as e:
+            check("watchdog abandons non-cooperative job",
+                  "watchdog" in e.reason and (time.monotonic() - t0) < 2,
+                  e.reason)
+        # a normal fast fn passes through the watchdog untouched
+        check("watchdog passes fast fn through",
+              router.run_with_watchdog(lambda: 7, router.Budget(max_wall=1.0,
+                        now=time.monotonic), grace=0.05) == 7)
+        # default budget has a sane wall cap (jobs can't hang forever)
+        check("default budget caps wall time",
+              router.budget_from_params({}).max_wall ==
+              router.DEFAULT_MAX_WALL)
+
+        if HAVE_ANDROGUARD:
+            print("== P6 e2e: /plan + /capabilities + budget through gateway ==")
+            gwr = gateway.Gateway(td)
+            r, _ = gwr.handle("/capabilities")
+            check("/capabilities lists providers honestly",
+                  "CAPABILITIES" in r and "androguard" in r and
+                  "radare2" in r, r)
+            r, _ = gwr.handle("/plan locate_string")
+            check("/plan locate_string picks cheapest capable",
+                  "DEX string search" in r and "NOT AVAILABLE" in r, r)
+            r, _ = gwr.handle("/plan native_analysis")
+            check("/plan native_analysis degrades honestly",
+                  "NONE available" in r, r)
+            r, _ = gwr.handle("/plan bogus")
+            check("/plan unknown goal is honest", "unknown goal" in r, r)
+            r, _ = gwr.handle("/plan")
+            check("/plan no-goal lists goals", "goals:" in r, r)
+            # budget enforcement: tiny wall cap -> job FAILS with "budget"
+            _, jb = gwr.handle(f"/apk {FIXTURE} --max-wall 0.001", user="test")
+            gwr.process_pending()
+            check("job with tiny wall budget FAILs (stop-controller)",
+                  jb is not None and jb.state == core.Job.FAILED
+                  and "budget" in (jb.error or ""), str(jb.error if jb else None))
+            # generous default -> completes (no regression)
+            _, jo = gwr.handle(f"/apk {FIXTURE}", user="test")
+            gwr.process_pending()
+            check("normal /apk still COMPLETED under default budget",
+                  jo is not None and jo.state == core.Job.COMPLETED,
+                  str(jo.error if jo else None))
 
         if HAVE_ANDROGUARD:
             print("== P4: /find TargetFinder + canonical EntityResolver ==")
