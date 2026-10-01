@@ -53,8 +53,8 @@ jobs:
           set -e
           python3 -m pip install --quiet androguard
           python3 tools/apkmod_test.py
-      - name: APK pipeline and Vibe conversation tests
+      - name: APK pipeline and Vibe AI tests
         run: |
           set -e
           python3 -m pip install --quiet pytest
-          python3 -m pytest -q tests/test_apk_pipeline.py tests/test_vibe_conversation.py
+          python3 -m pytest -q tests/test_apk_pipeline.py tests/test_vibe_conversation.py tests/test_vibe_capabilities.py
