@@ -318,6 +318,13 @@ P25 self-improvement eval.
   every progress/checkpoint; `JobManager._run` wraps each engine in the
   watchdog; `/plan <goal>` + `/capabilities` + `--max-wall` flags. Every job
   now has a default 300s wall cap — nothing hangs. 194 checks.
+- **P7 (/xref + /callers + /callees)** — DONE: `graphutil.xrefs()` resolves
+  a canonical M-id OR dotted Class.method to incoming invokes (callers),
+  outgoing invokes (callees) + referenced strings. Deterministic. External
+  (non-in-APK) targets flagged EXTERNAL honestly (never faked in-graph);
+  "no static xref" reported as such (absence != non-use). `/xref`
+  `/callers` `/callees` wired. Completes /find → /xref → Used By/Uses.
+  204 checks.
 - **P0 (CI + regression)** — STILL OPEN: PR #5 has
   `tests/test_apk_pipeline.py` + `tools/apk_pipeline.py` but CI runs only the
   legacy `tools/apkmod_test.py`. The new pipeline suite never executes in CI.
