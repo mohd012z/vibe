@@ -154,3 +154,7 @@ settings outside the code; left for Fatah's call.
   needs a token scope the current `gh` auth lacks — `gh auth refresh -s
   admin:public_key` or add the public key under GitHub Settings →
   Signing keys). Until then commits verify as `verified:false`.
+- **Signed commits: ENABLED** — dedicated ed25519 SSH signing key registered on
+  the account (via Settings → Signing keys); `commit.gpgsign=true`,
+  `gpg.format=ssh`, `user.signingkey` set locally. This commit is the first
+  signed one on the repo.
