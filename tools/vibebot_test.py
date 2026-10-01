@@ -1319,6 +1319,86 @@ def main() -> int:
                       (j13.error or "no job") if j13 is not None else "no job")
 
         # ------------------------------------------------------------------
+        print("== P14: hybrid / JS-layer detector (pure classify + fixture) ==")
+        from vibebot import hybridscan as HS
+
+        # --- pure classify over synthetic ZIP name lists (positive controls)
+        uni = HS.classify(["classes.dex", "AndroidManifest.xml",
+                           "assets/apps/_UNI_ab12cd34/www/app-service.js",
+                           "assets/apps/_UNI_ab12cd34/www/app-view.js",
+                           "assets/apps/_UNI_ab12cd34/www/static/logo.png"])
+        check("uni-app detected by assets/apps/_UNI_ + app-service.js",
+              "uniapp" in uni["detected"]
+              and any("app-service.js" in m for m in uni["detected"]["uniapp"]),
+              str(uni["detected"]))
+        check("uni-app JS layer entries listed",
+              any(e.endswith("app-service.js") for e in uni["js_entries"]),
+              str(uni["js_entries"]))
+
+        cordova = HS.classify(["classes.dex", "www/index.html",
+                               "www/cordova.js", "plugins/cordova.plugins.barcode/plugin.xml"])
+        check("Cordova detected (cordova.js), plugins/ no longer a bare marker",
+              "cordova" in cordova["detected"], str(cordova["detected"]))
+
+        rn = HS.classify(["classes.dex", "assets/index.android.bundle",
+                          "assets/index.android.bundle.meta"])
+        check("React Native detected (index.android.bundle)",
+              "reactnative" in rn["detected"], str(rn["detected"]))
+
+        fl = HS.classify(["classes.dex", "lib/arm64-v8a/libapp.so",
+                          "assets/flutter_assets/FontManifest.json"])
+        check("Flutter detected (flutter_assets), and flagged NOT a JS layer",
+              "flutter" in fl["detected"], str(fl["detected"]))
+
+        # negative: a plain native APK must detect NOTHING
+        none_ = HS.classify(["classes.dex", "AndroidManifest.xml",
+                             "resources.arsc", "lib/arm64-v8a/libx.so",
+                             "plugins/whatever.xml"])
+        check("plain native APK -> no framework detected",
+              none_["detected"] == {} and none_["js_entries"] == [],
+              str(none_["detected"]))
+
+        # render: hybrid shows the patch-the-JS directive
+        rep_uni = HS.render_hybrid({"kind": "zip", "frameworks": {
+            "uniapp": {"markers": ["assets/apps/_UNI_x/www/app-service.js"],
+                       "js_entry": "app-service.js", "note": "uni-app"}},
+            "js_entries": ["assets/apps/_UNI_x/www/app-service.js"],
+            "webview_used": True, "jsinterface": [], "assets": []}, "a" * 64)
+        check("render names the framework + patch-the-JS directive",
+              "uniapp" in rep_uni and "Patch the JS" in rep_uni
+              and "HYBRID" in rep_uni, rep_uni[:200])
+        # render: not-observed degrade (missing artifact) is honest
+        rep_no = HS.render_hybrid({"error": "not found: /x"}, "a" * 64)
+        check("render degrades to NOT OBSERVED for a missing artifact",
+              "NOT OBSERVED" in rep_no, rep_no)
+
+        if HAVE_ANDROGUARD:
+            from vibebot import graphutil
+            # --- real fixture: a minimal native APK -> no hybrid signature
+            g14 = graphutil.build_graph(FIXTURE)
+            sig = g14.get("hybrid") or {}
+            check("fixture graph carries the hybrid layer (zip kind)",
+                  sig.get("kind") == "zip", str(sig.get("kind")))
+            check("fixture has NO hybrid framework signature (native APK)",
+                  not sig.get("frameworks"), str(sig.get("frameworks")))
+            gw14 = gateway.Gateway(td)
+            ack, j14 = gw14.handle(f"/apk {FIXTURE}", user="test")
+            gw14.process_pending()
+            if j14 is not None and j14.state == core.Job.COMPLETED \
+                    and j14.result is not None:
+                sha14 = j14.result.intake["sha256"][:16]
+                s14 = gw14.sessions.load(sha14) or {}
+                overview = (s14.get("structural") or {}).get("overview", "")
+                check("/apk overview carries a 'logic layer' line",
+                      "logic layer" in overview, overview[:400])
+                rmap, _ = gw14.handle(f"/map --sha {sha14}")
+                check("/map carries the HYBRID / JS LAYER section",
+                      "HYBRID / JS LAYER" in rmap, rmap[-300:])
+            else:
+                check("P14 e2e: fixture /apk job COMPLETED", False,
+                      (j14.error or "no job") if j14 is not None else "no job")
+
+        # ------------------------------------------------------------------
         if HAVE_ANDROGUARD:
             print("== P4: /find TargetFinder + canonical EntityResolver ==")
             # fresh gateway (stateful /find needs a prior /apk in the SAME gw)

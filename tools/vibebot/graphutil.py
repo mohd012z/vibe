@@ -200,6 +200,15 @@ def build_graph(artifact: str) -> dict:
     except Exception:
         enums = []
 
+    # P14: hybrid / JS-layer detection — WHERE is the app's real logic?
+    # (uni-app / Cordova / RN carry it in assets/, not the DEX.) Self-contained
+    # zip + DEX-bridge scan; degrades to an honest NOT OBSERVED, never throws.
+    try:
+        from . import hybridscan
+        g_hybrid = hybridscan.scan_artifact(artifact)
+    except Exception:
+        g_hybrid = {"error": "hybrid scan unavailable (NOT OBSERVED)"}
+
     # ---- assign stable IDs (sorted, deterministic) --------------------
     def _assign(nodes: list[dict], prefix: str) -> None:
         for i, n in enumerate(nodes, 1):
@@ -247,6 +256,7 @@ def build_graph(artifact: str) -> dict:
         "certificates": [],   # populated by the engine
         "counts": counts,
         "dex_integrity": dex_integrity,
+        "hybrid": g_hybrid,
         "nodes": {
             "artifact": [{"id": "A1", "path": None}],  # path set by caller
             "component": components,
@@ -759,6 +769,19 @@ def render_overview(graph: dict, sha: str) -> str:
     else:
         lines.append("  signature      not extracted (certs need androguard)")
     lines.append(f"  call edges     {c['call']} (raw; /xref in P5)")
+    # P14: one-line hybrid/JS-layer summary (full section in /map)
+    hyb = graph.get("hybrid") or {}
+    if hyb.get("frameworks"):
+        fwnames = ", ".join(sorted(hyb["frameworks"]))
+        js = hyb.get("js_entries") or []
+        lines.append(f"  logic layer    HYBRID ({fwnames}) — {len(js)} JS "
+                     f"entry/entries; patch the JS, not the smali")
+    elif hyb.get("kind") == "dex":
+        lines.append("  logic layer    bare DEX (no asset layer)")
+    elif hyb.get("error"):
+        lines.append(f"  logic layer    {hyb['error']}")
+    else:
+        lines.append("  logic layer    DEX (no hybrid/JS signature)")
     lines.append("  Analysis       READY  [Map] [Find P4] [JNI] [Strings] [Deep Dive]")
     return "\n".join(lines)
 
@@ -809,4 +832,10 @@ def render_map(graph: dict, sha: str, limit: int = 10) -> str:
     else:
         lines.append("")
         lines.append("ENUM DETECTION: none (no enum / R8-shrunken-enum signatures)")
+    # P14: hybrid / JS-layer — WHERE is the app's real logic?
+    from . import hybridscan
+    hyb = graph.get("hybrid")
+    if hyb is not None:
+        lines.append("")
+        lines.append(hybridscan.render_hybrid(hyb, sha))
     return "\n".join(lines)
