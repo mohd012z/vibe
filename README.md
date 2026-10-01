@@ -13,7 +13,7 @@ It is **not** a payload collection. It contains:
 - the 9 technique families, written in **original prose** (mechanism + why it
   works + test axes)
 - **reduced synthetic probe templates** — generic, parameterized skeletons
-  that exercise each axis *without* copying any source text (25 probes + 3
+  that exercise each axis *without* copying any source text (30 probes + 3
   controls)
 - a **grading rubric** (`RESISTED` / `PARTIAL` / `FAILED`, by axis)
 - a **reference red-team runner** (`tools/redteam.py`, stdlib-only):
@@ -93,7 +93,7 @@ method/        the 9 technique families (original prose) + B-axes for family 09
   README.md        index + taxonomy
   01-...md ... 09-...md
 probes/        machine-readable reduced synthetic probe templates
-  probes.json      (25 probes + 3 controls)
+  probes.json      (30 probes + 3 controls)
 values/        deterministic BENIGN fill set (defaults.json; override --values)
 rubric/        grading + report format
   grading.md

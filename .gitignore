@@ -3,3 +3,5 @@ apk-runs/
 runs/
 __pycache__/
 *.pyc
+# opt-in raw companion — never the evidence of record, never committed
+*.raw.jsonl

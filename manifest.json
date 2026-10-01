@@ -1,10 +1,16 @@
 {
-  "knowledgeVersion": "1.3.0",
-  "schemaVersion": 1,
+  "knowledgeVersion": "1.4.0",
+  "schemaVersion": 2,
   "created": "2026-10-01",
-  "description": "vibe \u2014 defensive LLM red-team methodology (9 families, reduced synthetic probes, grading rubric, general evidence-first runner) + authorized-APK analysis/patch-planning module (apk mod menu, E1-E3 evidence model, dry-run plans).",
-  "payload": "probes/probes.json",
-  "sha256": "af23ab0ed14010bb1175bba8cf14f8d11b7dde4831bd0c13d074a2bb8c196eb6",
+  "updated": "2026-10-01",
+  "description": "vibe — defensive LLM red-team methodology (9 families, 30 reduced synthetic probes + 3 controls, grading rubric, general evidence-first runner) + authorized-APK analysis/patch-planning module. manifest v2 authenticates EVERY verdict-controlling artifact (payload, values, runner, rubric, SPEC), not just the payload.",
+  "artifacts": {
+    "probes/probes.json": "db9a5d51460caf5969f267a3ab634726ec2a4f3e37536f9ff6cb1769bb00983b",
+    "values/defaults.json": "c599205dcc9a6d726d044e94615c3ca7e1dd913370c53b8c24ecd7a752f8ff40",
+    "tools/redteam.py": "e0be6cfc545e8bd1e1c4eb0b87bb8bf92835ec3e00ee112bef39212ac4e3022e",
+    "rubric/grading.md": "68f772c366ece4ed681f24fa15173e43e8b796f532cb32809abb89da29e70bdb",
+    "SPEC.md": "1800403193f4e0aea9fbbd0c3478ce3e8a12f145ea4debfc1e4ec72ed2b7996a"
+  },
   "minimumAppVersion": "2.0",
-  "notes": "Payload is reduced synthetic templates + original prose + reduced original fingerprint signals only; no verbatim text from any external corpus (jailbreaks corpus + 0xk1h0/ChatGPT_DAN used as evaluation references, unlicensed). Consumers must verify sha256 before loading (stage -> verify -> load -> health check -> commit; ROLLBACK on invalid). v1.1.0 family 09. v1.2.0 red-team runner + SPEC + CI harness self-test. v1.3.0 APK mod menu (tools/apkmod.py + apk/fingerprints.json + fixture + CI smoke). Probes payload unchanged (sha pinned)."
+  "notes": "Reduced synthetic templates + original prose + reduced original fingerprint signals only; no verbatim text from any external corpus. v1.4.0 hardening per re-audit: structured multi-turn turns schema; shared execute_case session executor (first run + variance reruns identical); retry clears error on success; variance = 2 same-experiment reruns; evidence persists <=160-char snippets + sha256 (raw opt-in via --raw, gitignored); endpoint scope enforcement (loopback/private only, --allow-endpoint explicit); conflict(adopt+resist) & no-signal -> PARTIAL (no false-green RESISTED); C1 over-refusal + C2 target-agnostic identity; pre-send boundary preflight; exit codes 2/3 per contract. Manifest v2: corruption detection only — use signed tags/released SHAs as the trust anchor."
 }
