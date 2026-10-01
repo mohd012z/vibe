@@ -1242,7 +1242,81 @@ def main() -> int:
                                    user="test")
             check("/xmatch missing dst refused (no job)",
                   jmiss is None and "not found" in r, r)
-            # androguard-gated degrade is not testable here (it IS installed)
+
+        # ------------------------------------------------------------------
+        print("== P13: obfuscated-enum detector (pure + fixture field-type fix) ==")
+        from vibebot import enumscan as ES
+
+        # --- pure detect_enum over synthetic class records
+        shrunken = ES.detect_enum({"class": "a.B", "superclass": "java.lang.Object",
+                                   "static_self": ["A", "B", "C"], "values_meth": "values",
+                                   "enum_super": False})
+        check("R8-shrunken signature -> 'shrunken' E2",
+              shrunken["verdict"] == "shrunken" and shrunken["level"] == "E2"
+              and shrunken["n"] == 3, shrunken)
+        unshrunken = ES.detect_enum({"class": "a.C", "superclass": "java.lang.Enum",
+                                     "static_self": ["X", "Y"], "values_meth": "values",
+                                     "enum_super": True})
+        check("extends java.lang.Enum -> 'enum' E1 (un-shrunken)",
+              unshrunken["verdict"] == "enum" and unshrunken["level"] == "E1",
+              unshrunken)
+        partial = ES.detect_enum({"class": "a.D", "superclass": "java.lang.Object",
+                                  "static_self": ["P", "Q"], "values_meth": None,
+                                  "enum_super": False})
+        check("self-fields but no array values() -> 'partial' (weaker)",
+              partial["verdict"] == "partial", partial)
+        none_ = ES.detect_enum({"class": "a.E", "superclass": "java.lang.Object",
+                                "static_self": ["only"], "values_meth": "values",
+                                "enum_super": False})
+        check("1 self-field + values() -> 'none' (not enough signal)",
+              none_["verdict"] == "none", none_)
+        # scan: filters none, sorts shrunken first
+        order = [e["verdict"] for e in ES.scan_enums([
+            {"class": "a.E", "superclass": "O", "static_self": ["o"],
+             "values_meth": "values", "enum_super": False},
+            {"class": "a.D", "superclass": "O", "static_self": ["p", "q"],
+             "values_meth": None, "enum_super": False},
+            {"class": "a.B", "superclass": "O", "static_self": ["A", "B", "C"],
+             "values_meth": "values", "enum_super": False},
+        ])]
+        check("scan filters none + shrunken sorted first",
+              order == ["shrunken", "partial"], str(order))
+        rep = ES.render_enums(ES.scan_enums([
+            {"class": "a.B", "superclass": "O", "static_self": ["A", "B", "C"],
+             "values_meth": "values", "enum_super": False}]), "f" * 64)
+        check("render lists the shrunken class + PROBABLE ceiling note",
+              "a.B" in rep and "PROBABLE" in rep and "shrunken" in rep, rep[:200])
+
+        if HAVE_ANDROGUARD:
+            from vibebot import graphutil
+            # --- field-type fix: get_descriptor() (was get_type() -> all "")
+            g = graphutil.build_graph(FIXTURE)
+            ftypes = {(f["class"], f["name"]): f["type"]
+                      for f in g["nodes"]["field"]}
+            check("field layer now type-aware (get_descriptor fix)",
+                  ftypes.get(("com.fixture.demo.DemoApp", "sInterstitial"))
+                  == "com.fixture.sdkads.InterstitialAd"
+                  and ftypes.get(("com.fixture.sdkads.InterstitialAd",
+                                  "ENDPOINT")) == "java.lang.String",
+                  str(ftypes))
+            # --- fixture e2e: no enums -> count 0 + /map shows none
+            check("fixture graph carries the enum node layer (count 0)",
+                  g["counts"].get("enum", 0) == 0
+                  and g["nodes"]["enum"] == [], str(g["counts"].get("enum")))
+            gw13 = gateway.Gateway(td)
+            ack, j13 = gw13.handle(f"/apk {FIXTURE}", user="test")
+            gw13.process_pending()
+            if j13 is not None and j13.state == core.Job.COMPLETED \
+                    and j13.result is not None:
+                sha13 = j13.result.intake["sha256"][:16]
+                rmap, _ = gw13.handle(f"/map --sha {sha13}")
+                check("/map shows the ENUM DETECTION section (none for fixture)",
+                      "ENUM DETECTION" in rmap and "none" in rmap, rmap[-260:])
+                check("/map tree shows the enum count line",
+                      "enums" in rmap and "(E-ids)" in rmap, rmap[:400])
+            else:
+                check("P13 e2e: fixture /apk job COMPLETED", False,
+                      (j13.error or "no job") if j13 is not None else "no job")
 
         # ------------------------------------------------------------------
         if HAVE_ANDROGUARD:

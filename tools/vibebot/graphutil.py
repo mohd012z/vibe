@@ -165,10 +165,15 @@ def build_graph(artifact: str) -> dict:
                     natives.append({"class": cn, "method": m.get_name()})
             for f in c.get_fields():
                 try:
+                    # androguard 4.x: EncodedField has get_descriptor()
+                    # ("Lcom/x/Y;" / "I" / "[B"), NOT get_type() — the old
+                    # call raised AttributeError, so every field type was
+                    # silently "" (field layer was type-blind).
+                    ftype = (f.get_descriptor() or "").strip("L;").replace("/", ".")
                     fields.append({
                         "class": cn,
                         "name": f.get_name(),
-                        "type": (f.get_type() or "").strip("L;").replace("/", "."),
+                        "type": ftype,
                     })
                 except Exception:
                     pass
@@ -183,6 +188,18 @@ def build_graph(artifact: str) -> dict:
                                 "name": meth["name"], "native": meth["native"]})
         calls.extend(m["calls"])
 
+    # P13: obfuscated-enum scan (R8-shrunken signature). A first-class node
+    # type so shrunken enums are discoverable / cross-referenceable like any
+    # other entity. Pure detection over compact records; androguard glue
+    # degrades to an empty list (honest "none"), never an exception.
+    enums: list[dict] = []
+    try:
+        from . import enumscan
+        for e in enumscan.scan_enums(enumscan.enum_records(artifact)):
+            enums.append(e)
+    except Exception:
+        enums = []
+
     # ---- assign stable IDs (sorted, deterministic) --------------------
     def _assign(nodes: list[dict], prefix: str) -> None:
         for i, n in enumerate(nodes, 1):
@@ -193,6 +210,7 @@ def build_graph(artifact: str) -> dict:
     _assign(sorted(methods, key=lambda x: (x["dex"], x["class"], x["name"])), "M")
     _assign(sorted(fields, key=lambda x: (x["class"], x["name"])), "F")
     _assign(sorted(natives, key=lambda x: (x["class"], x["method"])), "N")
+    _assign(sorted(enums, key=lambda x: x["class"]), "E")
     strings = []
     for i, v in enumerate(sorted(str_map), 1):
         e = str_map[v]
@@ -214,6 +232,7 @@ def build_graph(artifact: str) -> dict:
         "resource": len(resources),
         "native": len(natives),
         "call": len(calls),
+        "enum": len(enums),
     }
     return {
         "schema": GRAPH_SCHEMA,
@@ -237,6 +256,7 @@ def build_graph(artifact: str) -> dict:
             "string": strings,
             "resource": resources,
             "native": natives,
+            "enum": enums,
         },
         "calls": calls,
     }
@@ -492,8 +512,24 @@ def find_targets(graph: dict, query: str, limit: int = 10) -> list[dict]:
                 "detail": f"manifest {k['kind']}",
             })
 
+    # --- enums (P13: R8-shrunken / un-shrunken enum signature) ----------
+    for e in nodes.get("enum", []):
+        if q in e["class"].lower():
+            mids = [m["id"] for m in nodes["method"] if m["class"] == e["class"]]
+            targets.append({
+                "query": query, "layer": "enum", "id": e["id"],
+                "value": e["class"], "count": len(e.get("fields", [])),
+                "location": [f"A1 → dex → {e['class']} ({e['verdict']})"],
+                "refs": [],
+                "evidence": e.get("level") or "E2",
+                "claim": "PROPOSED" if e["verdict"] != "enum" else "SUPPORTED",
+                "detail": f"{e['verdict']} enum — {e['reason']} "
+                          f"(methods: {', '.join(mids[:4]) or 'none'})",
+            })
+
     # rank: strings/resources (Phase-6 answer) first, then structural
-    order = {"string": 0, "resource": 1, "class": 2, "method": 3, "component": 4}
+    order = {"string": 0, "resource": 1, "class": 2, "method": 3,
+             "component": 4, "enum": 5}
     targets.sort(key=lambda t: (order.get(t["layer"], 9), t["id"]))
     return targets[:limit]
 
@@ -744,6 +780,7 @@ def render_map(graph: dict, sha: str, limit: int = 10) -> str:
                  f"resources {c['resource']} (R-ids)")
     lines.append(f"     ├─ classes   {c['class']} (C-ids)")
     lines.append(f"     ├─ methods   {c['method']} (M-ids)   fields {c['field']} (F-ids)")
+    lines.append(f"     ├─ enums     {c.get('enum', 0)} (E-ids)   [P13 R8-shrunken scan]")
     lines.append(f"     ├─ native/JNI {c['native']} (N-ids)   native libs "
                  f"{len(graph.get('library_files', []))}")
     lines.append(f"     └─ call edges {c['call']} (raw; /xref resolves in P3b)")
@@ -763,4 +800,13 @@ def render_map(graph: dict, sha: str, limit: int = 10) -> str:
     else:
         lines.append("cross-layer paths: (none — no component maps to a dex class "
                      "with a body, or no native/JNI edges)")
+    # P13: enum / R8-shrunken-enum detection (a patch candidate list)
+    from . import enumscan
+    enum_nodes = graph.get("nodes", {}).get("enum") or []
+    if enum_nodes:
+        lines.append("")
+        lines.append(enumscan.render_enums(enum_nodes, sha))
+    else:
+        lines.append("")
+        lines.append("ENUM DETECTION: none (no enum / R8-shrunken-enum signatures)")
     return "\n".join(lines)
