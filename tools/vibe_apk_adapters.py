@@ -12,6 +12,7 @@ import shutil
 import subprocess
 from typing import Any
 
+from tools.vibe_artifact_router import validate_radare_target
 from tools.vibe_evidence import Observation
 
 
@@ -58,12 +59,11 @@ class Radare2ReadProvider:
             return [Observation(capability, self.name, target, "string", {"offset": r.get("vaddr", r.get("paddr")), "text": r.get("string")}, self.binary) for r in rows]
         if not target:
             return []
-        # Target is expected to be an already-resolved address/symbol. The
-        # adapter does not interpolate it into a shell; it remains an r2 command.
-        command = f"axtj @ {target}" if capability == "REFERENCE_IN" else f"axfj @ {target}"
+        safe_target = validate_radare_target(target)
+        command = f"axtj @ {safe_target}" if capability == "REFERENCE_IN" else f"axfj @ {safe_target}"
         rows = self._r2_json(command)
         kind = "xref_in" if capability == "REFERENCE_IN" else "xref_out"
-        return [Observation(capability, self.name, target, kind, row, self.binary) for row in rows]
+        return [Observation(capability, self.name, safe_target, kind, row, self.binary) for row in rows]
 
 
 class JadxReadProvider:
