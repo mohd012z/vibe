@@ -27,6 +27,19 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOKEN_FILE = "/opt/data/vibebot/token.env"
 
 COMMANDS = [
+    ("apk", "APK overview + Vibe IR entity graph: /apk <path>"),
+    ("map", "entity graph tree: /map <path> (or --sha)"),
+    ("find", "TargetFinder: /find <text> --sha <sha>"),
+    ("xref", "references: /xref <M|Cls.m> --sha <sha>"),
+    ("callers", "who calls this: /callers <M|Cls.m> --sha <sha>"),
+    ("callees", "what this calls: /callees <M|Cls.m> --sha <sha>"),
+    ("claims", "evidence board: /claims [--sha]"),
+    ("falsify", "falsifier board: /falsify [--sha]"),
+    ("why", "claim -> evidence -> bytes: /why <C-id> [--sha]"),
+    ("plan", "cheapest-capable method plan: /plan <goal>"),
+    ("capabilities", "what's installed here: /capabilities"),
+    ("native", "Radare native provider: /native <path>"),
+    ("xmatch", "cross-version method match: /xmatch <src.apk> <dst.apk>"),
     ("analyze", "analysis job: /analyze <path> [--engine apkmod|dexmapper]"),
     ("dex", "DEX Mapper: /dex <path> (class->method->call + JNI + integrity)"),
     ("smali", "query Dalvik opcode table: /smali <name|0x..|substr>"),

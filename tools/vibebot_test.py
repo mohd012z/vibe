@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -38,9 +39,11 @@ EXTRA_FP = os.path.join(ROOT, "apk", "fingerprints.example-extra.json")
 failures: list[str] = []
 
 
-def check(name: str, cond: bool, detail: str = "") -> None:
+def check(name: str, cond: bool, detail: object = "") -> None:
+    d = "" if detail is None else (detail if isinstance(detail, str)
+                                   else str(detail))
     print(f"  {'OK ' if cond else 'FAIL'} {name}"
-          + (f"  ({detail})" if detail and not cond else ""))
+          + (f"  ({d})" if d and not cond else ""))
     if not cond:
         failures.append(name)
 
@@ -1039,6 +1042,209 @@ def main() -> int:
                 check("P11 e2e: fixture job COMPLETED", False,
                       (jf.error or "no job") if jf is not None else "no job")
 
+        # ------------------------------------------------------------------
+        print("== P12: cross-version fingerprint (pure — synthetic maps) ==")
+        from vibebot import xmatch as XM
+
+        def _M(key, fp, cls, name, callset):
+            return key, {"fp": fp, "class": cls, "name": name,
+                         "callset": list(callset)}
+
+        def _map(*rows):
+            return dict(rows)
+
+        # --- normalize_instruction: the DEX adaptation (registers bucketed)
+        # same logic, different register numbering -> IDENTICAL tokens
+        t1 = XM.normalize_instruction("invoke-static",
+                                      "v1, v0, Lcom/x/Foo;->bar()V")
+        t2 = XM.normalize_instruction("invoke-static",
+                                      "v7, v2, Lcom/x/Foo;->bar()V")
+        check("CALL token drops (renumbered) register list", t1 == t2,
+              f"{t1} vs {t2}")
+        check("CALL token carries class.method (dot separator)",
+              t1 == ["CALL:com.x.Foo.bar"], t1)
+
+        # same-logic stubs with different strings stay different
+        s1 = XM.normalize_instruction("const-string", 'v0, "hello"')
+        s2 = XM.normalize_instruction("const-string", 'v3, "world"')
+        check("const-string keeps literal text", s1 == ['STR:hello']
+              and s2 == ['STR:world'], f"{s1} {s2}")
+
+        # small immediate kept, large bucketed (a moved offset != logic).
+        # Real androguard forms: const/4 + const/16 are DECIMAL, const/48 +
+        # const are hex (0x), const-wide is hex + trailing L. Bucket
+        # threshold is 0x10000 (65536).
+        check("small const/4 kept (decimal)", XM.normalize_instruction(
+            "const/4", "v0, 2") == ["IMM:2"], "")
+        check("large const bucketed (hex above 0x10000)",
+              XM.normalize_instruction("const", "v0, 0x20000")
+              == ["IMM_LARGE"], "")
+        # a small hex const is kept as its VALUE (base is notation, not
+        # identity: 0x8000 == 32768)
+        check("small hex const kept as decimal value",
+              XM.normalize_instruction("const", "v0, 0x8000")
+              == ["IMM:32768"], "")
+        # a large const-wide (hex + trailing L) is bucketed
+        check("large const-wide bucketed",
+              XM.normalize_instruction("const-wide", "v0, 0x7fffffL")
+              == ["IMM_LARGE"], "")
+        # a register operand must not be mistaken for the immediate
+        check("register operand skipped for immediates",
+              XM.normalize_instruction("const/4", "v0, v1") == [], "")
+
+        # register bucketing for plain arithmetic
+        a1 = XM.normalize_instruction("add-int", "v0, v1, v2")
+        a2 = XM.normalize_instruction("add-int", "v3, v4, v5")
+        check("registers bucketed to REG", a1 == a2 == ["REG, REG, REG"],
+              f"{a1} {a2}")
+
+        # branch target collapsed to L (kind survives, distance does not)
+        b1 = XM.normalize_instruction("if-eq", "v0, +0x8")
+        b2 = XM.normalize_instruction("if-eq", "v0, +0x20")
+        check("branch distance collapsed to L", b1 == b2, f"{b1} vs {b2}")
+        b3 = XM.normalize_instruction("if-eq", "v0, :cond_1")
+        check("branch pseudo-label collapsed to L", b1 == b3, f"{b1} {b3}")
+
+        # fingerprint determinism + body distinction
+        seqA = [("const-string", 'v0, "x"'), ("invoke-virtual",
+                                               "v0, Ljava/lang/String;->length()I")]
+        seqB = [("const-string", 'v2, "x"'), ("invoke-virtual",
+                                               "v1, Ljava/lang/String;->length()I")]
+        check("same logic / diff registers -> same fp",
+              XM.fingerprint_tokens(seqA) == XM.fingerprint_tokens(seqB), "")
+        # empty body is stable, and genuinely DIFFERENT from a return-void
+        # body (return-void is real logic, not noise)
+        empty_fp = XM.fingerprint_tokens([])
+        check("empty body fp stable + distinct from return-void",
+              len(empty_fp) == 64
+              and empty_fp == XM.fingerprint_tokens([])
+              and empty_fp != XM.fingerprint_tokens([("return-void", "")]),
+              empty_fp)
+
+        # --- match_cross_version: the six states on synthetic maps
+        src = _map(
+            _M("a.Bar.do", "F1", "a.Bar", "do", []),                 # EXACT
+            _M("a.Bar.other", "F2", "a.Bar", "other", ["CALL:a.X.y"]),  # STRONG target
+            _M("a.Dup.one", "F3", "a.Dup", "one", []),                # dup logic
+            _M("a.Dup.two", "F3", "a.Dup", "two", []),                # dup logic
+            _M("a.Renamed.old", "F4", "a.Renamed", "old", []),        # renamed
+        )
+        dst = _map(
+            _M("b.Bar.do", "F1", "b.Bar", "do", []),                  # -> EXACT by fp
+            _M("b.Bar.other", "F2b", "b.Bar", "other", ["CALL:a.X.y"]),  # -> STRONG
+            _M("b.Renamed.new", "F4", "b.Renamed", "new", []),         # -> UNRESOLVED? (fp F4 hit a.Renamed.old)
+        )
+        m = {r["dst"]: r for r in XM.match_cross_version(src, dst)}
+        check("EXACT by identical fp (unique in src)",
+              m["b.Bar.do"]["status"] == "EXACT", m["b.Bar.do"])
+        check("STRONG by name + identical callset (fp differs)",
+              m["b.Bar.other"]["status"] == "STRONG", m["b.Bar.other"])
+        # F4 exists in src (a.Renamed.old) -> dst b.Renamed.new matches it by
+        # fp -> EXACT even though the NAME changed (fp is the anchor)
+        check("fp match wins over renamed identity",
+              m["b.Renamed.new"]["status"] == "EXACT"
+              and m["b.Renamed.new"]["src"] == "a.Renamed.old",
+              m["b.Renamed.new"])
+
+        # --- identity tiebreak: shared fp + same identity -> EXACT
+        src2 = _map(
+            _M("c.T1.<init>", "FDUP", "c.T1", "<init>", []),
+            _M("c.T2.<init>", "FDUP", "c.T2", "<init>", []),
+        )
+        dst2 = _map(
+            _M("d.T1.<init>", "FDUP", "d.T1", "<init>", []),
+            _M("d.T2.<init>", "FDUP", "d.T2", "<init>", []),
+            _M("d.T3.<init>", "FDUP", "d.T3", "<init>", []),   # no identity in src
+        )
+        m2 = {r["dst"]: r for r in XM.match_cross_version(src2, dst2)}
+        # NOTE: dst keys use class 'd.*' but src fp 'FDUP' is shared across
+        # c.T1/c.T2 (and their <init> names differ from dst classes) -> the
+        # identity (class,name) of dst d.T1.<init> is NOT in src's candidates
+        # (src candidates are c.T1.<init>, c.T2.<init>) -> AMBIGUOUS, honestly.
+        check("shared fp, identity in none of candidates -> AMBIGUOUS",
+              m2["d.T1.<init>"]["status"] == "AMBIGUOUS"
+              and m2["d.T1.<init>"]["src"] is None, m2["d.T1.<init>"])
+        check("shared fp, identity not in src at all -> AMBIGUOUS",
+              m2["d.T3.<init>"]["status"] == "AMBIGUOUS", m2["d.T3.<init>"])
+
+        # tiebreak TO a single EXACT when the identity IS among candidates
+        src4 = _map(
+            _M("g.V.a", "FV", "g.V", "a", []),
+            _M("g.V.b", "FV", "g.V", "b", []),
+        )
+        dst4 = _map(_M("g.V.b", "FV", "g.V", "b", []))
+        m4 = XM.match_cross_version(src4, dst4)
+        check("shared fp + unique same identity -> EXACT (tiebreak)",
+              len(m4) == 1 and m4[0]["status"] == "EXACT"
+              and m4[0]["src"] == "g.V.b", m4)
+
+        # --- CONFLICT: two dst methods resolve to the SAME src method
+        # (identity collision) — must NOT be silently merged.
+        src6 = _map(_M("m.A.m", "FM", "m.A", "m", []))
+        dst6 = _map(
+            _M("m.A.m", "FN1", "m.A", "m", []),   # no fp hit -> name tier
+            _M("m.A.m#1", "FN2", "m.A", "m", []),  # same (class,name)
+        )
+        # both dst share the name (m.A, m) with the single src -> both claim
+        # m.A.m by the name tier -> CONFLICT (two dst, one src)
+        m6 = {r["dst"]: r for r in XM.match_cross_version(src6, dst6)}
+        check("two dst claiming one src -> CONFLICT (not merged)",
+              m6["m.A.m"]["status"] == "CONFLICT"
+              and m6["m.A.m#1"]["status"] == "CONFLICT"
+              and m6["m.A.m"]["src"] == "m.A.m",
+              str({k: v["status"] for k, v in m6.items()}))
+
+        # --- render + tally
+        allm = XM.match_cross_version(src, dst)
+        rep = XM.render_xmatch(allm, "a"*64, "b"*64)
+        check("render lists src/dst sha", "src sha[:8]=aaaaaaaa" in rep,
+              rep.splitlines()[0])
+        check("render ends with re-validation rule",
+              "re-validated" in rep, rep[-200:])
+
+        if HAVE_ANDROGUARD:
+            print("== P12 e2e: /xmatch through gateway (real fixture, self) ==")
+            # src == dst (same APK) -> every method must be EXACT (self-match)
+            gwx = gateway.Gateway(td)
+            ack, jx = gwx.handle(f"/xmatch {FIXTURE} {FIXTURE}", user="test")
+            check("/xmatch ACKs a job", jx is not None
+                  and jx.state == core.Job.QUEUED, ack)
+            gwx.process_pending()
+            if jx is not None and jx.state == core.Job.COMPLETED \
+                    and jx.result is not None:
+                sh = jx.result.intake["sha256"]
+                st = gwx.jobs.status(jx.id)
+                check("xmatch job COMPLETED", st["state"] == "COMPLETED",
+                      str(st.get("error")))
+                sess = gwx.sessions.load(sh) or {}
+                struct = sess.get("structural") or {}
+                check("session stores match_board",
+                      bool(struct.get("match_board")), str(struct.keys()))
+                board = struct.get("match_board", "")
+                check("self-match is all EXACT (no AMBIGUOUS)",
+                      "AMBIGUOUS" not in board
+                      and "EXACT" in board, board[:400])
+                mm = struct.get("matches", [])
+                check("every dst method resolved",
+                      all(r["status"] == "EXACT" for r in mm),
+                      str([r["status"] for r in mm]))
+                r, _ = gwx.handle(f"/report --sha {sh[:16]}")
+                check("/report surfaces the xmatch report file",
+                      "report" in r, r[:200])
+                check("help lists /xmatch", "/xmatch" in gateway.HELP, "")
+            else:
+                check("P12 e2e: fixture xmatch job COMPLETED", False,
+                      (jx.error or "no job") if jx is not None else "no job")
+
+            # honest degrade: missing dst refused at dispatch (no job)
+            gwx2 = gateway.Gateway(td)
+            r, jmiss = gwx2.handle(f"/xmatch {FIXTURE} /nope/missing.apk",
+                                   user="test")
+            check("/xmatch missing dst refused (no job)",
+                  jmiss is None and "not found" in r, r)
+            # androguard-gated degrade is not testable here (it IS installed)
+
+        # ------------------------------------------------------------------
         if HAVE_ANDROGUARD:
             print("== P4: /find TargetFinder + canonical EntityResolver ==")
             # fresh gateway (stateful /find needs a prior /apk in the SAME gw)

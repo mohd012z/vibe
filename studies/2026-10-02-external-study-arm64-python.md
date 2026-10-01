@@ -94,16 +94,29 @@ archive.org is back up.
     activates when r2 is installed. *Highest-value ARM64 item.*
 12. **qemu-aarch64 harness note** for P17/P21 validation spec (a native
     change is proven by C tests under qemu, not by diff appearance).
-13. xmatch.py (in-flight v0.11) — see known-bug flag below.
+13. ~~xmatch.py (in-flight v0.11)~~ — **DONE → P12** (see §E).
 
-## E. In-flight work flag (not lost — resume state)
-`tools/vibebot/xmatch.py` (cross-version fingerprinting, v0.11) is written
-and most smoke tests pass, but the smoke run **caught one bug, not yet
-fixed**: `normalize_instruction` builds `CALL:{cls}{meth}` with no
-separator (`"CALL:com.a.Bc"` instead of `"CALL:com.a.Bc"`-with-dot), and the
-branch-label normalization leaves the register list as a second token
-(`"REG, L"` → should be one bucketed token set). Self-matching still passes
-(both sides use the same tokens) so it does not corrupt fingerprints, but
-cross-provider alignment (matching our CALL: tokens against a Radare
-resolved-target token) would break on the missing dot. Fix before commit:
-`f"CALL:{cls}.{meth}"`.
+## E. xmatch.py (v0.11) — RESOLVED
+`tools/vibebot/xmatch.py` (cross-version fingerprinting) is complete and
+committed (v0.11). The flagged bug is fixed and TDD surfaced three more,
+each a real parser/matcher fix:
+1. **`CALL:` dot separator** — `CALL:{cls}.{meth}` so it aligns with a
+   Radare-resolved `Class.method` target cross-provider.
+2. **Identity tiebreak** — self-match exposed 14 fixture methods → 8 unique
+   fps (4 identical `<init>`s, 4 identical stubs), so bare SHA-256 made even
+   a method match *itself* AMBIGUOUS. Fixed: a shared fp disambiguates by
+   (class, name) — same logic AND identity → EXACT; same logic but no unique
+   identity → AMBIGUOUS. Self-match is now 14/14 EXACT.
+3. **Name tier keys on method NAME, not (class, name)** — across versions the
+   class is usually renamed/refactored too, so name is the honest cross-
+   version signal; the callset is the STRONG/PROBABLE tiebreak and a name
+   shared by >1 src method is AMBIGUOUS (same discipline, one level down).
+4. **Immediate base is notation, not identity** — `0x8000` and `32768` are
+   the same constant; parse by the base as spelled, emit the value, bucket
+   magnitudes ≥ 0x10000 as IMM_LARGE. Register operands (`v0`) must not be
+   read as the immediate (const/4 prints `v0, 2`).
+**Known limitation (documented, not a bug):** branch-target collapse to `L`
+is UNVERIFIED against a branch-bearing DEX (the fixture has no branches).
+Worst case it under-matches (a method differing only in loop size falls to
+STRONG/PROBABLE by name) — it can never over-match, so it is safe by
+construction. A real branchy APK is the ground-truth to add.

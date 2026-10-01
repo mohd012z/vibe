@@ -22,7 +22,10 @@
 #     logic"
 # and what we NORMALIZE AWAY (build-dependent, not identity):
 #   * registers v\d+ -> REG
-#   * branch-target labels :cond_N / :goto_N -> L  (trailing operand only)
+#   * branch targets (offsets / pseudo-labels) -> a single L  token — so a
+#     branch's KIND and CONDITION survive, its distance does not. This is the
+#     documented limitation: the fingerprint captures control-flow *type*, not
+#     jump distance (a loop of a different size still matches).
 #
 # The matching core (match_cross_version) is PURE over two fingerprint maps
 # — no androguard, no bytes — so it is fully unit-testable on synthetic maps,
@@ -32,7 +35,10 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+
+from . import core
 
 GRAPH = dict
 
@@ -60,7 +66,9 @@ def normalize_instruction(mnemonic: str, output: str) -> list[str]:
         lhs, rhs = out.split("->", 1)
         cls = lhs.split(",")[-1].strip().strip("L;").replace("/", ".")
         meth = rhs.split("(", 1)[0].strip()
-        return [f"CALL:{cls}{meth}"]
+        # class + DOT + method — the dot keeps the two tokens aligned with a
+        # Radare-resolved "Class.method" target (cross-provider matching).
+        return [f"CALL:{cls}.{meth}"]
 
     # const-string : keep the literal text (what the method says)
     if mnemonic in _STR_MNEMONICS:
@@ -68,22 +76,44 @@ def normalize_instruction(mnemonic: str, output: str) -> list[str]:
         return [f"STR:{m.group(1) if m else out}"]
 
     # const / const-wide / const/4 / const/16 : keep small immediates,
-    # bucket large ones (a moved offset/size is not different logic)
+    # bucket large ones (a moved offset/size is not different logic).
+    # Keep the base explicit: androguard prints const-wide in hex with no
+    # 0x prefix and a trailing L ("const-wide v0, 0x800000000L"), which
+    # would otherwise collide with a decimal reading of the same digits.
     if mnemonic.startswith(_CONST_PREFIXES):
         num = None
         for piece in out.split(","):
-            p = piece.strip()
-            if re.fullmatch(r"0x[0-9a-fA-F]+", p) or p.lstrip("-").isdigit():
+            p = piece.strip().rstrip("L")
+            # skip a leading register operand ("v0" / "h1" / "v0, v1"); and
+            # androguard prints const/4 + const/16 as DECIMAL (no 0x, no #)
+            if p.startswith(("v", "h")):
+                continue
+            if p.startswith("0x") and re.fullmatch(r"0x[0-9a-fA-F]+", p):
+                num = p
+                break
+            if re.fullmatch(r"-?\d+", p):
                 num = p
         if num is None:
             return []
+        # parse in the base as spelled (hex 0x / decimal) — the VALUE is the
+        # identity signal, the spelling is not (0x8000 and 32768 are the
+        # same constant). Bucket large magnitudes (a moved offset/size is
+        # not "different logic"); keep small ones verbatim.
         v = int(num, 16) if num.lower().startswith("0x") else int(num)
         return ["IMM_LARGE" if abs(v) >= _LARGE_IMM else f"IMM:{v}"]
 
-    # everything else : bucket registers, normalize a trailing branch label
+    # everything else : bucket registers, collapse a branch target to L
     s = re.sub(r"\bv\d+\b", "REG", out)
     if mnemonic.startswith(_BRANCH_PREFIXES):
-        s = re.sub(r":\w+\s*$", "L", s)
+        # the branch TARGET is the last operand (a +0xN/-0xN offset, a bare
+        # number, or a pseudo-label). It is build-dependent, so collapse it to
+        # one L token: control-flow KIND (if-eq / if-ge / goto / switch)
+        # survives, distance does not. UNVERIFIED against a branch-bearing DEX
+        # (the fixture has no branches) — a missed collapse only under-matches
+        # (two methods that actually differ in loop size fall to STRONG/
+        # PROBABLE by name), it never over-matches. Safe by construction.
+        s = re.sub(r",\s*(?:[+-]?0x[0-9a-fA-F]+|[+-]?\d+|:\w+)\s*$", ", L", s)
+        s = re.sub(r"\s+(?:[+-]?0x[0-9a-fA-F]+|[+-]?\d+|:\w+)\s*$", " L", s)
     s = re.sub(r"\s+", " ", s).strip()
     return [s] if s else []
 
@@ -160,9 +190,12 @@ def match_cross_version(src: dict, dst: dict) -> list[dict]:
     or a synthetic equivalent for tests). Deterministic; returns one match
     dict per dst key, sorted by key. Status per the six-state contract:
 
-      EXACT      dst fp == a src fp (identical normalized logic) — and the
-                 fp is unique in src. This is the only tier that may carry a
-                 validated finding across versions WITHOUT re-validation.
+      EXACT      dst fp == a src fp (identical normalized logic). A lone hit
+                 is EXACT directly; a shared hit (identical logic in several
+                 src methods) is EXACT only when the identity (class, name)
+                 tiebreaks to a single one — never when the logic alone is
+                 ambiguous. This is the only tier that may carry a validated
+                 finding across versions WITHOUT re-validation.
       STRONG     fp differs but (same name AND identical callset) — very
                  likely the same method with a minor body change; must be
                  re-validated before a finding is promoted.
@@ -174,14 +207,18 @@ def match_cross_version(src: dict, dst: dict) -> list[dict]:
 
     Never merges PROBABLE as EXACT (the /360 invariant).
     """
-    # index src by fp and by (class, name)
+    # index src by fp and by method NAME (not full class.name — across
+    # versions the class is often renamed/refactored too, so name is the
+    # honest cross-version signal; the callset is the STRONG/PROBABLE
+    # tiebreak, and a name shared by several src methods is AMBIGUOUS)
     by_fp: dict[str, list[str]] = {}
-    by_name: dict[tuple[str, str], list[str]] = {}
+    by_name: dict[str, list[str]] = {}
     for k, v in src.items():
         by_fp.setdefault(v["fp"], []).append(k)
-        by_name.setdefault((v.get("class", ""), v.get("name", "")), []).append(k)
+        by_name.setdefault(v.get("name", ""), []).append(k)
 
-    # pass 1: EXACT / AMBIGUOUS by fp; STRONG / PROBABLE fallback by name
+    # pass 1: EXACT / AMBIGUOUS by fp (identity tiebreak); STRONG / PROBABLE
+    # fallback by name
     provisional: dict[str, dict] = {}
     for dk in sorted(dst):
         d = dst[dk]
@@ -191,13 +228,34 @@ def match_cross_version(src: dict, dst: dict) -> list[dict]:
             provisional[dk] = {"status": "EXACT", "src": sk,
                                "rule": "identical normalized fingerprint"}
         elif len(fphits) > 1:
-            provisional[dk] = {"status": "AMBIGUOUS", "src": None,
-                               "candidates": sorted(fphits),
-                               "rule": "fingerprint matches "
-                                       f"{len(fphits)} src methods"}
+            # shared fingerprint (identical logic in several src methods —
+            # e.g. a battery of empty constructors / stubs). Tiebreak by
+            # IDENTITY: same logic AND same (class, name) is the strongest
+            # possible cross-version anchor; same logic but a different or
+            # non-unique identity is NOT one — the fingerprint alone cannot
+            # tell them apart.
+            did = (d.get("class", ""), d.get("name", ""))
+            same_id = [k for k in fphits
+                       if (src[k].get("class", ""), src[k].get("name", "")) == did]
+            if len(same_id) == 1:
+                provisional[dk] = {
+                    "status": "EXACT", "src": same_id[0],
+                    "rule": f"identical fingerprint + identity "
+                            f"(among {len(fphits)} same-logic methods)"}
+            else:
+                if same_id:
+                    rule = (f"fingerprint matches {len(fphits)} src methods "
+                            f"(same logic; identity shared by {len(same_id)} "
+                            f"of them)")
+                else:
+                    rule = (f"fingerprint matches {len(fphits)} src methods "
+                            f"(same logic; identity in none of them)")
+                provisional[dk] = {"status": "AMBIGUOUS", "src": None,
+                                   "candidates": sorted(fphits),
+                                   "rule": rule}
         else:
             # no fp match -> name tier
-            name_hits = by_name.get((d.get("class", ""), d.get("name", "")), [])
+            name_hits = by_name.get(d.get("name", ""), [])
             if len(name_hits) == 1:
                 sk = name_hits[0]
                 sc = src[sk]
@@ -277,3 +335,74 @@ def render_xmatch(matches: list[dict], sha_a: str, sha_b: str,
                  "across versions; STRONG/PROBABLE MUST be re-validated — "
                  "never merged as EXACT.")
     return "\n".join(lines)
+
+
+# ------------------------------------------------------------------ engine
+class XmatchEngine(core.Engine):
+    """Cross-version match, as a job (two-APK parse is the heavy part).
+
+    artifact = SRC path (the version a finding was validated on); the DST
+    path arrives in params["dst"]. The session is keyed by the SRC sha; the
+    rendered match board + the match list are stored so a later turn can
+    read them back without re-parsing. Read-only with respect to both
+    artifacts; runs under the watchdog budget (a pathological APK cannot
+    hang the worker)."""
+
+    spec = core.EngineSpec(name="xmatch",
+                           description="cross-version method fingerprint match")
+
+    def __init__(self, report_dir: str):
+        self.report_dir = report_dir
+
+    def can_run(self, artifact: str) -> bool:
+        return True  # dst comes in params; existence checked in run()
+
+    def run(self, job: core.Job) -> core.EngineResult:
+        import json as _json
+        dst = (job.params or {}).get("dst")
+        if not dst or not os.path.exists(dst):
+            raise RuntimeError(
+                "no --dst artifact (or it is missing) — /xmatch <src> <dst>")
+        job.progress("intake", 0, "fingerprinting src")
+        src = dex_fingerprint_map(job.artifact)
+        job.checkpoint("src", {"sha256": core._sha256(job.artifact),
+                               "methods": len(src)})
+        job.progress("fingerprint", 60, "fingerprinting dst")
+        dstmap = dex_fingerprint_map(dst)
+        job.checkpoint("dst", {"sha256": core._sha256(dst),
+                               "methods": len(dstmap)})
+        job.progress("match", 90, "cross-version match")
+        matches = match_cross_version(src, dstmap)
+        sha_a = core._sha256(job.artifact)
+        sha_b = core._sha256(dst)
+        rendered = render_xmatch(matches, sha_a, sha_b, limit=200)
+        # findings = the ones a human must NOT auto-promote (CONFLICT /
+        # AMBIGUOUS) — the honest "re-validate here" list
+        findings = [{
+            "id": f"X{m['status'][0]}{i:02d}",
+            "title": f"{m['dst']} -> {m['src'] or '(ambiguous)'}",
+            "category": "cross-version-match",
+            "evidenceLevel": "E2",
+            "evidence": [{"level": "E2", "artifact": "classes.dex",
+                          "detail": m["rule"]}],
+            "confidence": "LOW" if m["status"] in ("CONFLICT", "AMBIGUOUS")
+                          else "MEDIUM",
+            "runtime": "UNKNOWN",
+        } for i, m in enumerate(matches)
+            if m["status"] in ("CONFLICT", "AMBIGUOUS")]
+        os.makedirs(self.report_dir, exist_ok=True)
+        ts = core.time.strftime("%Y%m%d-%H%M%S")
+        rep = os.path.join(self.report_dir, f"xmatch-{ts}.json")
+        _json.dump({"sha_a": sha_a, "sha_b": sha_b,
+                    "src_methods": len(src), "dst_methods": len(dstmap),
+                    "board": rendered, "matches": matches},
+                   open(rep, "w"), indent=2)
+        job.checkpoint("report", rep)
+        job.progress("done", 100, f"{len(matches)} dst methods")
+        return core.EngineResult(
+            intake={"sha256": sha_a, "dst_sha256": sha_b,
+                    "src_methods": len(src), "dst_methods": len(dstmap)},
+            structural={"match_board": rendered, "matches": matches},
+            findings=findings, report_md=rendered,
+            outputs={"report": rep, "matches": len(matches),
+                     **_tally(matches)})

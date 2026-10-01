@@ -51,6 +51,7 @@ HELP = """vibebot commands
   /capabilities          what's installed here (honest detection)
   /analyze <path> [--engine apkmod|dexmapper] [--fingerprints <json>]
   /dex <path>            DEX Mapper job: class->method->call map + JNI + integrity
+  /xmatch <src.apk> <dst.apk>  cross-version method match (job) — carry validated findings
   /native <path>         Radare native provider: ELF fns/imports/exports + JNI bridge
   /smali <name|0x..|substr>   query the Dalvik opcode table
   /base <value> <from> <to>   convert between number bases (2..36)
@@ -110,6 +111,9 @@ class Gateway:
                 from . import native
                 m["native"] = native.NativeEngine(
                     os.path.join(self.work_dir, "reports"))
+                from . import xmatch
+                m["xmatch"] = xmatch.XmatchEngine(
+                    os.path.join(self.work_dir, "reports"))
         except Exception:
             pass
         return m
@@ -121,7 +125,7 @@ class Gateway:
         if not parts or parts[0] not in (
                 "/apk", "/map", "/find", "/xref", "/callers", "/callees",
                 "/claims", "/falsify", "/why", "/plan", "/capabilities",
-                "/analyze", "/dex",
+                "/analyze", "/dex", "/xmatch",
                 "/native",
                 "/smali", "/base", "/hash", "/dexcheck", "/dexrepair", "/status",
                 "/jobs", "/sessions", "/deepdive", "/investigate", "/report",
@@ -187,6 +191,9 @@ class Gateway:
 
         if cmd == "/dex":
             return self._dex(parts[1:], user)
+
+        if cmd == "/xmatch":
+            return self._xmatch(parts[1:], user)
 
         if cmd == "/native":
             return self._native(parts[1:], user)
@@ -290,6 +297,36 @@ class Gateway:
             return f"error: {e}", None
         return (f"ACK {job.id}  engine=dexmapper\n"
                 f"  queued — /status {job.id}  /cancel {job.id}"), job
+
+    def _xmatch(self, parts: list[str], user: str) -> tuple[str, core.Job | None]:
+        """Cross-version method match: /xmatch <src.apk> <dst.apk>."""
+        if not parts:
+            return ("/xmatch <src.apk> <dst.apk>   match methods between two "
+                    "builds (findings validated on src carried to dst as "
+                    "candidates — only EXACT may skip re-validation)"), None
+        if "xmatch" not in self.engines:
+            return ("error: cross-version match needs androguard "
+                    "(uv pip install androguard)"), None
+        src = os.path.abspath(os.path.expanduser(parts[0]))
+        if not os.path.exists(src):
+            return f"error: src artifact not found (refused: {os.path.basename(src)})", None
+        # dst = 2nd positional, or --dst <path>
+        dst_raw = (parts[1] if len(parts) > 1 and not parts[1].startswith("--")
+                   else self._arg(parts, "--dst"))
+        if not dst_raw:
+            return "/xmatch <src.apk> <dst.apk>", None
+        dst = os.path.abspath(os.path.expanduser(dst_raw))
+        if not os.path.exists(dst):
+            return f"error: dst artifact not found (refused: {os.path.basename(dst)})", None
+        params = self._budget_params(parts)
+        params["dst"] = dst
+        try:
+            job = self.jobs.submit("xmatch", src, user, "xmatch", params)
+        except (KeyError, FileNotFoundError, RuntimeError) as e:
+            return f"error: {e}", None
+        return (f"ACK {job.id}  engine=xmatch\n"
+                f"  src={os.path.basename(src)}  dst={os.path.basename(dst)}\n"
+                f"  queued — /status {job.id}  /report --sha <…>  /cancel {job.id}"), job
 
     def _native(self, parts: list[str], user: str) -> tuple[str, core.Job | None]:
         if not parts:
