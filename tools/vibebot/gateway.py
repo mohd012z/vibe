@@ -496,6 +496,22 @@ class Gateway:
         return (f"ACK {job.id}  engine=graph\n"
                 f"  queued — /status {job.id}  /cancel {job.id}"), job
 
+    def _session_graph(self, sha: str):
+        """(session, resolved graph or None) for a stored session.
+
+        v0.27: the graph-engine graph may live OUTSIDE the session (a
+        ``structural.graph = {"$ref": …, "$sha256": …}`` reference → stable
+        per-artifact file, integrity-checked by the store). Returns the
+        resolved dict; a $ref that fails the integrity check / is missing
+        returns (session, None) so callers report "no graph layer" honestly
+        rather than trusting stale bytes.
+        """
+        sess = self.sessions.load(sha)
+        if not sess:
+            return None, None
+        g = self.sessions.load_graph(sess)
+        return sess, g
+
     def _map(self, parts: list[str]) -> tuple[str, None]:
         from . import graphutil
         sha = self._arg(parts, "--sha")
@@ -515,7 +531,7 @@ class Gateway:
         sess = self.sessions.load(sha)
         if not sess:
             return f"no session for {sha[:8]}… — run /apk <path> first", None
-        graph = (sess.get("structural") or {}).get("graph")
+        graph = self.sessions.load_graph(sess)  # v0.27: resolves $ref or inline
         if not graph:
             return (f"session {sha[:8]}… has no Vibe IR graph layer yet "
                     f"(engines: {', '.join(sess.get('engines', []) or ['?'])}) — run /apk <path>"), None
@@ -545,7 +561,7 @@ class Gateway:
         sess = self.sessions.load(sha)
         if not sess:
             return f"no session for {sha[:8]}… — run /apk <path> first", None
-        graph = (sess.get("structural") or {}).get("graph")
+        graph = self.sessions.load_graph(sess)  # v0.27: resolves $ref or inline
         if not graph:
             return (f"session {sha[:8]}… has no Vibe IR graph layer yet — run /apk <path>"), None
         targets = graphutil.find_targets(graph, query)
@@ -573,7 +589,7 @@ class Gateway:
         sess = self.sessions.load(sha)
         if not sess:
             return f"no session for {sha[:8]}… — run /apk <path> first", None
-        graph = (sess.get("structural") or {}).get("graph")
+        graph = self.sessions.load_graph(sess)  # v0.27: resolves $ref or inline
         if not graph:
             return (f"session {sha[:8]}… has no Vibe IR graph layer yet — run /apk <path>"), None
         x = graphutil.xrefs(graph, target)
@@ -635,7 +651,7 @@ class Gateway:
         finds = st.get("falsifications")
         if finds is None:
             # no stored findings (pre-P11 session) — run live over the graph
-            g = st.get("graph")
+            g = self.sessions.load_graph(sess)  # v0.27: resolves $ref or inline
             cl = st.get("claims")
             if not g or cl is None:
                 return (f"session {sha[:8]}… has no graph yet — run /apk <path>"), None
