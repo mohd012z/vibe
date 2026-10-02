@@ -514,6 +514,21 @@ P25 self-improvement eval.
   checks (+23). apkmod + redteam 32/32. **The lupoxyz study backlog is now
   fully DONE (items 1–10).**
 
+- **P0 merge-proof re-verified (v0.18 head 6e07a42)** — re-ran the combined-tree
+  proof at PR #5 head `de431429` + VibeBot v0.18 in a detached worktree:
+  Anam's **full 10-file** pytest suite = **59 passed**; our suite = validate.py
+  OK + redteam 32 + apkmod ALL PASS + vibebot ALL PASS; the 5 shared
+  `tools/{redteam,redteam_test,apkmod,apkmod_test,validate}.py` and
+  `fixture-demo.apk` are **identical** on both branches; **no module-name
+  collisions** (`tools/vibebot/*` vs `tools/vibe_*.py`). **The ONLY real
+  conflict is `validate.yml`.** Found + FIXED a silent-CI-loss bug: our
+  `validate.yml` pytest step listed only 8 of PR #5's 10 test files (omitted
+  `test_vibe_artifact_router.py` + `test_vibe_correlation.py`) — resolving the
+  merge toward our unfixed file would have dropped those 2 suites. The step now
+  runs all 10 (true superset), re-verified 59-passed. **So: resolving the
+  `validate.yml` conflict toward OUR branch is now provably safe** — the merge
+  is Fatah's call, no longer a P0 risk.
+
 ## Open items (need Fatah/Anam decision)
 
 1. **Bot identity** — new Telegram bot via BotFather (token never
