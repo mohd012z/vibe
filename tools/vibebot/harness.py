@@ -103,21 +103,37 @@ def build_cmd_asm(as_bin: str, src: str, dst: str) -> list[str]:
     return [as_bin, "-o", dst, src]
 
 
-def build_cmd_c(cc_bin: str, src: str, dst: str) -> list[str]:
-    """exercism: $(CC) $(CFLAGS) -c -o $@ $<  (C -> .o)."""
+def build_cmd_c(cc_bin: str, src: str, dst: str,
+                sysroot: str | None = None) -> list[str]:
+    """exercism: $(CC) $(CFLAGS) -c -o $@ $<  (C -> .o).
+
+    `sysroot` (optional) is passed as `--sysroot` so a user-space cross
+    toolchain whose internal as/ld/headers live under an extract dir (not
+    the baked-in `/usr/aarch64-linux-gnu`) can compile+link. Default None
+    keeps the command byte-identical to the exercism recipe.
+    """
+    if sysroot:
+        return [cc_bin, "--sysroot", sysroot, *CFLAGS, "-c", "-o", dst, src]
     return [cc_bin, *CFLAGS, "-c", "-o", dst, src]
 
 
-def build_cmd_link(cc_bin: str, objs: list[str], out: str) -> list[str]:
+def build_cmd_link(cc_bin: str, objs: list[str], out: str,
+                   sysroot: str | None = None) -> list[str]:
     """exercism: $(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(ALL_OBJS)."""
+    if sysroot:
+        return [cc_bin, "--sysroot", sysroot, *CFLAGS, *LDFLAGS,
+                "-o", out, *objs]
     return [cc_bin, *CFLAGS, *LDFLAGS, "-o", out, *objs]
 
 
-def run_cmd(toolchain: dict, binary: str) -> list[str]:
-    """exercism: $(MAYBE_QEMU) ./tests  — on an aarch64 host run the binary
-    directly; otherwise under qemu-aarch64 with the cross sysroot."""
+def run_cmd(toolchain: dict, binary: str, sysroot: str | None = None) -> list[str]:
+    """exercism: $(MAYBE_QEMU) ./tests — on an aarch64 host run the binary
+    directly; otherwise under qemu-aarch64 with the cross sysroot. `sysroot`
+    (optional) overrides the default /usr/aarch64-linux-gnu (for a user-space
+    extract)."""
     if toolchain.get("needs_qemu") and toolchain.get("qemu"):
-        return [toolchain["qemu"], "-L", QEMU_SYSROOT, binary]
+        sr = sysroot or QEMU_SYSROOT
+        return [toolchain["qemu"], "-L", sr, binary]
     return [binary]
 
 
@@ -174,6 +190,7 @@ def validate_native(inputs: dict, runner: HarnessLike | None = None,
     """
     runner = runner or RealSubprocess()
     tc = toolchain or detect_toolchain()
+    sysroot = inputs.get("sysroot") or None
     outdir = inputs.get("out") or "/tmp"
     binary = os.path.join(outdir, inputs.get("binary", "tests"))
     c_files = inputs.get("c") or []
@@ -197,7 +214,7 @@ def validate_native(inputs: dict, runner: HarnessLike | None = None,
     # 1) C -> .o
     for i, src in enumerate(c_files):
         dst = os.path.join(outdir, f"c{i}.o")
-        cmd = build_cmd_c(cc, src, dst)
+        cmd = build_cmd_c(cc, src, dst, sysroot)
         commands.append(cmd)
         rc, out = runner.run(cmd)
         logs["c:%s" % os.path.basename(src)] = out[-500:]
@@ -220,14 +237,14 @@ def validate_native(inputs: dict, runner: HarnessLike | None = None,
         return _buildfail("link:no-objects", "no .c or .s inputs", tc,
                           commands, logs)
     # 3) link (pie)
-    cmd = build_cmd_link(cc, objs, binary)
+    cmd = build_cmd_link(cc, objs, binary, sysroot)
     commands.append(cmd)
     rc, out = runner.run(cmd)
     logs["link"] = out[-500:]
     if rc != 0:
         return _buildfail("link", out, tc, commands, logs)
     # 4) run (under qemu if needed)
-    cmd = run_cmd(tc, binary)
+    cmd = run_cmd(tc, binary, sysroot)
     commands.append(cmd)
     rc, out = runner.run(cmd)
     logs["run"] = out[-2000:]

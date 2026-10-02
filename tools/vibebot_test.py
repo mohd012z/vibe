@@ -801,9 +801,15 @@ def main() -> int:
             def version(self):
                 return "radare2 6.2.4 fake"
             def run(self, path, cmd):
-                return {"aflj": "0x00400050  112  foo\n0x00400120  64  Java_com_foo_Bar_doIt\n",
-                        "iEj": "0x00400120  64  Java_com_foo_Bar_doIt\n0x00400050  112  foo\n",
-                        "iI": "__cxa_finalize:libc.so.6\n"}.get(cmd, "")
+                # P18: r2-6 command set (aa; aflj / iEj / iij) — text shapes
+                # kept so parse_* legacy paths stay exercised.
+                if "aflj" in cmd:
+                    return "0x00400050  112  foo\n0x00400120  64  Java_com_foo_Bar_doIt\n"
+                if "iEj" in cmd:
+                    return "0x00400120  64  Java_com_foo_Bar_doIt\n0x00400050  112  foo\n"
+                if "iij" in cmd:
+                    return "__cxa_finalize:libc.so.6\n"
+                return ""
         tmp_so = os.path.join(td, "libfoo.so")
         with open(tmp_so, "wb") as _f:
             _f.write(elf)
@@ -995,23 +1001,28 @@ def main() -> int:
             def version(self):
                 return "radare2 6.2.4 fake"
             def run(self, path, cmd):
-                if cmd == "aflj":
+                # P18: r2-6 command set — substring match (aa; prefix).
+                # P19: disasm command is 'aa; pdfj @0xVA' (function-bounded).
+                if "aflj" in cmd:
                     return "0x00400050  24  popcnt\n0x00400120  12  parityfn\n"
-                if cmd == "iEj":
+                if "iEj" in cmd:
                     return "0x00400050  24  popcnt\n"
-                if cmd == "iI":
+                if "iij" in cmd:
                     return "memcpy:libc.so.6\n"
-                if cmd.startswith("pdj"):
+                if "pdfj" in cmd:
                     # popcnt function = clz+ror+eor ; parityfn = tbz x0, 0
                     if "400050" in cmd:
                         return _jsonp15.dumps(
-                            [{"name": "clz", "opcode": "w2, w0"},
-                             {"name": "ror.w", "opcode": "w2, w2, w3"},
-                             {"name": "eor", "opcode": "w0, w0, w2"},
-                             {"name": "sub", "opcode": "w0, w0, w2"}])
+                            {"name": "popcnt", "addr": 0x400050, "ops": [
+                                {"disasm": "clz w2, w0"},
+                                {"disasm": "ror w2, w2, w3"},
+                                {"disasm": "eor w0, w0, w2"},
+                                {"disasm": "sub w0, w0, w2"}]})
                     if "400120" in cmd:
-                        return _jsonp15.dumps([{"name": "tbz", "opcode": "x0, 0"},
-                                               {"name": "ret", "opcode": ""}])
+                        return _jsonp15.dumps(
+                            {"name": "parityfn", "addr": 0x400120, "ops": [
+                                {"disasm": "tbz x0, 0, 0x400124"},
+                                {"disasm": "ret"}]})
                     return "[]"
                 return ""
         tmp15 = os.path.join(td, "libp15.so")
@@ -1040,13 +1051,14 @@ def main() -> int:
             def version(self):
                 return "radare2 6.2.4 fake"
             def run(self, path, cmd):
-                if cmd == "aflj":
+                # P18: r2-6 command set — substring match (aa; prefix).
+                if "aflj" in cmd:
                     return "0x00400050  24  foo\n"
-                if cmd == "iEj":
+                if "iEj" in cmd:
                     return "0x00400050  24  foo\n"
-                if cmd == "iI":
+                if "iij" in cmd:
                     return ""
-                if cmd.startswith("pdj"):
+                if "pdfj" in cmd:
                     raise nat.ProviderError("disasm failed")
                 return ""
         n15e = nat.analyze_native(tmp15, _FR15err(), segments=segs15)
@@ -1230,6 +1242,79 @@ def main() -> int:
             check("real-host: ran to a verdict without crashing",
                   hr_real["verdict"] in ("SUCCESS", "FAILURE", "NOT_OBSERVED"),
                   str(hr_real["verdict"]))
+
+        # --- P16 REAL e2e: actually BUILD + RUN the harness on a real aarch64
+        # toolchain (cross gcc + qemu-aarch64, user-space in scratch) — the
+        # E5 top of the chain P16 had only ever exercised via FakeRunner.
+        # Degrades to an honest NOT-OBSERVED line when the toolchain is
+        # absent (CI shape stays green).
+        _CROSS16 = "/opt/data/cache/scratch/toolchain/cross16/usr/bin"
+        import os as _os16
+        _which16 = shutil
+        _cc16 = _which16.which("aarch64-linux-gnu-gcc") or \
+            (_os16.path.join(_CROSS16, "aarch64-linux-gnu-gcc")
+             if _os16.path.exists(_os16.path.join(_CROSS16, "aarch64-linux-gnu-gcc")) else None)
+        _q16 = _which16.which("qemu-aarch64") or \
+            (_os16.path.join(_CROSS16, "qemu-aarch64")
+             if _os16.path.exists(_os16.path.join(_CROSS16, "qemu-aarch64")) else None)
+        if _cc16 and _q16:
+            import subprocess as _sub16
+            _SR16 = "/opt/data/cache/scratch/toolchain/cross16"  # extract root
+            # qemu's -L <sysroot> resolves the baked-in aarch64 interpreter
+            # '/lib/ld-linux-aarch64.so.1' as <sysroot>/lib/... — ensure the
+            # user-space extract has that /lib link (idempotent; host state a
+            # fresh re-extract would lose).
+            try:
+                _liblink = _os16.path.join(_SR16, "lib")
+                if not _os16.path.exists(_liblink):
+                    _os16.symlink(
+                        _os16.path.join("usr", "aarch64-linux-gnu", "lib"),
+                        _liblink)
+            except OSError:
+                pass
+            _env16 = dict(os.environ)
+            _env16["PATH"] = _os16.path.dirname(_cc16) + os.pathsep + \
+                _os16.path.dirname(_q16) + os.pathsep + _env16.get("PATH", "")
+            # the cross gcc's internal as/ld are shared-lib builds needing
+            # the host lib dir (libbfd/libopcodes) — same as P19's binut.
+            _env16["LD_LIBRARY_PATH"] = \
+                _os16.path.join(_SR16, "usr", "lib", "x86_64-linux-gnu") + \
+                os.pathsep + _env16.get("LD_LIBRARY_PATH", "")
+
+            class _R16:
+                """RealSubprocess under the scratch toolchain PATH/LD paths."""
+                def run(self, argv):
+                    p = _sub16.run(argv, capture_output=True, text=True,
+                                   env=_env16, timeout=120)
+                    return (p.returncode, p.stdout + p.stderr)
+
+            _src16 = os.path.join(ROOT, "tests", "fixtures", "harness",
+                                  "popcount.c")
+            _out16 = os.path.join(td, "p16real")
+            _os16.makedirs(_out16, exist_ok=True)
+            _tc16 = {"host": "x86_64", "needs_qemu": True,
+                     "cc": _cc16,
+                     "as": (_which16.which("aarch64-linux-gnu-as")
+                            or _os16.path.join(_CROSS16, "aarch64-linux-gnu-as")),
+                     "qemu": _q16}
+            _inp16 = {"c": [_src16], "asm": [], "out": _out16,
+                      "binary": "tests", "sysroot": _SR16}
+            _res16 = H.validate_native(_inp16, runner=_R16(), toolchain=_tc16)
+            check("P16 real e2e: cross-gcc BUILD + qemu-aarch64 RUN observed",
+                  _res16["verdict"] == "SUCCESS"
+                  and _res16["passed"] == 6 and _res16["failed"] == 0
+                  and _res16["build"]["ok"] is True,
+                  str(_res16))
+            check("P16 real e2e: final command is qemu-aarch64 -L sysroot",
+                  _res16["commands"][-1][0] == _q16
+                  and _res16["commands"][-1][1] == "-L",
+                  str(_res16["commands"][-1]))
+            check("P16 real e2e: E5 ceiling note (proves THIS build, not "
+                  "generally-correct)", "E5" in _res16["note"], _res16["note"])
+        else:
+            print("  [P16] NOT OBSERVED: real aarch64 toolchain (cross gcc + "
+                  "qemu-aarch64) absent on this host — P16 real-run path "
+                  "not exercised (FakeRunner e2e above still applies)")
 
         # --- gateway dispatch: /harness registered + usage + missing-path
         if "harness" in gw.engines:
@@ -1860,6 +1945,44 @@ def main() -> int:
                 check("P14 e2e: fixture /apk job COMPLETED", False,
                       (j14.error or "no job") if j14 is not None else "no job")
 
+            # --- P14 REAL-HYBRID e2e: a genuinely built (aapt2 + d8 +
+            # apksigner, build-tools 37.0) APK carrying BOTH Cordova/PhoneGap
+            # AND uni-app layouts plus a real @JavascriptInterface WebView —
+            # the artifact class P14 had never seen (previously only synthetic
+            # ZIP name lists + a native-only negative fixture).
+            HYB = os.path.join(ROOT, "tests", "fixtures",
+                               "fixture-hybrid.apk")
+            if os.path.exists(HYB):
+                sig14h = HS.scan_artifact(HYB)
+                fw14 = sig14h.get("frameworks") or {}
+                check("P14 real-hybrid: uniapp + cordova BOTH detected",
+                      "uniapp" in fw14 and "cordova" in fw14, str(fw14))
+                check("P14 real-hybrid: uni-app markers on _UNI_ paths",
+                      any("_UNI_" in m for m in
+                          (fw14.get("uniapp") or {}).get("markers", [])),
+                      str(fw14.get("uniapp")))
+                check("P14 real-hybrid: cordova markers on www/ + plugins",
+                      any(m == "assets/www/cordova.js" for m in
+                          (fw14.get("cordova") or {}).get("markers", [])),
+                      str(fw14.get("cordova")))
+                check("P14 real-hybrid: js_entries list the real JS layer",
+                      any(e.endswith("app-service.js") for e in
+                          sig14h.get("js_entries", []))
+                      and any(e.endswith("index.html") for e in
+                              sig14h.get("js_entries", [])),
+                      str(sig14h.get("js_entries")))
+                check("P14 real-hybrid: webview_used=True from REAL DEX "
+                      "(invoke-virtual WebView.addJavascriptInterface)",
+                      sig14h.get("webview_used") is True,
+                      str(sig14h.get("webview_used")))
+                check("P14 real-hybrid: jsinterface honest (no @JavascriptInterface "
+                      "method called from DEX in this fixture)",
+                      sig14h.get("jsinterface") == [],
+                      str(sig14h.get("jsinterface")))
+            else:
+                print("  [P14] NOT OBSERVED: tests/fixtures/fixture-hybrid.apk "
+                      "absent — real-APK hybrid WebView path not exercised")
+
         # ------------------------------------------------------------------
         if HAVE_ANDROGUARD:
             print("== P4: /find TargetFinder + canonical EntityResolver ==")
@@ -2204,7 +2327,7 @@ def main() -> int:
         ver = getattr(vb, "__version__", None)
         check("version: __init__.__version__ is X.Y.Z",
               isinstance(ver, str) and len(ver.split(".")) == 3, str(ver))
-        check("version: matches the current build", ver == "0.18.0", str(ver))
+        check("version: matches the current build", ver == "0.21.0", str(ver))
         r, j = gateway.Gateway(td).handle("/find zzz")
         check("session: /find without --sha is refused (no most-recent fallback)",
               "no --sha" in r and "run /apk" in r and j is None, r)
@@ -2290,6 +2413,386 @@ def main() -> int:
         r, j = gateway.Gateway(td).handle("/oracle 0x1000ABCD")
         check("/oracle raw address -> refused as raw_address",
               "raw_address" in r and "REFUSED" in r and j is None, r)
+
+    # ===================== P18: real-radare2 6.x verification (v0.19) ====
+    # r2 6.2.2 output shapes below were probed against a REAL gcc-built
+    # x86_64 .so (radare2 6.2.2, 2026-10-02) — captured fixtures, not
+    # invented. P5/P15/P16 had ONLY ever run against FakeRunner; this closes
+    # that disclosed positive-e2e gap and the r2-5->6 runner regression.
+        import subprocess as _sub19
+        import shutil as _sh19
+        import json as _json19
+        _FIX_AFLJ = _json19.dumps([
+            {"addr": 4393, "name": "sym.add", "size": 20, "realname": "add"},
+            {"addr": 4413, "name": "sym.mul", "size": 19, "realname": "mul"},
+            {"addr": 4459, "name": "sym.sum3", "size": 39, "realname": "sum3"},
+            {"addr": 4160, "name": "sym.plt.add", "size": 6},
+        ])
+        # r2 6 iEj carries BOTH symtab and dynsym -> duplicated rows (probed).
+        _FIX_IEJ = _json19.dumps([
+            {"name": "mul", "flagname": "sym.mul", "vaddr": 4413},
+            {"name": "add", "flagname": "sym.add", "vaddr": 4393},
+            {"name": "add", "flagname": "sym.add", "vaddr": 4393},
+            {"name": "sum3", "flagname": "sym.sum3", "vaddr": 4459},
+        ])
+        _FIX_IJ = _json19.dumps([
+            {"ordinal": 1, "bind": "GLOBAL", "type": "FUNC", "name": "free",
+             "plt": 4144},
+            {"ordinal": 4, "bind": "GLOBAL", "type": "FUNC", "name": "malloc",
+             "plt": 4176},
+        ])
+        # r2 6 pdfj (the command the runner sends) = OBJECT {name,addr,ops:[...]},
+        # each op item carrying 'disasm' (NOT 'name'). Captured shape.
+        _FIX_PDJ = _json19.dumps({
+            "name": "sym.add", "addr": 4393, "size": 20, "ops": [
+                {"addr": 4393, "disasm": "push rbp", "opcode": "push rbp",
+                 "bytes": "55", "size": 1, "fcn_addr": 4393},
+                {"addr": 4394, "disasm": "mov rbp, rsp",
+                 "opcode": "mov rbp, rsp", "bytes": "4889e5", "size": 3,
+                 "fcn_addr": 4393},
+                {"addr": 4403, "disasm": "mov edx, dword [rbp - 4]",
+                 "opcode": "mov edx, dword [rbp - 4]", "bytes": "8b55fc",
+                 "size": 3, "fcn_addr": 4393},
+                {"addr": 4410, "disasm": "add eax, edx",
+                 "opcode": "add eax, edx", "bytes": "01d0", "size": 2,
+                 "fcn_addr": 4393},
+            ]})
+        # r2 6 axtj: xrefs INTO a PLT stub (in a PIC .so, sum3 calls add via
+        # sym.plt.add, not the real add — probed).
+        _FIX_AXTJ = _json19.dumps([
+            {"from": 4459, "type": "CALL", "perm": "--x",
+             "opcode": "call sym.plt.add", "fcn_addr": 4432,
+             "fcn_name": "sym.sum3", "realname": "sum3",
+             "refname": "sym.plt.add"}])
+        _FIX_AFL_LEGACY = "0x00400050  112  foo\n0x00400120  64  bar\n"
+
+        _pf = nat.parse_functions(_FIX_AFLJ)
+        check("P18: parse_functions r2-6 aflj -> va/size/name/r2_id",
+              _pf[0] == {"va": 4393, "size": 20, "name": "sym.add",
+                         "r2_id": "fcn.00001129"}, str(_pf[0]))
+        check("P18: parse_functions keeps all rows incl sym.plt.*",
+              [f["name"] for f in _pf] == ["sym.add", "sym.mul", "sym.sum3",
+                                           "sym.plt.add"], str(_pf))
+        check("P18: parse_functions legacy 3-token text still works",
+              nat.parse_functions(_FIX_AFL_LEGACY)
+              == [{"va": 0x400050, "size": 112, "name": "foo",
+                   "r2_id": "fcn.00400050"},
+                  {"va": 0x400120, "size": 64, "name": "bar",
+                   "r2_id": "fcn.00400120"}],
+              str(nat.parse_functions(_FIX_AFL_LEGACY)))
+        check("P18: parse_functions ANSI-wrapped rows tolerated",
+              [f["name"] for f in nat.parse_functions(
+                  "\x1b[0m0x00001129    1     20 sym.add\x1b[0m\n")]
+              == ["sym.add"], "ansi")
+        _ex = nat.parse_exports(_FIX_IEJ)
+        check("P18: parse_exports r2-6 iEj DEDUPES symtab+dynsym dupes",
+              _ex == ["mul", "add", "sum3"], str(_ex))
+        check("P18: parse_exports legacy text still works",
+              nat.parse_exports("0x00400120  64  Java_a_b\n0x00400050  112  foo")
+              == ["Java_a_b", "foo"], "")
+        _im = nat.parse_imports(_FIX_IJ)
+        check("P18: parse_imports r2-6 iij -> {name, module:''} (no lib name)",
+              _im == [{"name": "free", "module": ""},
+                      {"name": "malloc", "module": ""}], str(_im))
+        check("P18: parse_imports legacy 'sym:lib.so.6' text still works",
+              nat.parse_imports("__cxa_finalize:libc.so.6\nprintf:libc.so.6\n")
+              == [{"name": "__cxa_finalize", "module": "libc.so.6"},
+                  {"name": "printf", "module": "libc.so.6"}], "")
+        _dx = nat.parse_disasm(_FIX_PDJ)
+        check("P18: parse_disasm r2-6 pdj uses 'disasm' field",
+              _dx == ["push rbp", "mov rbp, rsp", "mov edx, dword [rbp - 4]",
+                      "add eax, edx"], str(_dx))
+        check("P18: parse_disasm legacy {'name','opcode'} items still work",
+              nat.parse_disasm(_json19.dumps(
+                  [{"name": "clz", "opcode": "x18, x0"},
+                   {"name": "eor", "op": "w0, w0, w2"}]))
+              == ["clz x18, x0", "eor w0, w0, w2"], "")
+        _xr = nat.parse_xrefs(_FIX_AXTJ, 0x1040)
+        check("P18: parse_xrefs r2-6 axtj -> CALL from-va",
+              _xr == [4459], str(_xr))
+        check("P18: parse_xrefs legacy text still works",
+              nat.parse_xrefs("sym.sum3 0x116b [CALL:--x] call sym.plt.add\n",
+                              0x1040) == [0x116b], "")
+
+        class _Cap19:
+            """Records (cmd) and returns canned r2-6 output."""
+            def __init__(self, d):
+                self.d = dict(d); self.cmds = []
+                self.bin = "r2"; self.timeout = 60.0
+            def _have(self):
+                return True
+            def version(self):
+                return "radare2 6.2.2 +1 abi:142 @ linux-x86_64"
+            def run(self, path, cmd):
+                self.cmds.append(cmd)
+                for k, v in self.d.items():
+                    if k in cmd:
+                        return v
+                return ""
+
+        SO19 = os.path.join(td, "libreal.so")
+        with open(SO19, "wb") as _f19:
+            _f19.write(elf)  # P5's synthetic ELF64 (valid magic for analyze)
+        _cap = _Cap19({"aflj": _FIX_AFLJ, "iEj": _FIX_IEJ, "iij": _FIX_IJ,
+                       "pdfj": _FIX_PDJ, "axtj": _FIX_AXTJ})
+        _n = nat.analyze_native(SO19, _cap, segments=[
+            {"type": 1, "offset": 0x1000, "vaddr": 0x1000, "filesz": 0x2000}])
+        check("P18: analyze_native sends aa warmup + r2-6 JSON forms",
+              _cap.cmds[0] == "aa; aflj" and "iEj" in _cap.cmds
+              and "iij" in _cap.cmds, str(_cap.cmds[:3]))
+        check("P18: analyze_native counts from real r2-6 shapes",
+              _n["counts"]["function"] == 4 and _n["counts"]["export"] == 3
+              and _n["counts"]["import"] == 2, str(_n["counts"]))
+        check("P18: disasm seek = 'aa; pdfj @0xVA' (function-bounded; the "
+              "old 'pdj N @VA' counted BYTES as INSTRUCTIONS and bled into "
+              "adjacent fns — probed on a real aarch64 .so, P19)",
+              any(c.startswith("aa; pdfj @0x") for c in _cap.cmds),
+              str([c for c in _cap.cmds if "pdfj" in c or "pdj" in c]))
+        _f_add = [f for f in _n["functions"] if f["name"] == "sym.add"][0]
+        check("P18: function mnemonics recovered via r2-6 disasm",
+              _f_add["mnemonics"][:2] == ["push rbp", "mov rbp, rsp"],
+              str(_f_add["mnemonics"]))
+        check("P18: pattern classifier runs on x86-64 mnemonics (no ARM64 "
+              "idioms here -> none match, honestly)",
+              _f_add["patterns"] == [] and "pattern_details" in _f_add,
+              str(_f_add.get("patterns")))
+        check("P18: provenance records provider version",
+              "6.2.2" in _n["provider_version"], _n["provider_version"])
+
+        # xrefs: direct + PLT-stub fallback
+        class _CapPlt(_Cap19):
+            def __init__(self, d, fns):
+                super().__init__(d)
+                self._fns = fns
+            def run(self, path, cmd):
+                self.cmds.append(cmd)
+                if "axtj" in cmd:
+                    tgt = cmd.rsplit(" ", 1)[-1]
+                    return _FIX_AXTJ if tgt == "0x1040" else ""
+                return ""
+
+        _PLT_NATIVE = {"path": SO19, "segments": [], "functions": [
+            {"va": 0x1129, "size": 20, "name": "sym.add",
+             "r2_id": "fcn.00001129"},
+            {"va": 0x1040, "size": 6, "name": "sym.plt.add",
+             "r2_id": "fcn.00001040"},
+        ]}
+        _cap2 = _CapPlt({}, [])
+        _froms, _ = nat.xrefs_of(dict(_PLT_NATIVE), 0x1040, runner=_cap2)
+        check("P18: xrefs_of queries 'aa; axtj' and parses axtj",
+              any("axtj" in c for c in _cap2.cmds) and _froms == [4459],
+              str((_cap2.cmds, _froms)))
+        _cap3 = _CapPlt({"aflj": _FIX_AFLJ}, _PLT_NATIVE["functions"])
+        _froms3, _ = nat.xrefs_of(dict(_PLT_NATIVE), 0x1129, runner=_cap3)
+        check("P18: xrefs_of real-fn-empty -> PLT stub fallback -> callers",
+              any("0x1040" in c for c in _cap3.cmds) and _froms3 == [4459],
+              str((_cap3.cmds, _froms3)))
+
+        # runner argv order (the r2-5->6 regression P5 never hit: FakeRunner)
+        class _Rec19(nat.RadareRunner):
+            def __init__(self):
+                super().__init__(bin="/fake/r2")
+                self.captured = []
+            def _have(self):
+                return True
+            def _run(self, argv, timeout):
+                self.captured.append(list(argv))
+                import subprocess as _sp
+                return _sp.CompletedProcess(argv, 0, stdout="", stderr="")
+
+        _rr = _Rec19()
+        _rr.run(SO19, "aa; aflj")
+        argv = _rr.captured[0]
+        check("P18: RadareRunner argv = flags BEFORE path (r2-6 contract)",
+              argv[0] == "/fake/r2" and argv[1] == "-e"
+              and argv[2] == "scr.color=0" and argv[3] == "-e"
+              and argv[4] == "bin.relocs.apply=true" and argv[5] == "-q"
+              and argv[6] == "-c" and argv[7] == "aa; aflj"
+              and argv[8] == SO19, str(argv))
+
+        # ---- e2e against REAL r2 6.2.2 (auto-skip when absent/unusable) ----
+        R219 = None
+        for _cand in ("/opt/data/cache/scratch/toolchain/radare2/usr/bin/radare2",
+                      "r2", "radare2"):
+            _found = None
+            if _cand in ("r2", "radare2"):
+                try:
+                    import shutil as _sh19b
+                    _found = _sh19b.which(_cand)
+                except Exception:
+                    _found = None
+            elif os.path.exists(_cand) and os.access(_cand, os.X_OK):
+                _found = _cand
+            if not _found:
+                continue
+            # present != usable: a user-space r2 without its LD_LIBRARY_PATH
+            # fails to exec (missing libr_util.so) — treat as NOT OBSERVED.
+            try:
+                if _sub19.run([_found, "-v"], capture_output=True,
+                              timeout=15).returncode == 0:
+                    R219 = _found
+                    break
+            except Exception:
+                continue
+        if R219:
+            print("== P18 e2e: REAL radare2 over a real gcc-built .so ==")
+            _d19 = os.path.join(td, "realso19")
+            os.makedirs(_d19, exist_ok=True)
+            _c19 = os.path.join(_d19, "real.c")
+            with open(_c19, "w") as _fc:
+                _fc.write("#include <stdlib.h>\n"
+                          "int add(int a, int b) { return a + b; }\n"
+                          "int mul(int a, int b) { return a * b; }\n"
+                          "int sum3(int a,int b,int c){ return add(a,b)+c; }\n"
+                          "void use_malloc(void){ char*p=malloc(16); "
+                          "if(p) p[0]=0; free(p); }\n")
+            _so19 = os.path.join(_d19, "libreal.so")
+            _gcc = _sh19.which("gcc") or _sh19.which("cc")
+            if not _gcc or _sub19.call(
+                    [_gcc, "-shared", "-fPIC", "-o", _so19, _c19],
+                    stdout=_sub19.DEVNULL, stderr=_sub19.DEVNULL) != 0:
+                check("P18-e2e: gcc available to build the real .so", False,
+                      "skipping e2e — no C compiler")
+            else:
+                os.environ.setdefault("RADARE2", os.path.expanduser(
+                    "~/.config/radare2"))
+                _real = nat.RadareRunner(bin=R219, timeout=120)
+                _rn = nat.analyze_native(_so19, _real)
+                _names = [f["name"] for f in _rn["functions"]]
+                check("P18-e2e: REAL r2 finds add/mul/sum3 + PLT stub",
+                      {"sym.add", "sym.mul", "sym.sum3"} <= set(_names)
+                      and any(nm.startswith("sym.plt.") for nm in _names),
+                      str(_names))
+                check("P18-e2e: REAL r2 exports DEDUPED (no symtab/dynsym dupes)",
+                      len(_rn["exports"]) == len(set(_rn["exports"]))
+                      and set(_rn["exports"])
+                      == {"add", "mul", "sum3", "use_malloc"},
+                      str(_rn["exports"]))
+                check("P18-e2e: REAL r2 imports include malloc+free (r2-6 iij; linker "
+                      "also adds _ITM_*/__gmon_start__ weak symbols — probed)",
+                      {"malloc", "free"} <= {i["name"] for i in _rn["imports"]}
+                      and all(i["module"] == "" for i in _rn["imports"]),
+                      str(_rn["imports"]))
+                _ra = [f for f in _rn["functions"]
+                       if f["name"] == "sym.add"][0]
+                check("P18-e2e: REAL r2 mnemonics (prologue first)",
+                      _ra["mnemonics"][0] == "push rbp",
+                      str(_ra["mnemonics"][:3]))
+                _rf, _ = nat.xrefs_of(_rn, 0x1040, _real)
+                check("P18-e2e: REAL r2 xref via PLT (sum3 calls add)",
+                      len(_rf) >= 1 and all(isinstance(x, int) for x in _rf),
+                      str(_rf))
+                check("P18-e2e: provider version is real r2 6.x",
+                      "6." in _rn["provider_version"],
+                      _rn["provider_version"])
+        else:
+            # CI / hosts without a usable r2: the e2e is NOT OBSERVED, not a
+            # failure — the parsers above (r2-6 real shapes, captured fixtures)
+            # still gate the logic. Print the disclosure, stay green.
+            print("  INFO P18-e2e: NOT OBSERVED — no usable radare2 on this "
+                  "host (install per toolchain/android-tools.json 6.2.x to "
+                  "close the positive-e2e gap); pure r2-6-shape checks above "
+                  "still apply.")
+
+    # ===================== P19: real-ARM64 pattern e2e (v0.20) ============
+    # Closes the P15 ARM64 positive-e2e gap (FakeRunner-only). The real-r2
+    # disasm of a real aarch64 .so exposed THREE classifier drifts the
+    # canned fixtures never hit (verified on real r2 6.2.2, 2026-10-02):
+    #  (a) pdj {size} @va counted BYTES as INSTRUCTIONS -> disasm bled
+    #      THROUGH adjacent functions and mis-attributed their idioms
+    #      (a real casefold fn reported fused-madd/tbz/bitset of its
+    #      neighbors) -> switched to function-bounded 'aa; pdfj @0xVA'
+    #  (b) P2 case-fold: r2 6 prints 'orr w0, w0, 0x20' (hex imm, no #) —
+    #      the classifier required literal '#32' -> real case-fold missed
+    #  (c) P6 string-ref: r2 6 prints 'adrp x0, 0' + 'add x0, x0, 0x278'
+    #      (resolved sym/addr, NO ':lo12:' label) -> the pair was never
+    #      matched on a real binary
+    # --- pure: the drift fixes (no toolchain needed) ---
+        cf20 = ["orr w1, w1, 0x20", "ret"]
+        check("P19: P2 case-fold matches r2-6 '0x20' rendering",
+              any(p["pattern"] == "case-fold-scan"
+                  for p in nat.classify_function(cf20)),
+              str(nat.classify_function(cf20)))
+        cf_legacy = ["ldrb w1, [x0]", "orr w1, w1, #32", "ret"]
+        check("P19: P2 case-fold still matches legacy '#32' rendering",
+              any(p["pattern"] == "case-fold-scan"
+                  for p in nat.classify_function(cf_legacy)), "")
+        check("P19: P2 does NOT fire on orr into a DIFFERENT register",
+              nat.classify_function(["orr w1, w2, #32", "ret"]) == [], "")
+        adrp6 = ["adrp x0, 0", "add x0, x0, 0x278", "ldr x0, [x0]", "ret"]
+        check("P19: P6 string-ref matches r2-6 'adrp+add' (no :lo12:)",
+              any(p["pattern"] == "string-ref-pair"
+                  for p in nat.classify_function(adrp6)),
+              str(nat.classify_function(adrp6)))
+        adrp_lo12 = ["adrp x8, str_lbl", "add x8, x8, :lo12:str_lbl", "ret"]
+        check("P19: P6 still matches the legacy ':lo12:' rendering",
+              any(p["pattern"] == "string-ref-pair"
+                  for p in nat.classify_function(adrp_lo12)), "")
+        adrp_neg = ["adrp x0, 0", "add x1, x1, 0x278", "ret"]
+        check("P19: P6 requires the SAME register (no adrp/add cross-match)",
+              nat.classify_function(adrp_neg) == [],
+              str(nat.classify_function(adrp_neg)))
+
+    # --- e2e: REAL aarch64 .so (committed fixture) + REAL r2 ---
+        _XAS = "/opt/data/cache/scratch/toolchain/cross/binut/usr/bin/aarch64-linux-gnu-as"
+        _XLD = "/opt/data/cache/scratch/toolchain/cross/binut/usr/bin/aarch64-linux-gnu-ld"
+        _XCROSSLIB = "/opt/data/cache/scratch/toolchain/cross/binut/usr/lib/x86_64-linux-gnu"
+        _FIXPAT = os.path.join(ROOT, "tests", "fixtures", "arm64", "pat.s")
+        _arm64_ok = R219 is not None and os.path.exists(_XAS) \
+            and os.path.exists(_XLD) and os.path.exists(_FIXPAT)
+        if not _arm64_ok:
+            print("  INFO P19-e2e: NOT OBSERVED — need usable r2 + aarch64 "
+                  "binutils + tests/fixtures/arm64/pat.s (cross as/ld "
+                  "recipe in the P19 study note); pure drift checks above "
+                  "still apply.")
+        elif _sub19.run([_XAS, "--version"], env={**os.environ,
+                        "LD_LIBRARY_PATH": _XCROSSLIB},
+                        capture_output=True).returncode != 0:
+            print("  INFO P19-e2e: NOT OBSERVED — cross as unusable "
+                  "(LD_LIBRARY_PATH recipe).")
+        else:
+            print("== P19 e2e: REAL aarch64 .so + REAL r2 6.x patterns ==")
+            _env19 = {**os.environ, "LD_LIBRARY_PATH": _XCROSSLIB}
+            _d19b = os.path.join(td, "arm64so")
+            os.makedirs(_d19b, exist_ok=True)
+            _so64 = os.path.join(_d19b, "libpat.so")
+            _o64 = os.path.join(_d19b, "pat.o")
+            _ok_as = _sub19.call([_XAS, "-o", _o64, _FIXPAT], env=_env19,
+                                 stdout=_sub19.DEVNULL,
+                                 stderr=_sub19.DEVNULL)
+            _ok_ld = _sub19.call([_XLD, "-shared", "-o", _so64, _o64],
+                                 env=_env19, stdout=_sub19.DEVNULL,
+                                 stderr=_sub19.DEVNULL)
+            if _ok_as != 0 or _ok_ld != 0:
+                check("P19-e2e: cross as/ld built the aarch64 .so", False,
+                      f"as={_ok_as} ld={_ok_ld}")
+            else:
+                _r64 = nat.RadareRunner(bin=(R219 or "r2"), timeout=120)
+                _n64 = nat.analyze_native(_so64, _r64)
+                _allpats = [p for f in _n64["functions"]
+                            for p in f["patterns"]]
+                check("P19-e2e: all 6 ARM64 idioms recognized on REAL r2",
+                      {"popcount-loop", "case-fold-scan", "bitset-test",
+                       "tbz-bit0-parity", "fused-madd", "string-ref-pair"}
+                      <= set(_allpats), str(sorted(set(_allpats))))
+                _by = {f["name"]: set(f["patterns"])
+                       for f in _n64["functions"]}
+                _cf = [nm for nm, ps in _by.items()
+                       if "case-fold-scan" in ps]
+                check("P19-e2e: case-fold fires on EXACTLY ONE function "
+                      "(the bleed fix — the old pdj-bytes-as-instr form "
+                      "mis-attributed neighbors' idioms)",
+                      len(_cf) == 1 and _cf[0] == "sym.casefold"
+                      and _by["sym.casefold"] == {"case-fold-scan"},
+                      str(_by))
+                _sr = [nm for nm, ps in _by.items()
+                       if "string-ref-pair" in ps]
+                check("P19-e2e: string-ref fires on exactly sym.stringref",
+                      _sr == ["sym.stringref"], str(_sr))
+                _pop = [nm for nm, ps in _by.items() if "popcount-loop" in ps]
+                check("P19-e2e: popcount (r2 names the first fn entry0) "
+                      "fires exactly once",
+                      len(_pop) == 1 and _pop[0] == "entry0", str(_pop))
 
     finally:
         shutil.rmtree(td, ignore_errors=True)

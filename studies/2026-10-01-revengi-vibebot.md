@@ -445,6 +445,51 @@ P25 self-improvement eval.
   Honest limit: no qemu/cross-compiler on this host — real run NOT OBSERVED
   (the e2e asserts the degrade); SUCCESS/FAILURE via FakeRunner. Backlog #12
   DONE. Closes the loop P15→patch→P16.
+- **P18 (v0.19) — real-radare2 6.x verification** — DONE (PR #6):
+  first real r2 on the host (6.2.2 user-space). RadareRunner was never
+  exercised beyond FakeRunner and was broken on r2 6.x (argv order, ANSI,
+  iI→iij, pdj name→disasm, aXR→axtj, @hex vs decimal, PLT xref routing).
+  All fixed dual-mode (r2-6 JSON + legacy text) and verified e2e on a real
+  gcc .so. See studies/2026-10-02-p18-real-radare2-6.md.
+- **P19 (v0.20) — real-ARM64 pattern e2e** — DONE (same PR #6): installed
+  aarch64 binutils (user-space), committed `tests/fixtures/arm64/pat.s`
+  (one fn per P15 idiom), built a real aarch64 .so, ran it through real r2.
+  Exposed + fixed 3 classifier bugs: (a) `pdj {size}` counted BYTES as
+  INSTRUCTIONS → disasm bled across functions and mis-attributed idioms
+  (→ function-bounded `aa; pdfj @0xVA`); (b) P2 case-fold: r2 6 prints
+  `orr …, 0x20` not `#32`; (c) P6 string-ref: r2 6 prints `adrp+add`
+  without `:lo12:` (→ accept both, same-register). All 6 idioms now
+  recognized on real ARM64, each on exactly its own function. 467 checks
+  (457 CI shape). See studies/2026-10-02-p19-real-arm64-patterns.md.
+  **P5/P15/P16 positive-e2e gaps: now CLOSED (x86-64 + aarch64).** Merge
+  pending Fatah.
+- **P14b (real-hybrid APK e2e)** — DONE (v0.20, same PR #6): P14's detector
+  had only ever run on synthetic ZIP name lists + a native-only negative
+  fixture. Built a REAL signed APK (aapt2 37.0 + d8 + apksigner, JDK17)
+  carrying BOTH uni-app (`assets/apps/_UNI_*/www/app-service.js`) and Cordova
+  (`assets/www/cordova.js`, `cordova_plugins.js`) layouts plus a real
+  `@JavascriptInterface` WebView → committed `tests/fixtures/fixture-hybrid.apk`
+  (13,058 B, reproducible; recipe in scratch). scan_artifact on it detects
+  both frameworks with the right real markers, lists the real js_entries, and
+  `webview_used=True` from REAL DEX (`invoke-virtual WebView →
+  addJavascriptInterface`, E2) — the DEX path P14 had never exercised.
+  `jsinterface=[]` pinned as honest (bridge method called from JS at
+  runtime, never from DEX). +6 checks → 473 (463 CI shape; fixture committed
+  so it runs there too). See studies/2026-10-02-p14-real-hybrid-apk.md.
+- **P16 real-run (v0.21)** — DONE (same PR #6): the E5 top of the chain
+  finally EXECUTED on a real toolchain (was FakeRunner-only; NOT OBSERVED on
+  this host before). Installed user-space: `aarch64-linux-gnu-gcc` (cross
+  cc) + `qemu-aarch64` (user-mode) + aarch64 glibc sysroot (`libc6-dev-arm64-
+  cross`, `/usr/aarch64-linux-gnu`). Committed `tests/fixtures/harness/
+  popcount.c` (Kernighan popcount — the same idiom P15 classifies — + a
+  `main()` printing `6 passed, 0 failed`); the P16 real-e2e block builds it
+  with the real cross gcc (exercism-verbatim CFLAGS/LDFLAGS) and runs it under
+  real qemu-aarch64 → **verdict SUCCESS, E5 runtime**. TDD exposed + fixed:
+  sysroot had to be threaded through ALL THREE stages (compile/link/run), not
+  just compile. Closes the P15(static) → P16(runtime) loop on a real build.
+  +3 checks → 476 (CI shape unchanged; degrades to honest NOT-OBSERVED line).
+  `__version__` → 0.21.0 (real harness.py runtime change). See
+  studies/2026-10-02-p16-real-run.md. **P16's real-run gap: CLOSED.**
 - **P17 (Kotlin @Metadata name recovery)** — DONE (v0.16, backlog #2):
   `tools/vibebot/kotlinmeta.py` + `/kmeta <classes.dex|app.apk> [class_filter]`.
   R8 renames every DEX name, but a Kotlin class's `@kotlin.Metadata` annotation

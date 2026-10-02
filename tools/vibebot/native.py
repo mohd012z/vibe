@@ -42,6 +42,41 @@ class RadareLike(Protocol):
     def run(self, path: str, cmd: str) -> str: ...
 
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\x1b\][^\x07]*\x07")
+
+
+def _strip_ansi(s: str) -> str:
+    """Strip ANSI SGR / OSC escape sequences. r2 6.x emits color codes on
+    text output even when stdout is not a TTY (P18 probe: `afl` rows are
+    wrapped in ESC[0m … ESC[0m). Pure. Defensive: JSON forms are unaffected
+    (they carry no escapes), so this is safe on all runner output."""
+    if not s:
+        return s
+    return _ANSI_RE.sub("", s)
+
+
+def _loads_maybe(out: str):
+    """Parse a JSON list/dict from r2 `*j` output, tolerating leading banner
+    lines and trailing prompt junk. Returns the object, or None."""
+    s = (out or "").strip()
+    if not s:
+        return None
+    try:
+        import json as _json
+        return _json.loads(s)
+    except Exception:
+        pass
+    # find the first '[' or '{' (some r2 builds print a WARN line first)
+    for i, ch in enumerate(s):
+        if ch in "[{":
+            try:
+                import json as _json
+                return _json.loads(s[i:])
+            except Exception:
+                break
+    return None
+
+
 # ------------------------------------------------------------------ runner
 class ProviderUnavailable(Exception):
     """The provider binary is not installed on this host (honest degrade)."""
@@ -54,9 +89,15 @@ class ProviderError(Exception):
 class RadareRunner:
     """Invokes r2 as a subprocess (isolation invariant: never linked).
 
-    `r2 <path> -c '<cmd>'` ; returns stdout text. Raises
-    ProviderUnavailable if r2 is missing, ProviderError on non-zero exit or
-    empty output. A hard wall-clock cap (P6) applies to the subprocess.
+    r2 6.x invocation contract: flags BEFORE the file, quiet, no color:
+    `r2 -e scr.color=0 -e bin.relocs.apply=true -q -c '<cmd>' <path>`.
+    The historical `r2 <path> -c '<cmd>'` order is REJECTED by r2 6.x
+    (it treats the command string as a second filename -> 'Cannot open').
+    Returns ANSI-stripped stdout text. Raises ProviderUnavailable if r2 is
+    missing, ProviderError on non-zero exit. A hard wall-clock cap (P6)
+    applies to the subprocess. (P18: the argv order was never exercised
+    against real r2 — every test used a FakeRunner — and broke on the r2
+    6.2.2 upgrade that toolchain/android-tools.json 6.2.x targets.)
     """
 
     def __init__(self, bin: str = "r2", timeout: float = 60.0):
@@ -69,17 +110,24 @@ class RadareRunner:
     def run(self, path: str, cmd: str) -> str:
         if not self._have():
             raise ProviderUnavailable(f"{self.bin} not installed on this host")
+        argv = [self.bin,
+                "-e", "scr.color=0",
+                "-e", "bin.relocs.apply=true",
+                "-q", "-c", cmd, path]
         try:
-            p = subprocess.run([self.bin, path, "-c", cmd],
-                               capture_output=True, text=True,
-                               timeout=self.timeout)
+            p = self._run(argv, self.timeout)
         except FileNotFoundError:
             raise ProviderUnavailable(f"{self.bin} not installed on this host")
         except subprocess.TimeoutExpired:
             raise ProviderError(f"r2 timed out after {self.timeout}s")
         if p.returncode != 0:
             raise ProviderError(f"r2 exit {p.returncode}: {p.stderr[:200].strip()}")
-        return p.stdout
+        return _strip_ansi(p.stdout)
+
+    def _run(self, argv, timeout):
+        """Subprocess seam (test capture point); real r2 call lives here."""
+        return subprocess.run(list(argv), capture_output=True, text=True,
+                              timeout=timeout)
 
     def version(self) -> str:
         try:
@@ -88,7 +136,7 @@ class RadareRunner:
         except Exception:
             return "unknown"
         first = out.stdout.splitlines()[0] if out.stdout else "unknown"
-        return first.strip()[:60]
+        return _strip_ansi(first).strip()[:60]
 
 
 # ------------------------------------------------------------------ ELF
@@ -192,24 +240,63 @@ def match_jni_export(jname: str, exports: list[str]) -> str | None:
 
 # ------------------------------------------------------------------ parse
 def parse_functions(out: str) -> list[dict]:
-    """r2 `aflj`-ish rows: '0xADDR  size  name' (name optional). Pure."""
+    """r2 `aflj` (JSON list of {addr, name, size, realsz, ...}) or legacy
+    `afl` text rows '0xADDR  size  name' (name optional). Pure. (P18: r2 6.x
+    `afl` text gained a 4th delta-column AND ANSI wrapping — JSON is the
+    stable contract, text kept for older r2 / FakeRunners.)"""
+    data = _loads_maybe(out)
+    if isinstance(data, list):
+        fns = []
+        for it in data:
+            if not isinstance(it, dict) or "addr" not in it:
+                continue
+            try:
+                va = int(it["addr"])
+            except (TypeError, ValueError):
+                continue
+            size = it.get("size") or it.get("realsz") or 0
+            name = it.get("name") or f"fcn.{va:08x}"
+            fns.append({"va": va, "size": int(size), "name": str(name),
+                        "r2_id": f"fcn.{va:08x}"})
+        return fns
     fns = []
-    for row in _parse_hex_rows(out):
+    for row in _parse_hex_rows(_strip_ansi(out)):
         toks = row.split()
         if not toks:
             continue
-        va = int(toks[0], 16)
-        size = int(toks[1]) if len(toks) > 1 and re.match(r"^\d+$", toks[1]) else 0
-        name = toks[2] if len(toks) > 2 else f"fcn.{va:08x}"
+        if len(toks) >= 4:
+            # r2 6.x text `afl`: '0xADDR  delta  size  name' (probed 2026-10-02;
+            # the 4th column is what older 3-token parsers misread as the name)
+            va = int(toks[0], 16)
+            size = int(toks[2]) if re.match(r"^\d+$", toks[2]) else 0
+            name = toks[3]
+        else:
+            # legacy 3-token '0xADDR  size  name' (r2 5.x / FakeRunner)
+            va = int(toks[0], 16)
+            size = int(toks[1]) if len(toks) > 1 and re.match(r"^\d+$", toks[1]) else 0
+            name = toks[2] if len(toks) > 2 else f"fcn.{va:08x}"
         fns.append({"va": va, "size": size, "name": name,
                     "r2_id": f"fcn.{va:08x}"})
     return fns
 
 
 def parse_exports(out: str) -> list[str]:
-    """r2 `iEj`-ish rows: '0xADDR ... name'. Return names. Pure."""
+    """r2 `iEj` (JSON list of {name, ...}) or legacy text '0xADDR ... name'.
+    Returns names, DEDUPED in first-seen order (r2 6 iEj lists the same
+    symbol once per symtab AND once per dynsym — probed 2026-10-02). Pure."""
+    data = _loads_maybe(out)
+    if isinstance(data, list):
+        names = []
+        seen = set()
+        for it in data:
+            if isinstance(it, dict) and it.get("name"):
+                n = str(it["name"])
+                if n not in seen:
+                    seen.add(n)
+                    names.append(n)
+        return names
     names = []
-    for row in _parse_hex_rows(out):
+    for row in _parse_hex_rows(_strip_ansi(out)):
         toks = row.split()
         if len(toks) >= 2:
             names.append(toks[-1])
@@ -217,10 +304,19 @@ def parse_exports(out: str) -> list[str]:
 
 
 def parse_imports(out: str) -> list[dict]:
-    """r2 `iI` rows: 'sym:module' (one per import). Pure. A bare symbol with
-    no 'sym:module' is handled (module='')."""
+    """r2 `iij` (JSON list of {name, bind, type, plt}) or legacy 'sym:module'
+    text. r2 6 iij carries NO source-library name (ELF dynamic imports are
+    resolved by the dynamic linker, not named per-import) — module stays
+    '' (honest), same as a legacy bare symbol. Pure."""
+    data = _loads_maybe(out)
+    if isinstance(data, list):
+        imps = []
+        for it in data:
+            if isinstance(it, dict) and it.get("name"):
+                imps.append({"name": str(it["name"]), "module": ""})
+        return imps
     imps = []
-    for ln in out.splitlines():
+    for ln in _strip_ansi(out).splitlines():
         ln = ln.strip()
         if not ln:
             continue
@@ -238,17 +334,30 @@ def parse_imports(out: str) -> list[dict]:
 
 
 def parse_xrefs(out: str, target_va: int) -> list[int]:
-    """r2 `aXR 0xADDR`-ish rows: '0xADDR ... [ref]'. Return the FROM addresses.
-    Pure."""
+    """r2 `axtj` (JSON list of {from, type, opcode, fcn_name, refname, ...})
+    or legacy `aXR`/`axt` text rows 'sym.NAME 0xADDR [CALL:--x] ...'. Returns
+    the FROM addresses. Pure."""
+    data = _loads_maybe(out)
+    if isinstance(data, list):
+        froms = []
+        for it in data:
+            if isinstance(it, dict) and "from" in it:
+                try:
+                    froms.append(int(it["from"]))
+                except (TypeError, ValueError):
+                    continue
+        return froms
+    # legacy `aXR`/`axt` text: real r2 prints "sym.NAME 0xADDR [CALL:--x] ..."
+    # — the from-address is the FIRST 0x-hex token in the line, not always
+    # token[0] (the symbol name leads). Scan for it.
     froms = []
-    for row in _parse_hex_rows(out):
-        toks = row.split()
-        if not toks:
-            continue
-        try:
-            froms.append(int(toks[0], 16))
-        except ValueError:
-            continue
+    for ln in _strip_ansi(out).splitlines():
+        m = re.search(r"0x[0-9a-fA-F]+", ln)
+        if m:
+            try:
+                froms.append(int(m.group(0), 16))
+            except ValueError:
+                continue
     return froms
 
 
@@ -262,21 +371,36 @@ def parse_xrefs(out: str, target_va: int) -> list[int]:
 # reverse-engineered constants), and the patterns are compiler-output shapes
 # observed in the exercism reference corpus.
 def _adrp_add_pairs(mnems: list[str]) -> list[str]:
-    """adrp Xd,label followed within 2 instructions by add Xd,Xd,:lo12:label —
-    the position-independent address-load idiom (how every string/data
-    reference is materialized). Returns the referenced symbol names."""
+    """adrp Xd,label followed within 2 instructions by add Xd,Xd,<ref> on the
+    SAME register — the position-independent address-load idiom (how every
+    string/data reference is materialized). Returns the referenced targets.
+
+    P19 (verified on real r2 6.2.2 over a real aarch64 .so): r2 6 renders
+    the pair as `adrp x0, 0` + `add x0, x0, 0x278` (or a resolved symbol
+    `str.foo`) — the pre-6 `:lo12:` label form is NOT what 6.x prints, so
+    requiring `:lo12:` silently matched zero real binaries. Accept both:
+    a `:lo12:` label OR a hex/symbol operand. The register must match the
+    adrp's write-dest (otherwise any adrp+add in the window false-matches).
+    """
     pairs: list[str] = []
     for i, m in enumerate(mnems):
         a = m.lower()
         if not a.startswith("adrp "):
             continue
-        lab = a.rsplit(" ", 1)[-1].strip()
-        if not lab or lab.startswith("#"):
+        toks = a.split()
+        if len(toks) < 2:
             continue
+        reg = toks[1].strip()
         for j in range(i + 1, min(i + 3, len(mnems))):
             m2 = mnems[j].lower()
-            if m2.startswith("add ") and lab in m2 and ":lo12:" in m2:
-                pairs.append(lab)
+            if not m2.startswith("add "):
+                continue
+            toks2 = m2.split()
+            if len(toks2) < 3 or toks2[1] != reg or toks2[2] != reg:
+                continue
+            ref = toks2[-1].strip()
+            if ":lo12:" in ref or ref.startswith("0x") or ref:
+                pairs.append(ref)
                 break
     return pairs
 
@@ -305,12 +429,17 @@ def classify_function(mnems: list[str]) -> list[dict]:
                  "clz+ror+eor clear-highest-bit loop — popcount without a "
                  "per-bit loop")
             break
-    # ASCII case-fold: orr Xd,Xd,#32 (force lower bit -> lowercase)
+    # ASCII case-fold: orr Xd,Xd,#32 (force lower bit -> lowercase). r2 5
+    # prints the immediate as `#32`; r2 6 prints it as `0x20` (hex, no #) —
+    # same instruction, so accept both (P19, verified on real 6.2.2).
+    # Require Xd==Xn (self-fold): `orr w1, w2, #32` merely ORs bit 5 of a
+    # DIFFERENT register and is not the case-fold idiom.
     for i, a in enumerate(low):
-        if a.startswith("orr ") and ", #32" in a:
+        mcf = re.match(r"^orr\s+(\w+)\s*,\s*\1\s*,\s*(?:#32|0x20)\s*$", a)
+        if mcf:
             _add("P2", "case-fold-scan", [mnems[i]],
-                 "orr #32 — forces the ASCII lowercase bit (case-insensitive "
-                 "match idiom)")
+                 "orr Xd,Xd,#32/0x20 — forces the ASCII lowercase bit "
+                 "(case-insensitive match idiom)")
             break
     # bitset membership: `tst Xd, Xn, lsl #imm` — test a SINGLE bit of a
     # register (flag/permission check). The shifted form is the idiom; a bare
@@ -371,29 +500,41 @@ def classify_functions(fns_with_mnems: list[tuple[dict, list[str]]]) -> list[dic
 
 
 def parse_disasm(out: str) -> list[str]:
-    """r2 `pdj` (JSON) or `pd` (text) -> [mnemonic]. Tolerant: a JSON array
-    of {"name":..} items, or one 'addr  name  rest' line each. Pure."""
-    s = (out or "").strip()
+    """r2 `pdfj` (object {name,addr,ops:[{disasm,opcode,...}]}) / `pdj`
+    (JSON array) / `pd` (text) -> [mnemonic]. Tolerant: JSON objects/arrays,
+    or one 'addr  name  rest' line each. Pure.
+
+    Item shapes handled (all probed on real 6.2.2): r2 6.x `pdj`/`pdfj`
+    op items carry `disasm` (the full mnemonic incl. operands, e.g.
+    "mov rbp, rsp"); older r2 items carry `name` (mnemonic only) +
+    separate `opcode`/`op` operands. P18: the r2-6 shape was never seen
+    before, so real-r2 disasm silently returned [] (name-missing ->
+    skipped). P19: `pdfj` wraps the ops in an object ({name,addr,size,ops})
+    — accept that top-level shape too."""
+    s = _strip_ansi(out or "").strip()
     if not s:
         return []
     mn: list[str] = []
-    if s[0] == "[":
-        import json
-        try:
-            arr = json.loads(s)
-            for it in arr:
-                if isinstance(it, dict) and it.get("name"):
-                    name = str(it["name"]).split(".")[0]
-                    # r2 pdj keeps operands in a separate field ("opcode"
-                    # in older r2, "op" in newer) — append them so the full
-                    # mnemonic is available for pattern matching.
-                    op = it.get("opcode") or it.get("op")
-                    if isinstance(op, str) and op.strip():
-                        mn.append(f"{name} {op.strip()}")
-                    else:
-                        mn.append(name)
-        except Exception:
-            pass
+    data = _loads_maybe(s) if s[0] in "[{" else None
+    if isinstance(data, dict) and isinstance(data.get("ops"), list):
+        data = data["ops"]  # pdfj shape: {name, addr, ops:[...]}
+    if isinstance(data, list):
+        for it in data:
+            if not isinstance(it, dict):
+                continue
+            if it.get("disasm"):
+                mn.append(str(it["disasm"]))
+                continue
+            if it.get("name"):
+                name = str(it["name"]).split(".")[0]
+                # r2 keeps operands in a separate field ("opcode" in older
+                # r2, "op" in some builds) — append them so the full
+                # mnemonic is available for pattern matching.
+                op = it.get("opcode") or it.get("op")
+                if isinstance(op, str) and op.strip():
+                    mn.append(f"{name} {op.strip()}")
+                else:
+                    mn.append(name)
         return mn
     for ln in s.splitlines():
         ln = ln.strip()
@@ -419,13 +560,23 @@ def _classify_native_functions(native: dict, runner: "RadareLike | None" = None)
     disassembling it via the runner (r2 `pdj`). Pure glue over the runner
     seam — no r2 required (works with FakeRunner). A disasm error leaves the
     function with an empty pattern list (honest: NOT OBSERVED, not a failure).
-    Mutates native in place."""
+    Mutates native in place.
+
+    P18 (r2 6.x, verified against real 6.2.2): the command needs an `aa`
+    warmup (without it, pdj disassembles raw bytes and fcn_addr=0) and a
+    0x-prefixed hex seek (a bare `@1129` is parsed as DECIMAL 1129 = 0x461).
+    P19 (verified on a real aarch64 .so): the disasm is FUNCTION-BOUNDED via
+    `pdfj @0xVA`, NOT `pdj {size} @0xVA` — r2 `pdj`'s count is INSTRUCTIONS,
+    but `size` is BYTES, so the count form disassembles THROUGH the adjacent
+    functions and mis-attributes their idioms (a real .casefold function
+    reported fused-madd/tbz/bitset that belonged to its neighbors). `pdfj`
+    bounds to the enclosing function; r2 also names entry0 for the first
+    function, so the va-form seek (not the symbol name) is the stable target.
+    """
     runner = runner or RadareRunner()
     for f in native.get("functions", []):
         try:
-            dsize = f.get("size") or 0
-            out = runner.run(native["path"],
-                             f"pdj {dsize} @{f['va']:x}")
+            out = runner.run(native["path"], f"aa; pdfj @0x{f['va']:x}")
             mnems = parse_disasm(out)
         except Exception:
             mnems = []
@@ -437,11 +588,11 @@ def _classify_native_functions(native: dict, runner: "RadareLike | None" = None)
 # ------------------------------------------------------------------ native
 def _r2_command_for(goal: str, path: str) -> str | None:
     return {
-        "functions": "aflj",
+        "functions": "aa; aflj",
         "exports": "iEj",
-        "imports": "iI",
+        "imports": "iij",
         "strings": "izj",
-        "xrefs": None,  # needs a target address
+        "xrefs": None,  # needs a target address (axtj)
     }.get(goal)
 
 
@@ -464,9 +615,9 @@ def analyze_native(path: str, runner: "RadareLike | None" = None,
     if segments is None:
         segments = elf_segments_64(raw)
 
-    fns_out = runner.run(path, "aflj")
+    fns_out = runner.run(path, "aa; aflj")
     exps_out = runner.run(path, "iEj")
-    imps_out = runner.run(path, "iI")
+    imps_out = runner.run(path, "iij")
 
     fns = parse_functions(fns_out)
     exports = parse_exports(exps_out)
@@ -503,10 +654,36 @@ def analyze_native(path: str, runner: "RadareLike | None" = None,
 
 def xrefs_of(native: dict, fcn_va: int, runner: "RadareLike | None" = None):
     """XREFs into a function: returns (list[from_va], segments). ProviderError
-    if the provider can't answer (honest)."""
+    if the provider can't answer (honest).
+
+    P18 (r2 6.x, verified): uses `axtj` (aXR was removed in r2 6). In a
+    position-independent .so, other code calls a function THROUGH ITS PLT
+    STUB (sym.plt.X), so xrefs to the real function address come back EMPTY
+    and the callers sit on the PLT stub instead (probed: sum3 -> plt.add).
+    Fallback: if the direct query is empty, query the matching `sym.plt.<name>`
+    stub and report its callers. The PLT hop is a PIC calling-convention
+    artifact, not an identity claim — callers are E3 xref evidence either way.
+    """
     runner = runner or RadareRunner()
-    out = runner.run(native["path"], f"aXR {hex(fcn_va)}")
-    return parse_xrefs(out, fcn_va), native.get("segments", [])
+    out = runner.run(native["path"], f"aa; axtj 0x{fcn_va:x}")
+    froms = parse_xrefs(out, fcn_va)
+    if not froms:
+        # find this function's name in the analyzed set, then its PLT stub
+        fname = None
+        for f in native.get("functions", []):
+            if f.get("va") == fcn_va:
+                fname = f.get("name")
+                break
+        if fname:
+            base = fname.rsplit(".", 1)[-1] if "." in fname else fname
+            plt = f"sym.plt.{base}"
+            for f in native.get("functions", []):
+                if f.get("name") == plt:
+                    out2 = runner.run(native["path"],
+                                      f"aa; axtj 0x{f['va']:x}")
+                    froms = parse_xrefs(out2, f["va"])
+                    break
+    return froms, native.get("segments", [])
 
 
 def resolve_native_entity(known: list[dict], provider_id: str,
