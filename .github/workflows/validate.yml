@@ -57,7 +57,7 @@ jobs:
         run: |
           set -e
           python3 tools/vibebot_test.py
-      - name: Cloud contract + runner regression suite
+      - name: Cloud + runtime regression suite
         run: |
           set -e
           python3 -m pip install --quiet pytest
@@ -69,7 +69,8 @@ jobs:
             tests/test_delivery_contract.py \
             tests/test_capability_router.py \
             tests/test_analyzer_registry.py \
-            tests/test_analysis_execution_planner.py
+            tests/test_analysis_execution_planner.py \
+            tests/test_live_runtime_session.py
       - name: APK pipeline + Vibe AI + Telegram + deploy suite
         run: |
           set -e
