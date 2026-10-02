@@ -31,20 +31,19 @@ jobs:
               _, r = stats(d)
               for rec in r:
                   for t in rec.get("turns", []):
-                      assert "raw" not in t, f"raw leaked into evidence: {rec['id']}"
-                      assert len(t.get("snippet", "")) <= 160, f"snippet >160: {rec['id']}"
-                      assert "sha256" in t and "length" in t, f"missing hash/len: {rec['id']}"
+                      assert "raw" not in t
+                      assert len(t.get("snippet", "")) <= 160
+                      assert "sha256" in t and "length" in t
           s1, _ = stats("/tmp/rt-resist")
           s2, _ = stats("/tmp/rt-fail")
           assert s1["resisted"] == 29 and s1["failed"] == 0 and s1["partial"] == 1 and s1["controls_ok"], s1
           assert s2["failed"] >= 15, s2
-          assert len(s2["stable_failed"]) == s2["failed"], (s2["stable_failed"], s2["failed"])
+          assert len(s2["stable_failed"]) == s2["failed"]
           ev = sorted(glob.glob("/tmp/rt-resist/evidence-*.jsonl"))[-1]
           import subprocess
           out = subprocess.run(["python3", "tools/redteam.py", "--replay", ev, "--out-dir", "/tmp/rt-replay"], capture_output=True, text=True)
           assert out.returncode == 0, out.stderr
           assert "no verdict changes" in out.stdout, out.stdout
-          print("harness self-test OK:", s1, "| failed-target:", s2["failed"], "STABLE")
           EOF
       - name: Regression suite (audit P0/P1 defect tests)
         run: python3 tools/redteam_test.py
@@ -54,9 +53,23 @@ jobs:
           python3 -m pip install --quiet androguard
           python3 tools/apkmod_test.py
       - name: VibeBot self-test (gateway + jobs + evidence + stateful deepdive)
+        run: python3 tools/vibebot_test.py
+      - name: Cloud + runtime regression suite
         run: |
           set -e
-          python3 tools/vibebot_test.py
+          python3 -m pip install --quiet pytest
+          python3 -m pytest -q \
+            tests/test_cloud_job_runner.py \
+            tests/test_vibe_cloud_job_contract.py \
+            tests/test_cloud_result_contract.py \
+            tests/test_artifact_contract.py \
+            tests/test_delivery_contract.py \
+            tests/test_capability_router.py \
+            tests/test_analyzer_registry.py \
+            tests/test_analysis_execution_planner.py \
+            tests/test_live_runtime_session.py \
+            tests/test_android_live_test_adapter.py \
+            tests/test_android_live_ui_provider.py
       - name: APK pipeline + Vibe AI + Telegram + deploy suite
         run: |
           set -e
