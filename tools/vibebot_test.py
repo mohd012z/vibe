@@ -1436,6 +1436,60 @@ def main() -> int:
             check("differential: NOT OBSERVED here (no Kotlin toolchain) — "
                   "pure decode stands, unverified against oracle",
                   True, "toolchain absent; disclosed, not skipped")
+
+        # --- P17 REAL R8 e2e: the actual obfuscation R8 applies to this same
+        # sample, committed as ground truth. Proves the E2 ceiling is HONEST:
+        # on a plain (un-R8'd) DEX the d2 table carries the ORIGINAL names
+        # (the fixture above); on a REAL R8 output the d2 table is POST-R8 —
+        # class/method names obfuscated, property names usually preserved —
+        # and if the build didn't keep @Metadata, R8 strips it entirely.
+        # The decoder is CORRECT in both cases (it faithfully reads what's
+        # there); this block pins the observed ceiling so a future change
+        # that pretends to recover pre-R8 class names from an R8 DEX fails.
+        R8_KEPT = os.path.join(ROOT, "tests", "fixtures", "ktmeta_r8",
+                               "classes-kept.dex")
+        R8_STRIPPED = os.path.join(ROOT, "tests", "fixtures", "ktmeta_r8",
+                                   "classes-stripped.dex")
+        if os.path.exists(R8_KEPT) and os.path.exists(R8_STRIPPED):
+            r8k = open(R8_KEPT, "rb").read()
+            r8s = open(R8_STRIPPED, "rb").read()
+            rk = KM.extract_kotlin_metadata(r8k)
+            check("R8-kept: @Metadata survives obfuscation (6 records)",
+                  len(rk) == 6, str(len(rk)))
+            obf = {r["class_desc"]: KM.decode_class_metadata(
+                r["d1"] or "", r["d2"]) or {} for r in rk}
+            fqs = {v.get("fq_name") for v in obf.values()}
+            check("R8-kept: class names ARE obfuscated (not the originals)",
+                  "CheckoutService" not in fqs and "Order" not in fqs
+                  and all(isinstance(f, str) and len(f) <= 3 for f in fqs
+                          if f), str(fqs))
+            props = set()
+            for v in obf.values():
+                props |= set(v.get("properties") or [])
+            check("R8-kept: property names SURVIVE R8 (the d2 table keeps "
+                  "them)", {"gateway", "totalCents", "amountCents", "sku",
+                            "orderId"} <= props, str(props))
+            plain_charge = any(
+                "charge" in (KM.decode_class_metadata(
+                    r["d1"] or "", r["d2"]) or {}).get("functions", [])
+                for r in krecs
+                if r["class_desc"].endswith("CheckoutService;"))
+            r8_charge = any(
+                "charge" in (v.get("functions") or []) for v in obf.values())
+            check("the ceiling is REAL: the plain DEX recovers 'charge' "
+                  "but the R8 DEX cannot (same decoder, different source)",
+                  plain_charge and not r8_charge,
+                  f"plain_charge={plain_charge} r8_charge={r8_charge}")
+            check("R8-stripped: default R8 config strips @Metadata entirely "
+                  "-> recover_names honest 'no @kotlin.Metadata'",
+                  KM.extract_kotlin_metadata(r8s) == []
+                  and "no @kotlin.Metadata" in
+                  KM.render_kmeta(KM.recover_names(r8s)),
+                  str(KM.extract_kotlin_metadata(r8s)))
+        else:
+            print("  [P17] NOT OBSERVED: ktmeta_r8 fixtures absent — "
+                  "real-R8 ceiling not pinned")
+
         # --- gateway dispatch: /kmeta registered + usage + missing path
         if "kotlinmeta" in gw.engines:
             r, j = gw.handle("/kmeta")
@@ -2327,7 +2381,7 @@ def main() -> int:
         ver = getattr(vb, "__version__", None)
         check("version: __init__.__version__ is X.Y.Z",
               isinstance(ver, str) and len(ver.split(".")) == 3, str(ver))
-        check("version: matches the current build", ver == "0.21.0", str(ver))
+        check("version: matches the current build", ver == "0.22.0", str(ver))
         r, j = gateway.Gateway(td).handle("/find zzz")
         check("session: /find without --sha is refused (no most-recent fallback)",
               "no --sha" in r and "run /apk" in r and j is None, r)
