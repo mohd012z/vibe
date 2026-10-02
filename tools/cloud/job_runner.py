@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from tools.cloud.job_contract import JobContract
+from tools.vibebot.cloud_job import JobContract
 from tools.cloud.result_contract import ResultContract, ResultStatus
 
 
@@ -14,8 +14,8 @@ def run(job: JobContract) -> ResultContract:
     return ResultContract(
         job_id=job.job_id,
         status=ResultStatus.COMPLETED,
-        operation=job.operation.value,
-        summary=f"validated Vibe job accepted for operation {job.operation.value}",
+        operation=job.operation,
+        summary=f"validated Vibe job accepted for operation {job.operation}",
         outputs=[],
     )
 
