@@ -517,6 +517,20 @@ P25 self-improvement eval.
   fallback); oracle cross-check only runs where a Kotlin toolchain is present
   (NOT OBSERVED elsewhere, never a fake pass). Design origin:
   `studies/2026-10-02-external-study-lupoxyz-ghidra-mcp.md` (backlog item 2).
+- **P17b (real-R8 verification, v0.22)** — DONE (same PR #6): P17's
+  single-fixture gap closed with REAL R8 9.4.28 outputs of the same sample
+  (r8.jar from Google Maven; kotlinc → R8 → d8). Committed
+  `tests/fixtures/ktmeta_r8/{classes-kept,classes-stripped}.dex`. The real
+  run found the docstring OVERCLAIMED: "ORIGINAL (pre-R8) names" is only
+  true for a plain DEX. On a REAL R8'd DEX: (a) default config STRIPS
+  @Metadata entirely (0 records → honest "no @kotlin.Metadata"); (b) with
+  `-keepattributes *Annotation*` it survives but **d2 is POST-R8** —
+  class/function names decode to the obfuscated a–f, while property names
+  survive (gateway/totalCents/amountCents/sku/orderId). The decoder was
+  CORRECT (reads what's there); the *claim* was fixed in kotlinmeta.py
+  (docstring + render footer + finding title + spec description). +5 checks
+  → 481. `__version__` → 0.22.0. **P17's single-fixture / overclaim gap:
+  CLOSED.** See studies/2026-10-02-p17-real-r8.md.
 - ~~Kotlin @Metadata name recovery~~ — DONE above (P17, v0.16); the
   "STILL DEFERRED" state was unblocked when scratch gained JDK17 + kotlinc +
   d8, and the message-level proto numbers from `metadata.proto` were verified

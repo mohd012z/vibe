@@ -1,10 +1,23 @@
 """P17 — Kotlin @Metadata name recovery.
 
-Recover the ORIGINAL (pre-R8) Kotlin names from an APK/DEX. R8 can rename
-every DEX method/field/class, but a Kotlin class's `@kotlin.Metadata`
-annotation carries the original names: `d1` = the serialized `Class` proto +
-name-resolver, `d2` = the base string table. Decoding them yields the true
-`fq_name`, nested classes, and every function/property name.
+Recover the ORIGINAL Kotlin names from an APK/DEX. R8 can rename every DEX
+method/field/class, but a Kotlin class's `@kotlin.Metadata` annotation
+carries the names: `d1` = the serialized `Class` proto + name-resolver,
+`d2` = the base string table. Decoding them yields `fq_name`, nested
+classes, and every function/property name.
+
+REAL R8 CEILING (verified 2026-10-02 on an actual R8 9.4.28 output of the
+ktmeta fixture — see tests/fixtures/ktmeta_r8/):
+- Plain (un-R8'd) DEX: `d2` holds the ORIGINAL names -> full recovery.
+- R8'd DEX, build KEEPS @Metadata (`-keepattributes *Annotation*`):
+  the annotation survives but `d2` is POST-R8 — class + method names are
+  the obfuscated ones, while data-bearing property/field names usually
+  survive. Recovery is PARTIAL: properties are the original names,
+  class/function names are not recoverable from the DEX alone.
+- R8'd DEX, default config: R8 STRIPS @Metadata entirely -> 0 records,
+  `recover_names` reports "no @kotlin.Metadata" (honest, not a failure).
+So "original (pre-R8) names" is guaranteed only for the plain-DEX case;
+for an R8'd DEX the ceiling is whatever `d2` still contains.
 
 Why this is the /360-correct shape:
 - The DEX names are what you *see* (E2, often R8-minified: `a`, `b`, `c`).
@@ -361,10 +374,12 @@ def render_kmeta(recovered: list[dict]) -> str:
             lines.append(f"    fns:     {', '.join(str(x) for x in dec['functions'])}")
         if dec["properties"]:
             lines.append(f"    props:   {', '.join(str(x) for x in dec['properties'])}")
-    lines.append("  (recovered ORIGINAL names from @Metadata — R8-minified "
-                 "DEX names are the falsifiable view; re-validate before "
-                 "acting. E2 annotation evidence, PROBABLE until behavior "
-                 "confirms.)")
+    lines.append("  (names recovered from @Metadata — on a PLAIN DEX these "
+                 "are the originals; on an R8'd DEX they may be post-R8 "
+                 "(properties often survive, class/method names may not) "
+                 "or @Metadata may be stripped entirely. DEX names are the "
+                 "falsifiable view; re-validate before acting. E2 annotation "
+                 "evidence, PROBABLE until behavior confirms.)")
     return "\n".join(lines)
 
 
@@ -457,8 +472,10 @@ class KotlinMetaEngine(core.Engine):
 
     spec = core.EngineSpec(
         name="kotlin-meta",
-        description="Kotlin @Metadata name recovery: original (pre-R8) "
-                    "class/method/field names from an APK/DEX",
+        description="Kotlin @Metadata name recovery: the names @Metadata's "
+                    "d2 table carries (originals on a plain DEX; on an R8'd "
+                    "DEX possibly post-R8 or @Metadata stripped — see the "
+                    "module docstring's R8 ceiling note)",
         formats=("apk", "dex", "apkx"),
     )
 
@@ -534,18 +551,22 @@ class KotlinMetaEngine(core.Engine):
                           if c.get("decoded") and c["decoded"].get("fq_name"))
             raw = {
                 "sdk": "KOTLIN-META",
-                "title": f"recovered original Kotlin names for {n_named} "
-                         f"class(s) from @Metadata (E2, PROBABLE)",
+                "title": f"recovered Kotlin names for {n_named} class(s) from "
+                         f"@Metadata (E2, PROBABLE; originals only on a "
+                         f"plain DEX — see the R8 ceiling note)",
                 "classification": "KOTLIN_RECOVERY",
                 "evidence": [{"level": "E2", "artifact": "@kotlin.Metadata",
                               "detail": f"{result['class_count']} annotated "
                                         f"class(es), pure-Python decode" +
                                         ("; JVM-verified" if result.get("oracle")
                                          else "")}],
-                "falsification": ["recovered names are the SOURCE's intent; "
-                                  "the R8-minified DEX names are what's "
-                                  "observable — re-validate against behavior "
-                                  "before acting (PROBABLE ceiling)"],
+                "falsification": ["recovered names are what @Metadata's d2 "
+                                  "table carries: on a plain DEX the source "
+                                  "originals; on an R8'd DEX possibly "
+                                  "post-R8 (properties often survive, "
+                                  "class/method names may not) or @Metadata "
+                                  "stripped entirely — re-validate against "
+                                  "behavior before acting (PROBABLE ceiling)"],
             }
             findings.append(core.normalize_finding(raw, self.spec.name, 1))
         return core.EngineResult(
