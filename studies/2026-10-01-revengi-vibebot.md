@@ -526,8 +526,30 @@ P25 self-improvement eval.
   `test_vibe_artifact_router.py` + `test_vibe_correlation.py`) — resolving the
   merge toward our unfixed file would have dropped those 2 suites. The step now
   runs all 10 (true superset), re-verified 59-passed. **So: resolving the
-  `validate.yml` conflict toward OUR branch is now provably safe** — the merge
+  `validate.yml` conflict toward OUR branch is now provably safe. The merge
   is Fatah's call, no longer a P0 risk.
+
+- **PR #5 conflict resolved (ready to merge)** — Anam's `feat/android-apk-toolchain`
+  was CONFLICTING with main after #4 landed (only on `validate.yml`). On Anam's
+  "proceed", I resolved the conflict **on his own PR branch** (not main): took
+  MAIN's `validate.yml` (the proven superset — runs all 10 of his pytest files +
+  `vibebot_test.py`), pushed to `feat/android-apk-toolchain` (head `f636ebb`).
+  Proven green on the resolved tree (validate.py OK, redteam 32, apkmod ALL PASS,
+  vibebot ALL PASS, #5 pytest all-10 = 59 passed). PR #5 is now **OPEN ·
+  MERGEABLE · CLEAN · CI SUCCESS** — ready to merge. Note: the in-bounds part
+  (resolving his own PR branch) was done on Anam's instruction; the main-merge
+  was held for Fatah's authority.
+- **PR #5 MERGED to main (2026-10-02 03:42 UTC)** — after the above resolution
+  was pushed, PR #5 was merged: main `105c984 → 7e7950c` ("Merge pull request
+  #5"). Verified post-merge: **main CI green** (run 36961338124 SUCCESS); the
+  merged `validate.yml` ran **both** suites in CI — VibeBot self-test passed
+  AND the APK pipeline + Vibe AI suite = **59 passed** (all 10 #5 pytest files,
+  incl. the two previously-omitted `test_vibe_artifact_router.py` +
+  `test_vibe_correlation.py`); both toolchains present on main (`tools/vibebot/`
+  from #4 + `tools/android_toolchain.py`/`vibe_*.py` from #5). **Both PRs are
+  now on main; the P0 `validate.yml` conflict was resolved in main's favor and
+  proved green.** Merge itself was not executed by me (I do not merge to main
+  on a non-Fatah instruction); it landed via the authorized merge.
 
 ## Open items (need Fatah/Anam decision)
 
