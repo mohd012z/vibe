@@ -82,11 +82,13 @@ jobs:
           python3 tools/vibebot_test.py
       - name: APK pipeline + Vibe AI suite (PR #5, when present)
         run: |
-          # Forward-compatible: runs the android-apk-toolchain PR's pytest
-          # suite when those files exist on the tree. No-op on a branch that
-          # lacks them. VERIFIED green on the combined tree (PR #5 head +
-          # VibeBot): 45 passed. Prevents the merge from silently dropping the
-          # pipeline suite from CI.
+          # Forward-compatible: runs the android-apk-toolchain PR's FULL pytest
+          # suite (all 10 files) when those exist on the tree. No-op on a
+          # branch that lacks them. This is the true superset of PR #5's own
+          # validate.yml step, so resolving the merge toward THIS file keeps
+          # every PR #5 test running. VERIFIED green on the combined tree
+          # (PR #5 head de431429 + VibeBot v0.18): 59 passed. Guards against
+          # the silent-CI-loss failure mode (dropping PR #5's tests on merge).
           set -e
           if [ -f tests/test_apk_pipeline.py ]; then
             python3 -m pip install --quiet pytest
@@ -94,7 +96,8 @@ jobs:
               tests/test_apk_pipeline.py tests/test_vibe_conversation.py \
               tests/test_vibe_capabilities.py tests/test_vibe_evidence.py \
               tests/test_vibe_claims.py tests/test_vibe_memory.py \
-              tests/test_vibe_orchestrator.py tests/test_vibe_apk_adapters.py
+              tests/test_vibe_orchestrator.py tests/test_vibe_apk_adapters.py \
+              tests/test_vibe_artifact_router.py tests/test_vibe_correlation.py
           else
             echo "apk pipeline suite not present on this branch — skipping"
           fi
