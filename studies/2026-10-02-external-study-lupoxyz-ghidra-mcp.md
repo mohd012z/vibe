@@ -253,7 +253,9 @@ backend.
    (B4).
 9. **P17 oracle gating spec**: off-by-default, named-exports only,
    call-only vs differential (B, oracle) — design note before any Frida
-   work.
+   work. (Note: the build "P17" label is reused for the Kotlin @Metadata
+   name recovery above, item #2 — that one is DONE; this Frida oracle
+   spec is still open and is its own backlog line.)
 10. **Invariant tests**: no "most recent session" fallback (B5); version
     string consistency across `__init__`/pyproject (B, test pitfalls).
 

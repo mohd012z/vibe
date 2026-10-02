@@ -445,15 +445,37 @@ P25 self-improvement eval.
   Honest limit: no qemu/cross-compiler on this host — real run NOT OBSERVED
   (the e2e asserts the degrade); SUCCESS/FAILURE via FakeRunner. Backlog #12
   DONE. Closes the loop P15→patch→P16.
-- **Kotlin @Metadata name recovery** — STILL DEFERRED (honest disclosure):
-  message-level field numbers verified against the authoritative
-  `core/metadata/src/metadata.proto` (Function.name=2, Class.function=9,
-  constructor=8, fq_name=3, StringTable.string=1, PackageFragment.class=4,
-  Property.name=2), but the top-level `Metadata` envelope positions still
-  need verification against a REAL Kotlin APK — per the repo invariant "never
-  hand-roll binary-format constants from memory," the parser is held until a
-  sample (or a JDK to compile one) exists. Design in
+- **P17 (Kotlin @Metadata name recovery)** — DONE (v0.16, backlog #2):
+  `tools/vibebot/kotlinmeta.py` + `/kmeta <classes.dex|app.apk> [class_filter]`.
+  R8 renames every DEX name, but a Kotlin class's `@kotlin.Metadata` annotation
+  carries the ORIGINAL names: `d1` (BitEncoding-encoded proto) + `d2` (string
+  table with the real identifiers). This build: (a) pinned a **ground-truth
+  fixture** `tests/fixtures/ktmeta/classes.dex` (kotlinc 2.0.21 → d8, known
+  identifiers: CheckoutService/charge/gateway/totalCents/Companion/Order.Paid);
+  (b) implemented the decoder in **pure Python** from the authoritative
+  JetBrains source (fetched, not memory): `BitEncoding.decodeBytes` (UTF-8 mode
+  = drop U+0000 marker + char→byte; 8-to-7 mode), `JvmProtoBufUtil` layout
+  (StringTableTypes delimited + Class message), `JvmNameResolverBase.getString`
+  (string/predefined-index/desc-operations) + the full PREDEFINED_STRINGS table;
+  (c) **differentially verified** the pure decode against the **Kotlin
+  compiler's own deserializer** (`tools/vibebot/KMeta.java`, subprocess over
+  kotlin-compiler.jar — license-safe, subprocess-isolated like P5/P16):
+  pure==oracle on all 6 fixture classes. TDD caught 2 real bugs: packed-int32
+  `nested_class_name` (field 7) parsed as tagged subfields (dropped the
+  Companion), and primitive annotation elements read via `.value_arg` (0)
+  instead of `.value` (dropped k/mv/xi). Envelope: k=1 (CLASS), mv=[2,0,0],
+  xi=48; **d1 is NOT base64** (the old study note was wrong for Kotlin 2.x).
+  E2/PROBABLE ceiling (recovered names are the source's intent; re-validate
+  against behavior before acting). 385 checks (+22). Backlog #2 DONE.
+  Honest limits: single-fixture coverage (one kotlinc 2.0.21 / d8 shape —
+  8-to-7 mode unexercised by a real sample; un-marked d1 is a documented
+  fallback); oracle cross-check only runs where a Kotlin toolchain is present
+  (NOT OBSERVED elsewhere, never a fake pass). Design origin:
   `studies/2026-10-02-external-study-lupoxyz-ghidra-mcp.md` (backlog item 2).
+- ~~Kotlin @Metadata name recovery~~ — DONE above (P17, v0.16); the
+  "STILL DEFERRED" state was unblocked when scratch gained JDK17 + kotlinc +
+  d8, and the message-level proto numbers from `metadata.proto` were verified
+  against real compiler output end-to-end.
 
 ## Open items (need Fatah/Anam decision)
 

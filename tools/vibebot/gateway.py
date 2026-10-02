@@ -54,6 +54,7 @@ HELP = """vibebot commands
   /xmatch <src.apk> <dst.apk>  cross-version method match (job) — carry validated findings
   /native <path>         Radare native provider: ELF fns/imports/exports + JNI bridge
   /harness <srcdir>      native-harness validation: build + run C test under qemu (E5)
+  /kmeta <dex|apk> [f]   recover original (pre-R8) Kotlin names from @Metadata (E2)
   /smali <name|0x..|substr>   query the Dalvik opcode table
   /base <value> <from> <to>   convert between number bases (2..36)
   /hash <text>           sha256 of a text string
@@ -122,6 +123,9 @@ class Gateway:
                 from . import xmatch
                 m["xmatch"] = xmatch.XmatchEngine(
                     os.path.join(self.work_dir, "reports"))
+                from . import kotlinmeta
+                m["kotlinmeta"] = kotlinmeta.KotlinMetaEngine(
+                    os.path.join(self.work_dir, "reports"))
         except Exception:
             pass
         return m
@@ -135,6 +139,7 @@ class Gateway:
                 "/claims", "/falsify", "/why", "/plan", "/capabilities",
                 "/analyze", "/dex", "/xmatch",
                 "/native", "/harness",
+                "/kmeta",
                 "/smali", "/base", "/hash", "/dexcheck", "/dexrepair", "/status",
                 "/jobs", "/sessions", "/deepdive", "/investigate", "/report",
                 "/cancel", "/help", "/start"):
@@ -208,6 +213,9 @@ class Gateway:
 
         if cmd == "/harness":
             return self._harness(parts[1:], user)
+
+        if cmd == "/kmeta":
+            return self._kmeta(parts[1:], user)
 
         if cmd == "/status":
             jid = parts[1] if len(parts) > 1 else self._last_job_id()
@@ -378,6 +386,32 @@ class Gateway:
         return (f"ACK {job.id}  engine=harness\n"
                 f"  queued (build + qemu run) — /status {job.id}  "
                 f"/cancel {job.id}"), job
+
+    def _kmeta(self, parts: list[str], user: str) -> tuple[str, core.Job | None]:
+        """Kotlin @Metadata name recovery: /kmeta <dex|apk> [class_filter]."""
+        if not parts:
+            return ("/kmeta <classes.dex|app.apk> [class_filter]   "
+                    "recover original (pre-R8) Kotlin names from "
+                    "@Metadata (E2; JVM oracle cross-check when a toolchain "
+                    "is present)"), None
+        if "kotlinmeta" not in self.engines:
+            return ("error: @Metadata recovery needs androguard "
+                    "(uv pip install androguard)"), None
+        path = os.path.abspath(os.path.expanduser(parts[0]))
+        if not os.path.exists(path):
+            return f"error: artifact not found (refused: {os.path.basename(path)})", None
+        flt = (parts[1] if len(parts) > 1 and not parts[1].startswith("--")
+               else None)
+        params = self._budget_params(parts)
+        if flt:
+            params["class_filter"] = flt
+        try:
+            job = self.jobs.submit("kmeta", path, user, "kotlinmeta", params)
+        except (KeyError, FileNotFoundError, RuntimeError) as e:
+            return f"error: {e}", None
+        return (f"ACK {job.id}  engine=kotlinmeta\n"
+                f"  {os.path.basename(path)}  filter={flt or '(all)'}\n"
+                f"  /report {job.id}   /status {job.id}"), job
 
     def _apk(self, parts: list[str], user: str) -> tuple[str, core.Job | None]:
         if not parts:

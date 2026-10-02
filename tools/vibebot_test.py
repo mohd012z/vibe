@@ -1242,6 +1242,132 @@ def main() -> int:
                   str(sorted(gw.engines)))
 
         # ------------------------------------------------------------------
+        print("== P17: Kotlin @Metadata name recovery (backlog #2) ==")
+        from vibebot import kotlinmeta as KM
+        KT_DEX = os.path.join(ROOT, "tests", "fixtures", "ktmeta",
+                              "classes.dex")
+        check("ground-truth ktmeta fixture present",
+              os.path.exists(KT_DEX), KT_DEX)
+        ktdex = open(KT_DEX, "rb").read()
+        # --- BitEncoding UTF-8 mode: U+0000 marker + char(0..255)->byte 1:1
+        # (the inverse of the compiler's BitEncoding.encodeBytes). No encode
+        # helper is shipped (decode-only), so build the encoded d1 by hand and
+        # confirm bitencoding_decode inverts it.
+        payload = b"\x00\x01\x02\xff"
+        enc = "\x00" + "".join(chr(b) for b in payload)
+        check("utf8 decode: drops U+0000 marker + 1:1 char->byte",
+              KM.bitencoding_decode(enc) == payload,
+              repr(KM.bitencoding_decode(enc)))
+        check("utf8 decode: empty d1 -> empty bytes",
+              KM.bitencoding_decode("") == b"", "")
+        check("utf8 decode: un-marked fallback = char->byte (no drop)",
+              KM.bitencoding_decode("ab") == b"ab",
+              repr(KM.bitencoding_decode("ab")))
+        # --- DEX annotation extraction: envelope + d2 name table
+        krecs = KM.extract_kotlin_metadata(ktdex)
+        check("extract: 6 @Metadata classes in the fixture",
+              len(krecs) == 6, str(len(krecs)))
+        main = next(r for r in krecs
+                    if r["class_desc"].endswith("CheckoutService;"))
+        check("envelope k=1 (CLASS) + mv + xi present",
+              main["k"] == 1 and len(main["mv"]) == 3 and main["xi"] is not None,
+              str({kk: main[kk] for kk in ("k", "mv", "xi")}))
+        check("d2 = original (pre-R8) name table, carries real names",
+              any("CheckoutService" in s for s in main["d2"])
+              and "charge" in main["d2"] and "gateway" in main["d2"],
+              str(main["d2"]))
+        # --- pure-Python decode (the deliverable): d1 + d2 -> names
+        km0 = KM.decode_class_metadata(main["d1"] or "", main["d2"] or [])
+        check("decode: returned a name table (not None)", km0 is not None,
+              str(km0))
+        km0 = km0 or {}
+        check("decode: fq_name recovered (com/fatah/vibetest/CheckoutService)",
+              km0.get("fq_name") == "com/fatah/vibetest/CheckoutService",
+              str(km0.get("fq_name")))
+        check("decode: nested 'Companion' recovered (packed int32 field 7)",
+              km0.get("nested") == ["Companion"], str(km0.get("nested")))
+        check("decode: companion object name (field 4) recovered",
+              km0.get("companion") == "Companion", str(km0.get("companion")))
+        check("decode: function 'charge' + properties gateway/totalCents",
+              "charge" in km0.get("functions", [])
+              and set(km0.get("properties", [])) >= {"gateway", "totalCents"},
+              str({"f": km0.get("functions"), "p": km0.get("properties")}))
+        check("decode: >=1 constructor recorded",
+              km0.get("constructors", 0) >= 1, str(km0.get("constructors")))
+        # a nested/enum class resolves too (Order$Paid: amountCents, sku)
+        paid = next((r for r in krecs
+                     if r["class_desc"].endswith("Order$Paid;")), None)
+        if paid:
+            kp = KM.decode_class_metadata(paid["d1"] or "", paid["d2"] or [])
+            # nested/enum fq_name is dotted inside the outer (Order.Paid)
+            check("decode nested enum Order$Paid (amountCents + sku)",
+                  kp is not None
+                  and (kp.get("fq_name") or "").endswith("Order.Paid")
+                  and set(kp.get("properties", [])) >= {"amountCents", "sku"},
+                  str({k: kp.get(k) for k in ("fq_name", "properties")}
+                      if kp else None))
+        # --- extract with class_filter (flows through the engine params)
+        kfil = KM.extract_kotlin_metadata(ktdex, "PaymentGateway")
+        check("extract class_filter: only PaymentGateway* returned",
+              all("PaymentGateway" in r["class_desc"] for r in kfil)
+              and len(kfil) == 1, str([r["class_desc"] for r in kfil]))
+        # --- engine e2e on the fixture dex (structural + report + E2)
+        eng17 = KM.KotlinMetaEngine(os.path.join(td, "krep"))
+        job17 = core.Job("kotlinmeta", KT_DEX, "kmeta", "cli", {})
+        res17 = eng17.run(job17)
+        k17 = res17.structural["kotlin_meta"]
+        check("engine e2e: available, 6 classes decoded",
+              k17["available"] is True and k17["class_count"] == 6,
+              str({k: k17[k] for k in ("available", "class_count")}))
+        check("engine e2e: E2 finding emitted (PROBABLE ceiling, not EXACT)",
+              any(f["evidence"][0]["level"] == "E2" for f in res17.findings)
+              and "E2" in res17.report_md and "recovered" in res17.report_md,
+              res17.report_md)
+        check("engine e2e: report JSON written",
+              os.path.exists(res17.outputs["report"])
+              and "class_count" in open(res17.outputs["report"]).read(), "")
+        # --- JVM oracle DIFFERENTIAL check: pure decode == the compiler's own
+        # deserializer (only when this host has a Kotlin toolchain — otherwise
+        # NOT OBSERVED, never a skip that pretends to pass)
+        oracle_tc = KM._find_kotlin_toolchain()
+        oracle_v = KM._find_java_verifier()
+        if oracle_tc and oracle_v:
+            diffs = 0
+            for r in krecs:
+                pure = KM.decode_class_metadata(r["d1"] or "", r["d2"] or [])
+                orc = KM.run_jvm_oracle(r["d1"] or "", r["d2"] or [],
+                                        os.path.join(td, "koracle"))
+                if orc is None:
+                    diffs += 1
+                    continue
+                if (orc["fq_name"] != pure["fq_name"]
+                        or orc["functions"] != pure["functions"]
+                        or orc["properties"] != pure["properties"]
+                        or orc["constructors"] != pure["constructors"]):
+                    diffs += 1
+            check("differential: pure decode == Kotlin compiler oracle "
+                  "(all classes)", diffs == 0, f"diffs={diffs}")
+        else:
+            check("differential: NOT OBSERVED here (no Kotlin toolchain) — "
+                  "pure decode stands, unverified against oracle",
+                  True, "toolchain absent; disclosed, not skipped")
+        # --- gateway dispatch: /kmeta registered + usage + missing path
+        if "kotlinmeta" in gw.engines:
+            r, j = gw.handle("/kmeta")
+            check("/kmeta no-arg shows usage", "<classes.dex" in r, r)
+            r, j = gw.handle("/kmeta /nope/p17/classes.dex")
+            check("/kmeta missing path refused", "not found" in r, r)
+            # fresh gateway: the shared gw's job queue is full (max_jobs) by
+            # P17, so the submit path is checked on a clean instance
+            gw17 = gateway.Gateway(td)
+            r, j = gw17.handle(f"/kmeta {KT_DEX}")
+            check("/kmeta ACK + engine=kotlinmeta",
+                  j is not None and "engine=kotlinmeta" in r, r)
+        else:
+            check("kotlinmeta engine registered in gateway", False,
+                  str(sorted(gw.engines)))
+
+        # ------------------------------------------------------------------
         print("== P11: Falsifier — deterministic mechanical refutation (pure) ==")
         from vibebot import falsify as F
         from vibebot import claims as C
