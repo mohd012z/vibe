@@ -947,6 +947,57 @@ def main() -> int:
                   for p in nat.classify_function(adrp)),
               str(nat.classify_function(adrp)))
 
+        # --- P6 GOT/PLT-trampoline exclusion (v0.25; found on a REAL
+        #     production aarch64 lib — every glibc-style PLT stub is this
+        #     shape, and r2 6.x flags it plt=None, so the guard is
+        #     structural, not name-based).
+        plt_stub = ["adrp x16, 0x5000", "ldr x17, [x16, 0xf98]",
+                    "add x16, x16, 0xf98", "br x17"]
+        check("P6 NOT a string-ref: glibc aarch64 PLT trampoline "
+              "(adrp/ldr [x16,#off]/add x16,x16,#off/br)",
+              nat._adrp_add_pairs(plt_stub) == []
+              and "string-ref-pair" not in
+              [p["pattern"] for p in nat.classify_function(plt_stub)],
+              str(nat.classify_function(plt_stub)))
+        plt_stub_r26 = ["adrp x16, 0", "ldr x17, [x16, 0]",
+                        "add x16, x16, 0", "br x17"]
+        check("P6 NOT a string-ref: r2-6 PLT rendering (offsets '0')",
+              nat._adrp_add_pairs(plt_stub_r26) == [],
+              str(nat._adrp_add_pairs(plt_stub_r26)))
+        plt_neg = ["adrp x16, 0x5000", "ldr x17, [x16, -0x20]",
+                   "add x16, x16, -0x20", "br x17"]
+        check("P6 NOT a string-ref: PLT with negative slot offset",
+              nat._adrp_add_pairs(plt_neg) == [],
+              str(nat._adrp_add_pairs(plt_neg)))
+        # the SAME trampoline but with the load in a DIFFERENT register is
+        # still a GOT load (the slot base is what matters)
+        plt_x15 = ["adrp x15, 0x5000", "ldr x17, [x15, 0xf98]",
+                   "add x15, x15, 0xf98", "br x17"]
+        check("P6 NOT a string-ref: trampoline base x15 (any reg)",
+              nat._adrp_add_pairs(plt_x15) == [],
+              str(nat._adrp_add_pairs(plt_x15)))
+        # genuine refs are PRESERVED (entry0 shape: fini_array pointer load
+        # passed to __cxa_finalize — real data ref, no slot-adding add)
+        entry0 = ["bti c", "adrp x0, 0x5000", "add x0, x0, 0xc40",
+                  "b sym.imp.__cxa_finalize"]
+        check("P6 still fires: real data ref (entry0 / fini_array shape)",
+              nat._adrp_add_pairs(entry0) == ["0xc40"]
+              and any(p["pattern"] == "string-ref-pair"
+                      for p in nat.classify_function(entry0)),
+              str(nat._adrp_add_pairs(entry0)))
+        genuine = ["adrp x1, 0", "add x1, x1, str.android_graphics_Path",
+                   "mov w2, 1", "ret"]
+        check("P6 still fires: symbol-rendered data ref (r2-6 str. form)",
+              nat._adrp_add_pairs(genuine) == ["str.android_graphics_Path"],
+              str(nat._adrp_add_pairs(genuine)))
+        # a plain register-offset load (stack frame access) is NOT a GOT
+        # load and must not suppress a following genuine pair
+        stack = ["stp x20, x19, [sp, 0x90]", "ldr x8, [x19]",
+                 "adrp x0, 0x5000", "add x0, x0, 0x278", "ret"]
+        check("P6 not suppressed by unrelated earlier loads",
+              nat._adrp_add_pairs(stack) == ["0x278"],
+              str(nat._adrp_add_pairs(stack)))
+
         # --- cross-match negatives: each pattern must NOT fire on the others
         check("popcount body does not report case-fold/madd",
               [p["pattern"] for p in nat.classify_function(pop)] == ["popcount-loop"],
@@ -2573,7 +2624,7 @@ def main() -> int:
         ver = getattr(vb, "__version__", None)
         check("version: __init__.__version__ is X.Y.Z",
               isinstance(ver, str) and len(ver.split(".")) == 3, str(ver))
-        check("version: matches the current build", ver == "0.24.0", str(ver))
+        check("version: matches the current build", ver == "0.25.0", str(ver))
         r, j = gateway.Gateway(td).handle("/find zzz")
         check("session: /find without --sha is refused (no most-recent fallback)",
               "no --sha" in r and "run /apk" in r and j is None, r)

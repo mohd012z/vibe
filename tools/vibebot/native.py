@@ -370,6 +370,14 @@ def parse_xrefs(out: str, target_va: int) -> list[int]:
 # vocabulary is the public ARMv8-A ISA (stable architecture facts, not
 # reverse-engineered constants), and the patterns are compiler-output shapes
 # observed in the exercism reference corpus.
+# A GOT/PLT trampoline slot load: `ldr Xj, [Xb, #off]` (r2 also prints
+# negative slot offsets as `[x16, -0x20]`, no `#`). Used to recognize the
+# glibc-style aarch64 PLT stub. (Register-offset forms like `[x16, x19]` are
+# NOT matched — only an immediate slot offset is a GOT load.)
+_GOT_LOAD = re.compile(
+    r"\bldr\s+\w+,\s*\[\s*(\w+)\s*,\s*(-?0[xX][0-9a-fA-F]+|-?\d+)\s*\]")
+
+
 def _adrp_add_pairs(mnems: list[str]) -> list[str]:
     """adrp Xd,label followed within 2 instructions by add Xd,Xd,<ref> on the
     SAME register — the position-independent address-load idiom (how every
@@ -381,6 +389,18 @@ def _adrp_add_pairs(mnems: list[str]) -> list[str]:
     requiring `:lo12:` silently matched zero real binaries. Accept both:
     a `:lo12:` label OR a hex/symbol operand. The register must match the
     adrp's write-dest (otherwise any adrp+add in the window false-matches).
+
+    GOT/PLT-trampoline exclusion (v0.25, found on a REAL production lib):
+    the glibc-style aarch64 PLT stub is `adrp Xb,page / ldr Xj,[Xb,#off] /
+    add Xb,Xb,#off / br Xj`. Its `add` recomputes the GOT slot it just
+    loaded — a PLT entry, NOT a data reference — yet it is byte-identical
+    in shape to a genuine `adrp; add` pair, so without this filter EVERY
+    real aarch64 ELF's import trampolines false-match (verified: the
+    F-Droid androidx graphics lib reported string-ref-pair on 10/16 fns,
+    8 of them PLT stubs; r2 itself flags them plt=None, so the filter is
+    structural, not name-based). A real data ref never has a same-register
+    `ldr [Xb,#off]` immediately before the `add`, so skipping those pairs
+    drops no genuine reference.
     """
     pairs: list[str] = []
     for i, m in enumerate(mnems):
@@ -398,8 +418,21 @@ def _adrp_add_pairs(mnems: list[str]) -> list[str]:
             toks2 = m2.split()
             if len(toks2) < 3 or toks2[1] != reg or toks2[2] != reg:
                 continue
-            ref = toks2[-1].strip()
-            if ":lo12:" in ref or ref.startswith("0x") or ref:
+            # Return the ref as r2 PRINTED it (original case) — matching is
+            # case-insensitive but the evidence must not mangle symbol names
+            # (a lowercased `str.android_graphics_path` is not the real symbol).
+            ref = mnems[j].split()[-1].strip()
+            ref_l = ref.lower()
+            # GOT-trampoline guard: the slot was just loaded from [reg,#ref]
+            # on the same register in the immediately preceding instruction.
+            # (reg still carries its trailing comma here — split is on
+            # whitespace — so compare against the normalized base register.)
+            if j > i:
+                gl = _GOT_LOAD.search(mnems[j - 1].lower())
+                if (gl and gl.group(1) == reg.rstrip(",").strip()
+                        and gl.group(2).lstrip("#") == ref_l.lstrip("#")):
+                    break
+            if ":lo12:" in ref_l or ref_l.startswith("0x") or ref:
                 pairs.append(ref)
                 break
     return pairs

@@ -463,6 +463,20 @@ P25 self-improvement eval.
   (457 CI shape). See studies/2026-10-02-p19-real-arm64-patterns.md.
   **P5/P15/P16 positive-e2e gaps: now CLOSED (x86-64 + aarch64).** Merge
   pending Fatah.
+  - **P19 real production native (v0.25, PR #26)** — DONE (post-#12):
+    ran the production classifier on the REAL F-Droid client .so files
+    (arm64/arm32/x86/x86-64). Found a **false positive**: glibc-style
+    aarch64 PLT trampolines (`adrp/ldr [xb,#off]/add xb,xb,#off/br`)
+    byte-match the string-ref idiom — 7/10 hits on the real arm64 lib
+    were import trampolines, not data refs. r2 6.x flags them `plt=None`,
+    so the fix is structural in `_adrp_add_pairs` (reject a pair whose
+    immediately preceding insn is a same-register same-offset slot load).
+    Differential on the real lib: ONLY the 7 PLTs changed; `entry0`
+    (.fini_array pointer — genuine near-miss) and `JNI_OnLoad` (9 refs)
+    fully preserved. ARM32 disasm cross-checked vs capstone (r2 `iI`
+    reports `bits:16` on the 32-bit ARM ELF — recorded r2 quirk). +7 pure
+    unit checks; 500 full-host / 487 CI-shape ALL PASS, redteam 32/32,
+    apkmod ALL PASS. See studies/2026-10-02-p19-real-native-fdroid.md.
 - **P14b (real-hybrid APK e2e)** — DONE (v0.20, same PR #6): P14's detector
   had only ever run on synthetic ZIP name lists + a native-only negative
   fixture. Built a REAL signed APK (aapt2 37.0 + d8 + apksigner, JDK17)
