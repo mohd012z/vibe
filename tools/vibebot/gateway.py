@@ -56,6 +56,7 @@ HELP = """vibebot commands
   /harness <srcdir>      native-harness validation: build + run C test under qemu (E5)
   /kmeta <dex|apk> [f]   recover original (pre-R8) Kotlin names from @Metadata (E2)
   /commands [query]      searchable command registry (L0 always · L1 on demand)
+  /oracle <target> [mode] Frida oracle GATE (dry-run — is a runtime call allowed? E5)
   /smali <name|0x..|substr>   query the Dalvik opcode table
   /base <value> <from> <to>   convert between number bases (2..36)
   /hash <text>           sha256 of a text string
@@ -172,7 +173,7 @@ class Gateway:
                 "/kmeta",
                 "/smali", "/base", "/hash", "/dexcheck", "/dexrepair", "/status",
                 "/jobs", "/sessions", "/deepdive", "/investigate", "/report",
-                "/cancel", "/help", "/start", "/commands"):
+                "/cancel", "/help", "/start", "/commands", "/oracle"):
             return HELP, None
         cmd = parts[0]
 
@@ -183,6 +184,34 @@ class Gateway:
             from . import registry
             query = " ".join(parts[1:]).strip()
             return registry.render(query), None
+
+        if cmd == "/oracle":
+            from . import oracle
+            # /oracle <target> [call-only|differential] [reference]
+            # READ-ONLY: reports the GATING decision. It never calls the target.
+            if len(parts) < 2:
+                return ("/oracle <target> [call-only|differential] [reference]\n"
+                        "  report whether a Frida oracle call is gated (off by\n"
+                        "  default; named-exports only; no raw addresses) — dry\n"
+                        "  run, does NOT call anything"), None
+            tgt = parts[1]
+            mode = (parts[2] if len(parts) > 2 and parts[2] in
+                    (oracle.MODE_CALL_ONLY, oracle.MODE_DIFFERENTIAL)
+                    else oracle.MODE_CALL_ONLY)
+            ref = parts[3] if (mode == oracle.MODE_DIFFERENTIAL and len(parts) > 3) \
+                else None
+            d = oracle.decide(tgt, mode, reference=ref)
+            on = oracle.oracle_enabled()
+            lines = [f"ORACLE GATE  target='{tgt}'  mode={mode}  "
+                     f"target_class={d['target_class']}"]
+            lines.append(f"  oracle flag: {'ON' if on else 'OFF (default)'} "
+                         f"({oracle.ENV_ORACLE_CALL})")
+            lines.append(f"  decision: {'ALLOWED' if d['allowed'] else 'REFUSED'}")
+            lines.append(f"  reason:   {d['reason']}")
+            if not d["allowed"]:
+                lines.append("  (NOT OBSERVED — nothing was called; this is a "
+                             "dry-run decision report)")
+            return "\n".join(lines), None
 
         # ---- synchronous utility commands (fast; no heavy work) ---------
         if cmd == "/map":

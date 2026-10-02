@@ -260,12 +260,17 @@ backend.
    commands (B4)~~ — DONE (v0.17): `registry.py` (single source of truth,
    tiered) + `/commands [query]` searchable surface. /help kept short and
    intact; L1 found by keyword.
-9. **P17 oracle gating spec**: off-by-default, named-exports only,
+9. ~~**P17 oracle gating spec**: off-by-default, named-exports only,
    call-only vs differential (B, oracle) — design note before any Frida
-   work. (STILL OPEN — needs a Frida runtime on the host; not buildable
-   androguard-only. The build "P17" label is reused for the Kotlin
-   @Metadata name recovery, item #2 — that one is DONE; this Frida oracle
-   spec is its own backlog line.)
+   work.~~ — DONE (v0.18): `studies/2026-10-02-frida-oracle-gating-spec.md`
+   + `tools/vibebot/oracle.py` (pure gating core: off-by-default via
+   `VIBE_ORACLE_CALL`, named-exports only / raw-address refused, differential
+   needs a named reference, fail-closed NOT OBSERVED) + read-only `/oracle`
+   dry-run command (reports the decision, never calls). The Frida runtime
+   call itself is intentionally NOT implemented (no Frida on host) — the gate
+   is what this item asked for ("design note before any Frida work").
+   NOTE: this is the study item #9; the build "P17" label was reused earlier
+   for the Kotlin @Metadata recovery (item #2, DONE v0.16).
 10. ~~**Invariant tests**: no "most recent session" fallback (B5); version
     string consistency across `__init__`/pyproject (B, test pitfalls)~~
     — DONE (v0.17): test asserts `/find`/`/xref` without `--sha` are refused

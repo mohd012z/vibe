@@ -43,6 +43,7 @@ COMMANDS = [
     ("harness", "native-harness validation (build + run C under qemu): /harness <srcdir>"),
     ("kmeta", "recover original (pre-R8) Kotlin names from @Metadata: /kmeta <dex|apk> [class_filter]"),
     ("commands", "searchable command registry (L0 always / L1 on demand): /commands [query]"),
+    ("oracle", "Frida oracle GATE (dry-run — is a runtime call allowed?): /oracle <target> [call-only|differential] [reference]"),
     ("analyze", "analysis job: /analyze <path> [--engine apkmod|dexmapper]"),
     ("dex", "DEX Mapper: /dex <path> (class->method->call + JNI + integrity)"),
     ("smali", "query Dalvik opcode table: /smali <name|0x..|substr>"),

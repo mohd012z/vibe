@@ -23,4 +23,4 @@ Design rules:
     VIBE_TELEGRAM_TOKEN env var only — never in source or arguments).
 """
 
-__version__ = "0.17.0"
+__version__ = "0.18.0"

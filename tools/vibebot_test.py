@@ -2204,10 +2204,92 @@ def main() -> int:
         ver = getattr(vb, "__version__", None)
         check("version: __init__.__version__ is X.Y.Z",
               isinstance(ver, str) and len(ver.split(".")) == 3, str(ver))
-        check("version: matches the v0.17 build", ver == "0.17.0", str(ver))
+        check("version: matches the current build", ver == "0.18.0", str(ver))
         r, j = gateway.Gateway(td).handle("/find zzz")
         check("session: /find without --sha is refused (no most-recent fallback)",
               "no --sha" in r and "run /apk" in r and j is None, r)
+
+        # ------------------------------------------------------------------
+        print("== v0.18: Frida oracle GATING (lupoxyz #9) ==")
+        from vibebot import oracle as OC
+        # --- rule 1: OFF by default (never a silent call) ------------------
+        check("oracle OFF by default: named target refused without opt-in",
+              OC.decide("Java_com_foo_Bar_doIt")["allowed"] is False
+              and "OFF by default" in OC.decide("Java_com_foo_Bar_doIt")["reason"],
+              str(OC.decide("Java_com_foo_Bar_doIt")))
+        check("oracle_enabled: no env -> False", OC.oracle_enabled(None) is False, "")
+        # --- rule 2: named exports only; raw address / unknown refused ----
+        check("classify: hex address -> raw_address",
+              OC.classify_target("0x1000ABCD") == "raw_address", "")
+        check("classify: bare integer -> raw_address",
+              OC.classify_target("4128736") == "raw_address", "")
+        check("classify: JNI symbol -> named_export",
+              OC.classify_target("Java_com_foo_Bar_doIt") == "named_export", "")
+        check("classify: dotted symbol -> named_export",
+              OC.classify_target("com.foo.Bar.doIt") == "named_export", "")
+        check("classify: empty -> unknown", OC.classify_target("") == "unknown", "")
+        check("oracle ON + named target -> ALLOWED",
+              OC.decide("Java_com_foo_Bar_doIt", flag_value="1")["allowed"] is True,
+              str(OC.decide("Java_com_foo_Bar_doIt", flag_value="1")))
+        check("oracle ON + raw address -> REFUSED (the corruption case)",
+              OC.decide("0x1000ABCD", flag_value="1")["allowed"] is False
+              and "raw/absolute address" in
+              OC.decide("0x1000ABCD", flag_value="1")["reason"],
+              str(OC.decide("0x1000ABCD", flag_value="1")))
+        check("oracle ON + unknown target -> REFUSED",
+              OC.decide("!!bad!!", flag_value="1")["allowed"] is False, "")
+        # --- rule 3: differential needs a named reference -----------------
+        d_ok = OC.decide("Java_com_foo_Bar_doIt", OC.MODE_DIFFERENTIAL,
+                         reference="Java_com_foo_Bar_doItRef", flag_value="1")
+        check("differential + named reference -> ALLOWED",
+              d_ok["allowed"] is True, str(d_ok))
+        d_no = OC.decide("Java_com_foo_Bar_doIt", OC.MODE_DIFFERENTIAL,
+                         reference="0xdeadbeef", flag_value="1")
+        check("differential + raw reference -> REFUSED",
+              d_no["allowed"] is False and "NAMED reference" in d_no["reason"],
+              str(d_no))
+        d_miss = OC.decide("Java_com_foo_Bar_doIt", OC.MODE_DIFFERENTIAL,
+                           flag_value="1")
+        check("differential + no reference -> REFUSED",
+              d_miss["allowed"] is False, str(d_miss))
+        # --- rule 4: fail closed, honest reasons --------------------------
+        check("refusal reason is a NOT OBSERVED signal (fail closed)",
+              "NOT OBSERVED" in OC.decide("Java_com_foo_Bar_doIt")["reason"], "")
+        # --- env-var opt-in (isolated: explicit set + cleanup) ------------
+        prev = os.environ.get(OC.ENV_ORACLE_CALL)
+        try:
+            os.environ[OC.ENV_ORACLE_CALL] = "1"
+            check("oracle env opt-in: enabled() True + named allowed",
+                  OC.oracle_enabled(None) is True
+                  and OC.decide("Java_com_foo_Bar_doIt")["allowed"] is True, "")
+        finally:
+            if prev is None:
+                os.environ.pop(OC.ENV_ORACLE_CALL, None)
+            else:
+                os.environ[OC.ENV_ORACLE_CALL] = prev
+        check("env cleanup restored: disabled again", OC.oracle_enabled(None) is False, "")
+        # --- differential diff (pure) -------------------------------------
+        eq = OC.diff_outputs([1, 2, 3], [1, 2, 3], [10, 20, 30])
+        check("diff: identical outputs -> equivalent", eq["equivalent"] is True
+              and eq["mismatches"] == [] and eq["n"] == 3, str(eq))
+        ne = OC.diff_outputs([1, 2, 3], [1, 9, 3], [10, 20, 30])
+        check("diff: one mismatch -> not equivalent, indexed",
+              ne["equivalent"] is False and len(ne["mismatches"]) == 1
+              and ne["mismatches"][0][0] == 1, str(ne))
+        check("diff: length mismatch -> not equivalent",
+              OC.diff_outputs([1, 2], [1, 2, 3], [])["equivalent"] is False, "")
+        check("diff: empty -> not equivalent (nothing observed)",
+              OC.diff_outputs([], [], [])["equivalent"] is False, "")
+        # --- /oracle command: DRY-RUN decision report (never calls) --------
+        r, j = gateway.Gateway(td).handle("/oracle")
+        check("/oracle no-arg shows usage", "<target>" in r and j is None, r)
+        r, j = gateway.Gateway(td).handle("/oracle Java_com_foo_Bar_doIt")
+        check("/oracle named target (flag off) -> REFUSED, NOT OBSERVED, no job",
+              "REFUSED" in r and "OFF (default)" in r and "NOT OBSERVED" in r
+              and j is None, r)
+        r, j = gateway.Gateway(td).handle("/oracle 0x1000ABCD")
+        check("/oracle raw address -> refused as raw_address",
+              "raw_address" in r and "REFUSED" in r and j is None, r)
 
     finally:
         shutil.rmtree(td, ignore_errors=True)

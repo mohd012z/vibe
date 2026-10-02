@@ -79,6 +79,8 @@ COMMANDS: list[dict] = [
      "kw": ["qemu", "aarch64", "arm64", "behavior", "runtime test", "prove"]},
     {"name": "kmeta", "tier": 1, "summary": "recover original (pre-R8) Kotlin names from @Metadata (E2)",
      "kw": ["kotlin", "metadata", "rename", "r8", "obfuscated", "original names"]},
+    {"name": "oracle", "tier": 1, "summary": "Frida oracle GATE (dry-run): is a runtime call allowed? (E5, off by default)",
+     "kw": ["runtime", "call", "frida", "evidence", "e5", "gating", "confirm"]},
     {"name": "sessions", "tier": 1, "summary": "stored analysis sessions",
      "kw": ["stored", "cache", "sha", "previous"]},
 ]

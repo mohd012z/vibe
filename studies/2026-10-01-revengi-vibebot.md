@@ -499,10 +499,20 @@ P25 self-improvement eval.
     and version-string consistency — `__init__.__version__` bumped to `0.17.0`
     (it had been stuck at `0.1.0` through v0.16 — this is the invariant that
     was actually lagging).
-  407 checks (+22). apkmod + redteam 32/32. **#9 (Frida oracle gating spec)
-  stays OPEN** — needs a Frida runtime on the host, not androguard-only.
-  Lupoxyz study backlog: all androguard-only items now DONE; only #9 (Frida)
-  remains.
+  407 checks (+22). apkmod + redteam 32/32.
+- **v0.18 Frida oracle gating (lupoxyz #9)** — DONE (v0.18): the LAST open
+  study-backlog item, now closed. `studies/2026-10-02-frida-oracle-gating-spec.md`
+  (the "design note before any Frida work") + `tools/vibebot/oracle.py` (pure
+  gating core) + read-only `/oracle` dry-run command. The gate encodes the
+  study's safety rationale — a wrong call that crashes is cheap, a wrong call
+  that RUNS is not — as four rules: (1) OFF by default (`VIBE_ORACLE_CALL`),
+  (2) named-exports only (raw/absolute address refused), (3) differential
+  needs a named reference on both sides, (4) fail closed → NOT OBSERVED. The
+  Frida *runtime call* is intentionally NOT implemented (no Frida on this
+  host) — the gate is the deliverable; the future runtime worker calls
+  `oracle.decide()` first and only spawns a budgeted hook if allowed. 430
+  checks (+23). apkmod + redteam 32/32. **The lupoxyz study backlog is now
+  fully DONE (items 1–10).**
 
 ## Open items (need Fatah/Anam decision)
 
