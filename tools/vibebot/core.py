@@ -117,6 +117,7 @@ class Job:
         self.finished: float | None = None
         self._cancel = False
         self.budget: Any = None  # router.Budget, attached by JobManager._run
+        self._tg_chat: int | None = None  # transport: reply completions here
 
     # -- reporting ----------------------------------------------------------
     def progress(self, step: str, pct: int, note: str = "") -> None:
@@ -177,9 +178,14 @@ class JobManager:
         for name, eng in self.engines.items():
             if eng.can_run(artifact):
                 return name
-        # default: apkmod is the general APK handler
-        if "apkmod" in self.engines and artifact.lower().endswith((".apk", ".dex")):
-            return "apkmod"
+        # default: apkmod is the general APK handler. Recognize a backup
+        # suffix (.apk.bak / .dex.bak) so a renamed APK still routes to the
+        # right engine instead of a bare "no engine handles" (real, 2026-10-02).
+        if "apkmod" in self.engines:
+            a = artifact.lower()
+            base_ext = os.path.splitext(os.path.splitext(a)[0])[1]
+            if a.endswith((".apk", ".dex")) or base_ext in (".apk", ".dex"):
+                return "apkmod"
         raise KeyError(f"no engine handles {artifact!r}")
 
     def submit(self, command: str, artifact: str, user: str = "cli",
