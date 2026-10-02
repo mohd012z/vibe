@@ -67,7 +67,8 @@ jobs:
             tests/test_cloud_result_contract.py \
             tests/test_artifact_contract.py \
             tests/test_delivery_contract.py \
-            tests/test_capability_router.py
+            tests/test_capability_router.py \
+            tests/test_analyzer_registry.py
       - name: APK pipeline + Vibe AI + Telegram + deploy suite
         run: |
           set -e
