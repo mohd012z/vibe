@@ -67,6 +67,18 @@ width. The fixed-width little-endian read is the faithful fallback. Verified
 `int.from_bytes(raw,'little') == el.value`'s index for 1-, 2-, and 3-byte
 widths on the real DEX.
 
+### Authoritative corroboration (AOSP runtime, fetched 2026-10-02)
+
+The DEX format's reference runtime (AOSP `art/libdexfile/dex/dex_file.cc`)
+decodes `kEncodedValueString` with `DexFile::ReadUnsignedInt(ptr, value_arg)`
+where `value_arg = value_type >> kEncodedValueArgShift` and
+`width = value_arg + 1`. `ReadUnsignedInt` (dex_file.cc:623) is a
+fixed-width LITTLE-ENDIAN read (`val = (val >> 8) | (*ptr++ << 24)` per
+byte, right-justified) — **not** a varint. The fix matches the AOSP
+runtime byte-for-byte in semantics; the old varint read contradicted it.
+(Three independent oracles now agree: AOSP runtime source, androguard's
+resolved value, and the whole-APK 0-exception run.)
+
 ## Finding 2 — a real production R8'd app KEEPS @Metadata
 
 P17b concluded "default R8 config strips `@Metadata` entirely," validated on
