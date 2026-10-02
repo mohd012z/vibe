@@ -1002,23 +1002,27 @@ def main() -> int:
                 return "radare2 6.2.4 fake"
             def run(self, path, cmd):
                 # P18: r2-6 command set — substring match (aa; prefix).
+                # P19: disasm command is 'aa; pdfj @0xVA' (function-bounded).
                 if "aflj" in cmd:
                     return "0x00400050  24  popcnt\n0x00400120  12  parityfn\n"
                 if "iEj" in cmd:
                     return "0x00400050  24  popcnt\n"
                 if "iij" in cmd:
                     return "memcpy:libc.so.6\n"
-                if "pdj" in cmd:
+                if "pdfj" in cmd:
                     # popcnt function = clz+ror+eor ; parityfn = tbz x0, 0
                     if "400050" in cmd:
                         return _jsonp15.dumps(
-                            [{"name": "clz", "opcode": "w2, w0"},
-                             {"name": "ror.w", "opcode": "w2, w2, w3"},
-                             {"name": "eor", "opcode": "w0, w0, w2"},
-                             {"name": "sub", "opcode": "w0, w0, w2"}])
+                            {"name": "popcnt", "addr": 0x400050, "ops": [
+                                {"disasm": "clz w2, w0"},
+                                {"disasm": "ror w2, w2, w3"},
+                                {"disasm": "eor w0, w0, w2"},
+                                {"disasm": "sub w0, w0, w2"}]})
                     if "400120" in cmd:
-                        return _jsonp15.dumps([{"name": "tbz", "opcode": "x0, 0"},
-                                               {"name": "ret", "opcode": ""}])
+                        return _jsonp15.dumps(
+                            {"name": "parityfn", "addr": 0x400120, "ops": [
+                                {"disasm": "tbz x0, 0, 0x400124"},
+                                {"disasm": "ret"}]})
                     return "[]"
                 return ""
         tmp15 = os.path.join(td, "libp15.so")
@@ -1054,7 +1058,7 @@ def main() -> int:
                     return "0x00400050  24  foo\n"
                 if "iij" in cmd:
                     return ""
-                if "pdj" in cmd:
+                if "pdfj" in cmd:
                     raise nat.ProviderError("disasm failed")
                 return ""
         n15e = nat.analyze_native(tmp15, _FR15err(), segments=segs15)
@@ -2212,7 +2216,7 @@ def main() -> int:
         ver = getattr(vb, "__version__", None)
         check("version: __init__.__version__ is X.Y.Z",
               isinstance(ver, str) and len(ver.split(".")) == 3, str(ver))
-        check("version: matches the current build", ver == "0.19.0", str(ver))
+        check("version: matches the current build", ver == "0.20.0", str(ver))
         r, j = gateway.Gateway(td).handle("/find zzz")
         check("session: /find without --sha is refused (no most-recent fallback)",
               "no --sha" in r and "run /apk" in r and j is None, r)
@@ -2326,18 +2330,22 @@ def main() -> int:
             {"ordinal": 4, "bind": "GLOBAL", "type": "FUNC", "name": "malloc",
              "plt": 4176},
         ])
-        # r2 6 pdj items: 'disasm' (NOT 'name') + identical 'opcode'.
-        _FIX_PDJ = _json19.dumps([
-            {"addr": 4393, "disasm": "push rbp", "opcode": "push rbp",
-             "bytes": "55", "size": 1, "fcn_addr": 4393},
-            {"addr": 4394, "disasm": "mov rbp, rsp", "opcode": "mov rbp, rsp",
-             "bytes": "4889e5", "size": 3, "fcn_addr": 4393},
-            {"addr": 4403, "disasm": "mov edx, dword [rbp - 4]",
-             "opcode": "mov edx, dword [rbp - 4]", "bytes": "8b55fc",
-             "size": 3, "fcn_addr": 4393},
-            {"addr": 4410, "disasm": "add eax, edx", "opcode": "add eax, edx",
-             "bytes": "01d0", "size": 2, "fcn_addr": 4393},
-        ])
+        # r2 6 pdfj (the command the runner sends) = OBJECT {name,addr,ops:[...]},
+        # each op item carrying 'disasm' (NOT 'name'). Captured shape.
+        _FIX_PDJ = _json19.dumps({
+            "name": "sym.add", "addr": 4393, "size": 20, "ops": [
+                {"addr": 4393, "disasm": "push rbp", "opcode": "push rbp",
+                 "bytes": "55", "size": 1, "fcn_addr": 4393},
+                {"addr": 4394, "disasm": "mov rbp, rsp",
+                 "opcode": "mov rbp, rsp", "bytes": "4889e5", "size": 3,
+                 "fcn_addr": 4393},
+                {"addr": 4403, "disasm": "mov edx, dword [rbp - 4]",
+                 "opcode": "mov edx, dword [rbp - 4]", "bytes": "8b55fc",
+                 "size": 3, "fcn_addr": 4393},
+                {"addr": 4410, "disasm": "add eax, edx",
+                 "opcode": "add eax, edx", "bytes": "01d0", "size": 2,
+                 "fcn_addr": 4393},
+            ]})
         # r2 6 axtj: xrefs INTO a PLT stub (in a PIC .so, sum3 calls add via
         # sym.plt.add, not the real add — probed).
         _FIX_AXTJ = _json19.dumps([
@@ -2415,7 +2423,7 @@ def main() -> int:
         with open(SO19, "wb") as _f19:
             _f19.write(elf)  # P5's synthetic ELF64 (valid magic for analyze)
         _cap = _Cap19({"aflj": _FIX_AFLJ, "iEj": _FIX_IEJ, "iij": _FIX_IJ,
-                       "pdj": _FIX_PDJ, "axtj": _FIX_AXTJ})
+                       "pdfj": _FIX_PDJ, "axtj": _FIX_AXTJ})
         _n = nat.analyze_native(SO19, _cap, segments=[
             {"type": 1, "offset": 0x1000, "vaddr": 0x1000, "filesz": 0x2000}])
         check("P18: analyze_native sends aa warmup + r2-6 JSON forms",
@@ -2424,10 +2432,11 @@ def main() -> int:
         check("P18: analyze_native counts from real r2-6 shapes",
               _n["counts"]["function"] == 4 and _n["counts"]["export"] == 3
               and _n["counts"]["import"] == 2, str(_n["counts"]))
-        check("P18: pdj seek = 'aa; pdj N @0xVA' (hex + warmup; bare @VA "
-              "would be DECIMAL — probed)",
-              any(c.startswith("aa; pdj") and "@0x" in c for c in _cap.cmds),
-              str([c for c in _cap.cmds if "pdj" in c]))
+        check("P18: disasm seek = 'aa; pdfj @0xVA' (function-bounded; the "
+              "old 'pdj N @VA' counted BYTES as INSTRUCTIONS and bled into "
+              "adjacent fns — probed on a real aarch64 .so, P19)",
+              any(c.startswith("aa; pdfj @0x") for c in _cap.cmds),
+              str([c for c in _cap.cmds if "pdfj" in c or "pdj" in c]))
         _f_add = [f for f in _n["functions"] if f["name"] == "sym.add"][0]
         check("P18: function mnemonics recovered via r2-6 disasm",
               _f_add["mnemonics"][:2] == ["push rbp", "mov rbp, rsp"],
@@ -2574,6 +2583,105 @@ def main() -> int:
                   "close the positive-e2e gap); pure r2-6-shape checks above "
                   "still apply.")
 
+    # ===================== P19: real-ARM64 pattern e2e (v0.20) ============
+    # Closes the P15 ARM64 positive-e2e gap (FakeRunner-only). The real-r2
+    # disasm of a real aarch64 .so exposed THREE classifier drifts the
+    # canned fixtures never hit (verified on real r2 6.2.2, 2026-10-02):
+    #  (a) pdj {size} @va counted BYTES as INSTRUCTIONS -> disasm bled
+    #      THROUGH adjacent functions and mis-attributed their idioms
+    #      (a real casefold fn reported fused-madd/tbz/bitset of its
+    #      neighbors) -> switched to function-bounded 'aa; pdfj @0xVA'
+    #  (b) P2 case-fold: r2 6 prints 'orr w0, w0, 0x20' (hex imm, no #) —
+    #      the classifier required literal '#32' -> real case-fold missed
+    #  (c) P6 string-ref: r2 6 prints 'adrp x0, 0' + 'add x0, x0, 0x278'
+    #      (resolved sym/addr, NO ':lo12:' label) -> the pair was never
+    #      matched on a real binary
+    # --- pure: the drift fixes (no toolchain needed) ---
+        cf20 = ["orr w1, w1, 0x20", "ret"]
+        check("P19: P2 case-fold matches r2-6 '0x20' rendering",
+              any(p["pattern"] == "case-fold-scan"
+                  for p in nat.classify_function(cf20)),
+              str(nat.classify_function(cf20)))
+        cf_legacy = ["ldrb w1, [x0]", "orr w1, w1, #32", "ret"]
+        check("P19: P2 case-fold still matches legacy '#32' rendering",
+              any(p["pattern"] == "case-fold-scan"
+                  for p in nat.classify_function(cf_legacy)), "")
+        check("P19: P2 does NOT fire on orr into a DIFFERENT register",
+              nat.classify_function(["orr w1, w2, #32", "ret"]) == [], "")
+        adrp6 = ["adrp x0, 0", "add x0, x0, 0x278", "ldr x0, [x0]", "ret"]
+        check("P19: P6 string-ref matches r2-6 'adrp+add' (no :lo12:)",
+              any(p["pattern"] == "string-ref-pair"
+                  for p in nat.classify_function(adrp6)),
+              str(nat.classify_function(adrp6)))
+        adrp_lo12 = ["adrp x8, str_lbl", "add x8, x8, :lo12:str_lbl", "ret"]
+        check("P19: P6 still matches the legacy ':lo12:' rendering",
+              any(p["pattern"] == "string-ref-pair"
+                  for p in nat.classify_function(adrp_lo12)), "")
+        adrp_neg = ["adrp x0, 0", "add x1, x1, 0x278", "ret"]
+        check("P19: P6 requires the SAME register (no adrp/add cross-match)",
+              nat.classify_function(adrp_neg) == [],
+              str(nat.classify_function(adrp_neg)))
+
+    # --- e2e: REAL aarch64 .so (committed fixture) + REAL r2 ---
+        _XAS = "/opt/data/cache/scratch/toolchain/cross/binut/usr/bin/aarch64-linux-gnu-as"
+        _XLD = "/opt/data/cache/scratch/toolchain/cross/binut/usr/bin/aarch64-linux-gnu-ld"
+        _XCROSSLIB = "/opt/data/cache/scratch/toolchain/cross/binut/usr/lib/x86_64-linux-gnu"
+        _FIXPAT = os.path.join(ROOT, "tests", "fixtures", "arm64", "pat.s")
+        _arm64_ok = R219 is not None and os.path.exists(_XAS) \
+            and os.path.exists(_XLD) and os.path.exists(_FIXPAT)
+        if not _arm64_ok:
+            print("  INFO P19-e2e: NOT OBSERVED — need usable r2 + aarch64 "
+                  "binutils + tests/fixtures/arm64/pat.s (cross as/ld "
+                  "recipe in the P19 study note); pure drift checks above "
+                  "still apply.")
+        elif _sub19.run([_XAS, "--version"], env={**os.environ,
+                        "LD_LIBRARY_PATH": _XCROSSLIB},
+                        capture_output=True).returncode != 0:
+            print("  INFO P19-e2e: NOT OBSERVED — cross as unusable "
+                  "(LD_LIBRARY_PATH recipe).")
+        else:
+            print("== P19 e2e: REAL aarch64 .so + REAL r2 6.x patterns ==")
+            _env19 = {**os.environ, "LD_LIBRARY_PATH": _XCROSSLIB}
+            _d19b = os.path.join(td, "arm64so")
+            os.makedirs(_d19b, exist_ok=True)
+            _so64 = os.path.join(_d19b, "libpat.so")
+            _o64 = os.path.join(_d19b, "pat.o")
+            _ok_as = _sub19.call([_XAS, "-o", _o64, _FIXPAT], env=_env19,
+                                 stdout=_sub19.DEVNULL,
+                                 stderr=_sub19.DEVNULL)
+            _ok_ld = _sub19.call([_XLD, "-shared", "-o", _so64, _o64],
+                                 env=_env19, stdout=_sub19.DEVNULL,
+                                 stderr=_sub19.DEVNULL)
+            if _ok_as != 0 or _ok_ld != 0:
+                check("P19-e2e: cross as/ld built the aarch64 .so", False,
+                      f"as={_ok_as} ld={_ok_ld}")
+            else:
+                _r64 = nat.RadareRunner(bin=(R219 or "r2"), timeout=120)
+                _n64 = nat.analyze_native(_so64, _r64)
+                _allpats = [p for f in _n64["functions"]
+                            for p in f["patterns"]]
+                check("P19-e2e: all 6 ARM64 idioms recognized on REAL r2",
+                      {"popcount-loop", "case-fold-scan", "bitset-test",
+                       "tbz-bit0-parity", "fused-madd", "string-ref-pair"}
+                      <= set(_allpats), str(sorted(set(_allpats))))
+                _by = {f["name"]: set(f["patterns"])
+                       for f in _n64["functions"]}
+                _cf = [nm for nm, ps in _by.items()
+                       if "case-fold-scan" in ps]
+                check("P19-e2e: case-fold fires on EXACTLY ONE function "
+                      "(the bleed fix — the old pdj-bytes-as-instr form "
+                      "mis-attributed neighbors' idioms)",
+                      len(_cf) == 1 and _cf[0] == "sym.casefold"
+                      and _by["sym.casefold"] == {"case-fold-scan"},
+                      str(_by))
+                _sr = [nm for nm, ps in _by.items()
+                       if "string-ref-pair" in ps]
+                check("P19-e2e: string-ref fires on exactly sym.stringref",
+                      _sr == ["sym.stringref"], str(_sr))
+                _pop = [nm for nm, ps in _by.items() if "popcount-loop" in ps]
+                check("P19-e2e: popcount (r2 names the first fn entry0) "
+                      "fires exactly once",
+                      len(_pop) == 1 and _pop[0] == "entry0", str(_pop))
 
     finally:
         shutil.rmtree(td, ignore_errors=True)

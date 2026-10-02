@@ -445,15 +445,24 @@ P25 self-improvement eval.
   Honest limit: no qemu/cross-compiler on this host — real run NOT OBSERVED
   (the e2e asserts the degrade); SUCCESS/FAILURE via FakeRunner. Backlog #12
   DONE. Closes the loop P15→patch→P16.
-- **P18 (v0.19) — real-radare2 6.x verification** — DONE (feature branch):
+- **P18 (v0.19) — real-radare2 6.x verification** — DONE (PR #6):
   first real r2 on the host (6.2.2 user-space). RadareRunner was never
   exercised beyond FakeRunner and was broken on r2 6.x (argv order, ANSI,
   iI→iij, pdj name→disasm, aXR→axtj, @hex vs decimal, PLT xref routing).
   All fixed dual-mode (r2-6 JSON + legacy text) and verified e2e on a real
-  gcc .so: functions/exports(deduped)/imports/xrefs/`aa; pdj` all correct.
-  x86_64 only — ARM64 pattern e2e still NOT OBSERVED (no cross-gcc). 457
-  checks (451 CI shape); apkmod + redteam green. See
-  studies/2026-10-02-p18-real-radare2-6.md. Merge pending Fatah.
+  gcc .so. See studies/2026-10-02-p18-real-radare2-6.md.
+- **P19 (v0.20) — real-ARM64 pattern e2e** — DONE (same PR #6): installed
+  aarch64 binutils (user-space), committed `tests/fixtures/arm64/pat.s`
+  (one fn per P15 idiom), built a real aarch64 .so, ran it through real r2.
+  Exposed + fixed 3 classifier bugs: (a) `pdj {size}` counted BYTES as
+  INSTRUCTIONS → disasm bled across functions and mis-attributed idioms
+  (→ function-bounded `aa; pdfj @0xVA`); (b) P2 case-fold: r2 6 prints
+  `orr …, 0x20` not `#32`; (c) P6 string-ref: r2 6 prints `adrp+add`
+  without `:lo12:` (→ accept both, same-register). All 6 idioms now
+  recognized on real ARM64, each on exactly its own function. 467 checks
+  (457 CI shape). See studies/2026-10-02-p19-real-arm64-patterns.md.
+  **P5/P15/P16 positive-e2e gaps: now CLOSED (x86-64 + aarch64).** Merge
+  pending Fatah.
 - **P17 (Kotlin @Metadata name recovery)** — DONE (v0.16, backlog #2):
   `tools/vibebot/kotlinmeta.py` + `/kmeta <classes.dex|app.apk> [class_filter]`.
   R8 renames every DEX name, but a Kotlin class's `@kotlin.Metadata` annotation

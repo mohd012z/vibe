@@ -371,21 +371,36 @@ def parse_xrefs(out: str, target_va: int) -> list[int]:
 # reverse-engineered constants), and the patterns are compiler-output shapes
 # observed in the exercism reference corpus.
 def _adrp_add_pairs(mnems: list[str]) -> list[str]:
-    """adrp Xd,label followed within 2 instructions by add Xd,Xd,:lo12:label —
-    the position-independent address-load idiom (how every string/data
-    reference is materialized). Returns the referenced symbol names."""
+    """adrp Xd,label followed within 2 instructions by add Xd,Xd,<ref> on the
+    SAME register — the position-independent address-load idiom (how every
+    string/data reference is materialized). Returns the referenced targets.
+
+    P19 (verified on real r2 6.2.2 over a real aarch64 .so): r2 6 renders
+    the pair as `adrp x0, 0` + `add x0, x0, 0x278` (or a resolved symbol
+    `str.foo`) — the pre-6 `:lo12:` label form is NOT what 6.x prints, so
+    requiring `:lo12:` silently matched zero real binaries. Accept both:
+    a `:lo12:` label OR a hex/symbol operand. The register must match the
+    adrp's write-dest (otherwise any adrp+add in the window false-matches).
+    """
     pairs: list[str] = []
     for i, m in enumerate(mnems):
         a = m.lower()
         if not a.startswith("adrp "):
             continue
-        lab = a.rsplit(" ", 1)[-1].strip()
-        if not lab or lab.startswith("#"):
+        toks = a.split()
+        if len(toks) < 2:
             continue
+        reg = toks[1].strip()
         for j in range(i + 1, min(i + 3, len(mnems))):
             m2 = mnems[j].lower()
-            if m2.startswith("add ") and lab in m2 and ":lo12:" in m2:
-                pairs.append(lab)
+            if not m2.startswith("add "):
+                continue
+            toks2 = m2.split()
+            if len(toks2) < 3 or toks2[1] != reg or toks2[2] != reg:
+                continue
+            ref = toks2[-1].strip()
+            if ":lo12:" in ref or ref.startswith("0x") or ref:
+                pairs.append(ref)
                 break
     return pairs
 
@@ -414,12 +429,17 @@ def classify_function(mnems: list[str]) -> list[dict]:
                  "clz+ror+eor clear-highest-bit loop — popcount without a "
                  "per-bit loop")
             break
-    # ASCII case-fold: orr Xd,Xd,#32 (force lower bit -> lowercase)
+    # ASCII case-fold: orr Xd,Xd,#32 (force lower bit -> lowercase). r2 5
+    # prints the immediate as `#32`; r2 6 prints it as `0x20` (hex, no #) —
+    # same instruction, so accept both (P19, verified on real 6.2.2).
+    # Require Xd==Xn (self-fold): `orr w1, w2, #32` merely ORs bit 5 of a
+    # DIFFERENT register and is not the case-fold idiom.
     for i, a in enumerate(low):
-        if a.startswith("orr ") and ", #32" in a:
+        mcf = re.match(r"^orr\s+(\w+)\s*,\s*\1\s*,\s*(?:#32|0x20)\s*$", a)
+        if mcf:
             _add("P2", "case-fold-scan", [mnems[i]],
-                 "orr #32 — forces the ASCII lowercase bit (case-insensitive "
-                 "match idiom)")
+                 "orr Xd,Xd,#32/0x20 — forces the ASCII lowercase bit "
+                 "(case-insensitive match idiom)")
             break
     # bitset membership: `tst Xd, Xn, lsl #imm` — test a SINGLE bit of a
     # register (flag/permission check). The shifted form is the idiom; a bare
@@ -480,38 +500,41 @@ def classify_functions(fns_with_mnems: list[tuple[dict, list[str]]]) -> list[dic
 
 
 def parse_disasm(out: str) -> list[str]:
-    """r2 `pdj` (JSON) or `pd` (text) -> [mnemonic]. Tolerant: a JSON array
-    of items, or one 'addr  name  rest' line each. Pure.
+    """r2 `pdfj` (object {name,addr,ops:[{disasm,opcode,...}]}) / `pdj`
+    (JSON array) / `pd` (text) -> [mnemonic]. Tolerant: JSON objects/arrays,
+    or one 'addr  name  rest' line each. Pure.
 
-    Item shapes handled (both probed): r2 6.x `pdj` items carry `disasm`
-    (the full mnemonic incl. operands, e.g. "mov rbp, rsp") with `opcode`
-    identical; older r2 items carry `name` (mnemonic only) + separate
-    `opcode`/`op` operands. P18: the r2-6 shape was never seen before, so
-    real-r2 disasm silently returned [] (name-missing -> skipped)."""
+    Item shapes handled (all probed on real 6.2.2): r2 6.x `pdj`/`pdfj`
+    op items carry `disasm` (the full mnemonic incl. operands, e.g.
+    "mov rbp, rsp"); older r2 items carry `name` (mnemonic only) +
+    separate `opcode`/`op` operands. P18: the r2-6 shape was never seen
+    before, so real-r2 disasm silently returned [] (name-missing ->
+    skipped). P19: `pdfj` wraps the ops in an object ({name,addr,size,ops})
+    — accept that top-level shape too."""
     s = _strip_ansi(out or "").strip()
     if not s:
         return []
     mn: list[str] = []
-    if s[0] == "[":
-        data = _loads_maybe(s)
-        if isinstance(data, list):
-            for it in data:
-                if not isinstance(it, dict):
-                    continue
-                if it.get("disasm"):
-                    mn.append(str(it["disasm"]))
-                    continue
-                if it.get("name"):
-                    name = str(it["name"]).split(".")[0]
-                    # r2 keeps operands in a separate field ("opcode" in
-                    # older r2, "op" in some builds) — append them so the
-                    # full mnemonic is available for pattern matching.
-                    op = it.get("opcode") or it.get("op")
-                    if isinstance(op, str) and op.strip():
-                        mn.append(f"{name} {op.strip()}")
-                    else:
-                        mn.append(name)
-            return mn
+    data = _loads_maybe(s) if s[0] in "[{" else None
+    if isinstance(data, dict) and isinstance(data.get("ops"), list):
+        data = data["ops"]  # pdfj shape: {name, addr, ops:[...]}
+    if isinstance(data, list):
+        for it in data:
+            if not isinstance(it, dict):
+                continue
+            if it.get("disasm"):
+                mn.append(str(it["disasm"]))
+                continue
+            if it.get("name"):
+                name = str(it["name"]).split(".")[0]
+                # r2 keeps operands in a separate field ("opcode" in older
+                # r2, "op" in some builds) — append them so the full
+                # mnemonic is available for pattern matching.
+                op = it.get("opcode") or it.get("op")
+                if isinstance(op, str) and op.strip():
+                    mn.append(f"{name} {op.strip()}")
+                else:
+                    mn.append(name)
         return mn
     for ln in s.splitlines():
         ln = ln.strip()
@@ -539,16 +562,21 @@ def _classify_native_functions(native: dict, runner: "RadareLike | None" = None)
     function with an empty pattern list (honest: NOT OBSERVED, not a failure).
     Mutates native in place.
 
-    P18 (r2 6.x, verified against real 6.2.2): the command is `aa; pdj N
-    @0xVA` — `aa` warms up function recovery (without it, pdj disassembles
-    raw bytes and fcn_addr=0), and the seek MUST be 0x-prefixed hex (a bare
-    `@1129` is parsed as DECIMAL 1129 = 0x461 — probed)."""
+    P18 (r2 6.x, verified against real 6.2.2): the command needs an `aa`
+    warmup (without it, pdj disassembles raw bytes and fcn_addr=0) and a
+    0x-prefixed hex seek (a bare `@1129` is parsed as DECIMAL 1129 = 0x461).
+    P19 (verified on a real aarch64 .so): the disasm is FUNCTION-BOUNDED via
+    `pdfj @0xVA`, NOT `pdj {size} @0xVA` — r2 `pdj`'s count is INSTRUCTIONS,
+    but `size` is BYTES, so the count form disassembles THROUGH the adjacent
+    functions and mis-attributes their idioms (a real .casefold function
+    reported fused-madd/tbz/bitset that belonged to its neighbors). `pdfj`
+    bounds to the enclosing function; r2 also names entry0 for the first
+    function, so the va-form seek (not the symbol name) is the stable target.
+    """
     runner = runner or RadareRunner()
     for f in native.get("functions", []):
         try:
-            dsize = f.get("size") or 0
-            out = runner.run(native["path"],
-                             f"aa; pdj {dsize} @0x{f['va']:x}")
+            out = runner.run(native["path"], f"aa; pdfj @0x{f['va']:x}")
             mnems = parse_disasm(out)
         except Exception:
             mnems = []
