@@ -463,6 +463,23 @@ P25 self-improvement eval.
   (457 CI shape). See studies/2026-10-02-p19-real-arm64-patterns.md.
   **P5/P15/P16 positive-e2e gaps: now CLOSED (x86-64 + aarch64).** Merge
   pending Fatah.
+  - **P16 real pipeline e2e (v0.26, PR #27)** — DONE (post-#26): ran the
+    FULL gateway pipeline on the real F-Droid APK (first whole-APK
+    orchestration e2e on non-synthetic data). Ingest 215.5s: 24,520
+    classes / 129,118 methods / 475,990 call edges — a scale tier no
+    fixture has reached. Hybrid detection correct (webview_used=true,
+    jsinterface=[]). `/investigate` MainActivity.onCreate: 15/18 stages
+    in 64.8s with real callees/fields. **Found + fixed a bug:** `/deepdive`
+    returned 0 on graph-engine sessions for methods that ARE stored —
+    `core.deepdive()` only read the dexmapper shape
+    (structural.calls/.jni/.nativeLibs), not structural.graph{nodes,
+    calls}. Now traverses both; 0 on a graph is a real negative ("traversed
+    N methods, M edges"), not "run /analyze first". Real session:
+    onCreate 0→28, class 168, callers 475,990, native 8. +6 unit checks;
+    506 full-host / 493 CI-shape ALL PASS, redteam 32/32, apkmod ALL PASS.
+    Scale fact disclosed: stored session = 274 MB (graph+claims persisted)
+    — future compaction work, not fixed. See
+    studies/2026-10-02-p16-real-pipeline-fdroid.md.
   - **P19 real production native (v0.25, PR #26)** — DONE (post-#12):
     ran the production classifier on the REAL F-Droid client .so files
     (arm64/arm32/x86/x86-64). Found a **false positive**: glibc-style

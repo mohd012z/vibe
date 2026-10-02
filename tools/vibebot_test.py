@@ -132,6 +132,81 @@ def main() -> int:
         r = core.record_deepdive(store, sha, "callers")
         check("record_deepdive appends history",
               store.load(sha)["deepdive"][-1]["target"] == "callers")
+        # --- deepdive on the GRAPH-ENGINE session shape (v0.26) -----------
+        # The graph engine stores structural.graph{nodes{method,class,
+        # native},calls[],library_files[]} — NOT the dexmapper flat
+        # structural.calls/.jni/.nativeLibs. Real F-Droid session: /deepdive
+        # returned 0 for a method present as an M-node. Build the minimal
+        # graph shape and prove both shapes are traversed (and a graph 0 is a
+        # real negative, not a "run /analyze first" hint).
+        gsess = {
+            "sha256": "ab" * 16,
+            "structural": {
+                "graph": {
+                    "nodes": {
+                        "method": [
+                            {"dex": "classes2.dex", "class": "com.example.Main",
+                             "name": "onCreate", "native": False, "id": "M1"},
+                            {"dex": "classes2.dex", "class": "com.example.Main",
+                             "name": "onPause", "native": False, "id": "M2"},
+                        ],
+                        "class": [
+                            {"dex": "classes2.dex", "name": "com.example.Main",
+                             "id": "C1"},
+                        ],
+                        "native": [
+                            {"class": "com.example.Jni", "method": "nativeAdd",
+                             "id": "N1"},
+                        ],
+                    },
+                    "calls": [
+                        {"dex": "classes2.dex", "caller": "com.example.Main",
+                         "callerMethod": "onCreate",
+                         "invokeKind": "invoke-virtual",
+                         "targetClass": "com.example.Main",
+                         "targetMethod": "onPause"},
+                    ],
+                    "library_files": ["androidx.graphics.path"],
+                },
+            },
+            "findings": [],
+        }
+        d = core.deepdive(gsess, "com.example.Main.onCreate")
+        check("deepdive(graph shape): Class.method resolves to the M-node",
+              d["matchCount"] >= 1 and
+              any(m.get("via") == "method" and m.get("method") == "onCreate"
+                  and "M1" in m.get("detail", "") for m in d["matches"]),
+              json.dumps(d["matches"])[:200])
+        d = core.deepdive(gsess, "main")
+        check("deepdive(graph shape): class substring matches its methods",
+              d["matchCount"] >= 2 and
+              {m.get("method") for m in d["matches"]} >= {"onCreate", "onPause"},
+              str(d["matchCount"]))
+        d = core.deepdive(gsess, "callers")
+        check("deepdive(graph shape): callers = stored call edges",
+              d["matchCount"] >= 1 and
+              any(m.get("class") == "com.example.Main"
+                  and m.get("method") == "onCreate" for m in d["matches"]),
+              json.dumps(d["matches"])[:200])
+        d = core.deepdive(gsess, "calls")
+        check("deepdive(graph shape): calls lists invoke edges",
+              d["matchCount"] >= 1 and
+              any("invoke-virtual" in m.get("detail", "") for m in d["matches"]),
+              json.dumps(d["matches"])[:200])
+        d = core.deepdive(gsess, "native")
+        check("deepdive(graph shape): native = JNI nodes + library files",
+              any(m.get("via") == "jni" and m.get("method") == "nativeAdd"
+                  for m in d["matches"]) and
+              any(m.get("via") == "structural"
+                  and m.get("artifact") == "androidx.graphics.path"
+                  for m in d["matches"]),
+              json.dumps(d["matches"])[:200])
+        d = core.deepdive(gsess, "zzz-not-here")
+        check("deepdive(graph shape): 0 is a REAL negative (traversed the "
+              "graph, not 'run /analyze first')",
+              d["matchCount"] == 0 and "traversed" in d["note"]
+              and "run /analyze" not in d["note"],
+              d["note"])
         unk = core.record_deepdive(store, "00" * 16, "x")
         check("record_deepdive on unknown sha errors", "error" in unk)
 
@@ -2624,7 +2699,7 @@ def main() -> int:
         ver = getattr(vb, "__version__", None)
         check("version: __init__.__version__ is X.Y.Z",
               isinstance(ver, str) and len(ver.split(".")) == 3, str(ver))
-        check("version: matches the current build", ver == "0.25.0", str(ver))
+        check("version: matches the current build", ver == "0.26.0", str(ver))
         r, j = gateway.Gateway(td).handle("/find zzz")
         check("session: /find without --sha is refused (no most-recent fallback)",
               "no --sha" in r and "run /apk" in r and j is None, r)

@@ -418,6 +418,19 @@ def deepdive(session: dict, target: str) -> dict:
     structural = session.get("structural", {}) or {}
     jni = structural.get("jni", [])
     calls = structural.get("calls", [])
+    # Graph-engine session shape (vibe-graph): everything lives under
+    # structural.graph — nodes{method,class,native,...} + calls[] — NOT the
+    # dexmapper flat structural.calls / structural.jni / structural.nativeLibs
+    # (v0.26, found on the real F-Droid session: /deepdive returned 0 matches
+    # for org.fdroid.MainActivity.onCreate although it was present as M-id in
+    # the stored graph, because this function only read the dexmapper shape).
+    graph = (structural.get("graph") or {}) if isinstance(
+        structural.get("graph"), dict) else {}
+    g_nodes = graph.get("nodes", {}) if isinstance(graph.get("nodes"), dict) else {}
+    g_methods = g_nodes.get("method", []) or []
+    g_native = g_nodes.get("native", []) or []
+    g_calls = graph.get("calls", []) or []
+    g_libs = graph.get("library_files", []) or []
 
     if t in ("callers", "caller"):
         for f in findings:
@@ -439,6 +452,12 @@ def deepdive(session: dict, target: str) -> dict:
                             "method": c.get("callerMethod"),
                             "detail": f"{c.get('invokeKind')} -> "
                                       f"{c.get('targetClass')}.{c.get('targetMethod')}"})
+        # graph-engine: callers = every stored call edge (caller = app method)
+        for c in g_calls:
+            matches.append({"via": "caller", "class": c.get("caller"),
+                            "method": c.get("callerMethod"),
+                            "detail": f"{c.get('invokeKind')} -> "
+                                      f"{c.get('targetClass')}.{c.get('targetMethod')}"})
     elif t in ("references", "reference", "refs"):
         for f in findings:
             for e in f.get("evidence", []):
@@ -453,8 +472,25 @@ def deepdive(session: dict, target: str) -> dict:
             matches.append({"via": "jni", "class": j.get("class"),
                             "method": j.get("method"), "artifact": j.get("dex"),
                             "detail": "native method (JNI entry point)"})
+        # graph-engine: native methods (nodes.native) + library files
+        for n in g_native:
+            if not t or t in ("native", "so", "elf", "jni"):
+                matches.append({"via": "jni", "class": n.get("class"),
+                                "method": n.get("method"),
+                                "artifact": n.get("id"),
+                                "detail": "native method (JNI entry point)"})
+        if not t or t in ("native", "so", "elf", "jni"):
+            for lib in g_libs:
+                matches.append({"via": "structural", "artifact": lib})
     elif t in ("calls", "call"):
         for c in calls:
+            matches.append({"via": "call", "class": c.get("caller"),
+                            "method": c.get("callerMethod"),
+                            "detail": f"{c.get('invokeKind')} "
+                                      f"{'{'+','.join(c.get('regs', []))+'} ' if c.get('regs') else ''}-> "
+                                      f"{c.get('targetClass')}.{c.get('targetMethod')}"})
+        # graph-engine: same shape, stored under structural.graph
+        for c in g_calls:
             matches.append({"via": "call", "class": c.get("caller"),
                             "method": c.get("callerMethod"),
                             "detail": f"{c.get('invokeKind')} "
@@ -486,10 +522,44 @@ def deepdive(session: dict, target: str) -> dict:
                 matches.append({"via": "jni", "class": j.get("class"),
                                 "method": j.get("method"),
                                 "detail": "native method (JNI entry point)"})
+        # graph-engine: substring over stored method nodes (the primary
+        # lookup — a class or Class.method name matching a real M-node)
+        for m in g_methods:
+            hay = f"{m.get('class','')}.{m.get('name','')}".lower()
+            if t and t in hay:
+                matches.append({"via": "method", "class": m.get("class"),
+                                "method": m.get("name"),
+                                "artifact": m.get("dex"),
+                                "detail": f"{m.get('id','')} "
+                                          f"native={m.get('native')}"})
+        # graph-engine: substring over the stored call graph
+        for c in g_calls:
+            hay = f"{c.get('caller','')}.{c.get('callerMethod','')} " \
+                  f"{c.get('targetClass','')}.{c.get('targetMethod','')}".lower()
+            if t and t in hay:
+                matches.append({"via": "call", "class": c.get("caller"),
+                                "method": c.get("callerMethod"),
+                                "detail": f"{c.get('invokeKind')} -> "
+                                          f"{c.get('targetClass')}.{c.get('targetMethod')}"})
+        # graph-engine: substring over the native (JNI) nodes
+        for n in g_native:
+            if t and t in f"{n.get('class','')}.{n.get('method','')}".lower():
+                matches.append({"via": "jni", "class": n.get("class"),
+                                "method": n.get("method"), "artifact": n.get("id"),
+                                "detail": "native method (JNI entry point)"})
 
+    if matches:
+        note = "traversed stored session (no rescan)"
+    elif graph:
+        # graph-engine session: the graph WAS traversed — a 0 is a real
+        # negative (the target is not in this artifact), not a missing scan.
+        note = ("no match in the stored graph (traversed "
+                f"{len(g_methods)} methods, {len(g_calls)} call edges — "
+                "target not present in this artifact)")
+    else:
+        note = "no stored matches — run /analyze or /dex first"
     return {"target": target, "matchCount": len(matches), "matches": matches,
-            "note": "traversed stored session (no rescan)" if matches
-                    else "no stored matches — run /analyze or /dex first"}
+            "note": note}
 
 
 def record_deepdive(store: SessionStore, sha256: str, target: str) -> dict:
