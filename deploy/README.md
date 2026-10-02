@@ -9,7 +9,7 @@ This directory contains a minimal systemd deployment for the Telegram runtime. I
 - runtime state: `/var/lib/vibebot/work`
 - service: `/etc/systemd/system/vibebot.service`
 
-Create a dedicated `vibebot` system user, copy this repository to `/opt/vibe`, create `/var/lib/vibebot/work`, and make both runtime paths readable/writable as required by that user. Copy `deploy/vibebot.env.example` to `/etc/vibebot/vibebot.env`, replace the placeholders, then restrict it to mode `0600`.
+Create a dedicated `vibebot` system user, copy this repository to `/opt/vibe`, create `/var/lib/vibebot/work`, and make the runtime path writable by that user. Copy `deploy/vibebot.env.example` to `/etc/vibebot/vibebot.env`, replace the placeholders, then restrict it to mode `0600`.
 
 Install `deploy/vibebot.service` as `/etc/systemd/system/vibebot.service`, run `systemctl daemon-reload`, enable/start the service, and inspect it with `systemctl status vibebot` and `journalctl -u vibebot`.
 
@@ -24,7 +24,7 @@ Do not treat a running process as proof that the bot works. Verify the full boun
 5. Start analysis and confirm a terminal result is delivered.
 6. Restart the service and repeat `/health`.
 
-For an explicit API/gateway smoke test, run `python3 tools/vibebot_deploy.py --chat-id <operator-chat-id>` from the host after loading the same environment file. The script must not print the token.
+The production service consumes `VIBE_TELEGRAM_TOKEN` and `VIBE_BOT_ALLOWED_USERS` only from its protected environment file. Never place the real token in the repository, command line, service unit, logs, or screenshots.
 
 ## Failure triage
 
