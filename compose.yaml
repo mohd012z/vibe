@@ -1,0 +1,13 @@
+services:
+  vibebot:
+    build: .
+    restart: unless-stopped
+    environment:
+      VIBE_TELEGRAM_TOKEN: ${VIBE_TELEGRAM_TOKEN}
+      VIBE_TELEGRAM_ALLOWLIST: ${VIBE_TELEGRAM_ALLOWLIST:-}
+      VIBE_FILE_ROOT: /data
+    volumes:
+      - vibe-data:/data
+
+volumes:
+  vibe-data:
