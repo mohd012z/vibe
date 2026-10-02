@@ -1,0 +1,54 @@
+name: vibe-job
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_json:
+        description: Validated Vibe JobContract JSON
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vibe-job-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  validate-and-run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Materialize job contract
+        env:
+          VIBE_JOB_JSON: ${{ inputs.job_json }}
+        run: |
+          mkdir -p .vibe-job
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from tools.cloud.job_contract import JobContract
+          raw = os.environ['VIBE_JOB_JSON']
+          job = JobContract.from_json(raw)
+          Path('.vibe-job/job.json').write_text(job.to_json(), encoding='utf-8')
+          print(f'validated {job.job_id}: {job.operation.value}')
+          PY
+
+      - name: Execute provider-neutral runner
+        run: python tools/cloud/job_runner.py --job .vibe-job/job.json --out .vibe-job/result.json
+
+      - name: Upload machine-readable result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vibe-result-${{ github.run_id }}
+          path: .vibe-job/
+          if-no-files-found: error
+          retention-days: 1
