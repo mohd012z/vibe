@@ -6,3 +6,7 @@ __pycache__/
 *.pyc
 # opt-in raw companion — never the evidence of record, never committed
 *.raw.jsonl
+
+# downloaded Android/reverse-engineering tool binaries and SDK caches
+.toolchain/
+.android-sdk/
