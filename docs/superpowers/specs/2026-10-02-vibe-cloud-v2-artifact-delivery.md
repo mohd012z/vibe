@@ -1,157 +1,134 @@
-# Vibe Cloud v2 — Artifact Analysis and Telegram Delivery
+# Vibe Cloud v2 — Telegram + Android Hybrid Artifact Analysis
 
 ## Goal
 
-Allow an authorized user to upload a supported file in Telegram, choose or describe a bounded Vibe analysis operation, execute that operation through the private GitHub Vibe repository, and receive useful information and generated output files back in Telegram without operating a permanent VPS.
+Allow an authorized user to submit supported files from Telegram or an installable Android Vibe client, choose or describe a bounded Vibe operation, execute inexpensive capabilities locally when possible and heavier operations through the private GitHub Vibe repository, then receive structured information and generated files through the originating client without operating a permanent VPS.
+
+## Architecture
+
+`Telegram | Android → Vibe Control Plane → ArtifactContract → CapabilityRouter → Local Android Adapter | JobContract → GitHub Actions → AnalyzerAdapter → ResultContract → DeliveryContract → Telegram | Android`
+
+Telegram and Android are clients of the same Vibe contracts. Android local execution is an optimization, not a second incompatible engine. Operation names and result semantics remain common across local and cloud execution.
 
 ## User Flow
 
-1. User uploads a file to the Telegram bot.
-2. Control plane authenticates the Telegram identity and validates file metadata.
-3. The bot acknowledges the upload and presents context-appropriate Vibe operations.
-4. A button or natural-language request is converted into an allowlisted operation.
-5. Control plane creates an immutable ArtifactContract and validated JobContract.
-6. The artifact is stored outside Git and made available to the analysis runner through a temporary scoped reference.
-7. GitHub Actions validates the contracts and invokes the matching AnalyzerAdapter.
-8. Vibe produces a ResultContract plus zero or more output artifacts.
-9. The control plane validates the result and creates a DeliveryContract.
-10. Telegram receives a terminal status message and any deliverable files.
+1. User uploads/shares/selects a supported file in Telegram or Android.
+2. Client/control plane validates identity, file metadata, size, type and policy.
+3. Vibe computes SHA-256 and creates immutable ArtifactContract metadata.
+4. UI presents context-appropriate operations plus Smart Analyze.
+5. Button or natural-language request resolves to allowlisted operation(s).
+6. CapabilityRouter selects `local`, `cloud`, or `held` using declared capabilities and configured free-budget policy.
+7. Local-capable Android operations run on-device and emit the same ResultContract semantics.
+8. Cloud operations store the artifact outside Git, create a validated JobContract, and dispatch GitHub Actions.
+9. GitHub validates contracts, verifies artifact bytes/hash, selects an explicit AnalyzerAdapter, and runs a real Vibe analyzer.
+10. Vibe emits ResultContract and controlled output descriptors.
+11. DeliveryContract routes the terminal summary and generated files to Telegram or Android.
+12. Temporary artifacts expire/delete according to retention policy.
 
 ## Trust Boundaries
 
-`Telegram input → authentication/validation → ArtifactContract → JobContract → allowlisted AnalyzerAdapter → ResultContract → DeliveryContract → Telegram`
+`Client input → authentication/validation → ArtifactContract → CapabilityRouter → allowlisted local/cloud adapter → ResultContract → DeliveryContract → client`
 
-User text, filenames, URLs, and artifact metadata are data. None may be interpolated into arbitrary shell commands. GitHub workflow permissions remain least-privilege. Uploaded binaries must never be committed to the Vibe repository.
+User text, filenames, URLs, artifact metadata, share intents and document URIs are data. None may become arbitrary shell commands or uncontrolled filesystem paths. Uploaded binaries and generated user artifacts must never be committed to Git.
 
-## Contracts
+## Shared Contracts
 
 ### ArtifactContract
 
-Versioned immutable metadata containing:
-
-- `schema_version`
-- `artifact_id`
-- original `filename`
-- `size_bytes`
-- `sha256`
-- normalized artifact/media type
-- temporary scoped retrieval reference
-- optional expiry timestamp
-
-The runner must verify the downloaded byte count and SHA-256 before analysis. A mismatch is a terminal rejection, not a warning.
+Versioned immutable metadata containing `schema_version`, `artifact_id`, original `filename`, `size_bytes`, `sha256`, normalized artifact/media type, controlled retrieval reference, source client, and optional expiry timestamp. Cloud runners must verify byte count and SHA-256 before analysis. Mismatch is terminal rejection.
 
 ### JobContract
 
-Reuse the existing validated cloud JobContract. Only its allowlisted operations may reach an analyzer. Operations that require an artifact must reference an ArtifactContract by stable artifact identity rather than a repository path supplied by the user.
+Reuse the existing validated JobContract. Only allowlisted operations may reach an analyzer. Artifact-requiring operations reference stable ArtifactContract identity, never a user-supplied repository/local path.
 
 ### ResultContract
 
-Reuse and extend the existing versioned ResultContract without silently changing v1 semantics. It must distinguish completed, failed, rejected, and partial outcomes when partial execution is introduced. Output descriptors must identify generated files without trusting arbitrary runner paths.
+Reuse/extend the versioned ResultContract without silently changing v1 semantics. It distinguishes completed, failed, rejected, and partial outcomes when partial execution is introduced. Local and cloud adapters produce equivalent result semantics.
 
 ### DeliveryContract
 
-Versioned delivery metadata containing:
+Versioned delivery metadata containing job ID, destination client/session identity, terminal status, concise summary, controlled output descriptors and optional follow-up actions. A delivery adapter may only send outputs resolved through the controlled artifact/output store or an explicitly owned Android application path.
 
-- `job_id`
-- destination Telegram chat identity
-- terminal status
-- concise user-facing summary
-- output descriptors eligible for delivery
-- optional follow-up actions
+## CapabilityRouter
 
-The delivery layer must not send files merely because a runner named them. Every output must resolve through the controlled artifact/output store.
+The router receives operation, artifact metadata, network state, local capability declarations, cloud availability and free-budget state. It returns one of `local`, `cloud`, or `held` plus a machine-readable reason.
 
-## Artifact Transport
+Rules:
+- Prefer local when the requested operation is safely supported on-device and produces equivalent contract semantics.
+- Use cloud for unavailable/heavy capabilities.
+- Never silently downgrade a requested deep/heavy operation to a weaker local no-op.
+- Offline cloud work is queued/held with visible status.
+- Exhausted cloud quota yields held/rejected status rather than accidental paid execution.
 
-Define a provider-neutral artifact-store interface before implementing a provider adapter. Cloudflare R2 is the preferred free-tier production adapter, but core Vibe code must not depend directly on R2 APIs.
+Initial local candidates: SHA-256, file identification, ZIP/APK inventory, basic metadata, bounded string/text search, cached result/report viewing. Heavy DEX/XREF/native/deep multi-engine analysis remains cloud-first until measured Android implementations prove otherwise.
 
-Required operations:
+## Android Client
 
-- put input artifact
-- obtain scoped/expiring retrieval reference
-- fetch/stream artifact
-- put generated output
-- obtain scoped delivery reference
-- expire/delete artifact
+Build a normal installable Android application using platform trust boundaries. No root requirement, stealth services, security-tool evasion or hidden background execution.
 
-Temporary local filesystem storage may be used inside a GitHub runner as scratch space only. It is not durable state.
+Use Android Storage Access Framework and share/open-with intents for file intake; WorkManager for deferrable work; foreground service only when Android requires visible long-running execution; Room or equivalent app-owned local persistence for jobs/results; encrypted platform-backed storage for credentials/tokens; notifications for terminal job states.
 
-## Analyzer Adapter
+Primary navigation:
+- Home — recent artifacts/jobs and quick actions
+- Analyze — Smart Analyze and categorized operations
+- Jobs — queued/running/held/completed/failed
+- Results — reports, evidence and generated files
+- Vibe AI — questions scoped to selected artifact/result
 
-Add a registry mapping JobContract operations to explicit Vibe analyzer adapters. Initial operations are the existing allowlist: `analyze`, `deepdive`, `map`, `find`, `xref`, `dex`, `smali`, `native`, `strings`, `urls`, `resources`, `report`, and `apk`.
+Execution selector defaults to `Auto`, with optional `Local` and `Cloud` advanced choices. Auto is authoritative through CapabilityRouter rather than UI heuristics.
 
-Each adapter receives validated contracts and a controlled local artifact path and returns structured result/output metadata. It must not receive raw Telegram updates or GitHub API credentials.
+## Offline Behavior
 
-Unsupported/unavailable analyzers return an explicit rejected/failed result with capability information; they must never be reported as successful no-op jobs.
+Android remains useful without network for declared local capabilities, cached artifacts/results and queued cloud jobs. Cloud-required jobs transition to a visible waiting-for-network/held state and resume only under configured constraints. Reboot/app restart must not lose persisted job state.
 
 ## Telegram Control Plane
 
-Telegram uses webhook delivery rather than permanent long polling for the primary cloud mode. The webhook layer is responsible only for authentication, file intake, command/button routing, job state, dispatch, and result delivery. Heavy analysis remains outside the webhook runtime.
+Telegram primary cloud mode uses webhook delivery, not permanent long polling. The webhook handles authentication, file intake, button/command routing, job state, dispatch and result delivery only. Heavy analysis stays outside webhook runtime. Natural language must resolve to allowlisted operations and pass JobContract validation.
 
-Natural-language requests may map to one or more allowlisted Vibe operations, but the mapping output must pass the same JobContract validation as button commands. Unknown intent must ask for clarification or present valid operations; it must never fall through to shell execution.
+## Artifact Transport
+
+Define a provider-neutral artifact-store interface. Cloudflare R2 is the preferred free-tier production adapter but core code does not depend on R2. Required operations: put input, scoped retrieval, fetch/stream, put output, scoped delivery, expire/delete. GitHub runner local disk is scratch only.
+
+Android app-owned storage may cache artifacts/results under explicit retention controls. External/shared document URIs are accessed only through Android-granted permissions; Vibe must not assume arbitrary filesystem access.
+
+## Analyzer Registry
+
+Registry maps operations to explicit adapters: `analyze`, `deepdive`, `map`, `find`, `xref`, `dex`, `smali`, `native`, `strings`, `urls`, `resources`, `report`, `apk`. Adapters receive validated contracts plus controlled artifact access. Unsupported/unavailable analyzers return explicit failure/rejection with capability information; successful no-op jobs are prohibited.
 
 ## GitHub Actions Compute
 
-GitHub Actions is on-demand compute, not the always-running bot host. Workflows must:
-
-- use explicit timeouts;
-- use minimum repository permissions;
-- validate all contracts before retrieval/execution;
-- verify artifact SHA-256 before analysis;
-- invoke only registered adapters;
-- always attempt to emit a terminal ResultContract;
-- keep diagnostic/result artifacts on short retention;
-- avoid committing user uploads or analysis outputs to Git.
-
-The design must remain usable after the repository becomes private. Private-repository Actions quota is treated as a finite free budget rather than unlimited compute.
+GitHub Actions is on-demand compute, not bot hosting. Workflows use explicit timeout, minimum permissions, contract validation, SHA verification, registered adapters, terminal ResultContract emission, short artifact retention, and no Git commits of user artifacts. Private-repository Actions quota is a finite free budget.
 
 ## Free-Mode Budgeting
 
-The control plane should avoid Actions for `/start`, `/help`, button rendering, upload acknowledgement, status lookup, and other lightweight operations. Only analysis jobs dispatch compute.
-
-A budget guard may hold/reject new analysis when the configured free allowance is exhausted or deliberately reserved. Quota exhaustion must produce a Telegram-visible terminal/held state rather than silent failure.
+Lightweight Telegram/Android UI, acknowledgement, status, local operations and cached viewing do not invoke Actions. Only real cloud analysis dispatches compute. Budget guard prevents execution beyond configured free allowance and exposes held/quota state to both clients.
 
 ## Failure Semantics
 
-Every accepted job must eventually expose one of these observable states: completed, partial, failed, rejected, cancelled/expired, or held for quota when implemented. Important failures include:
-
-- unauthorized Telegram identity;
-- unsupported file type or size;
-- expired/missing artifact;
-- size/hash mismatch;
-- unknown operation;
-- analyzer unavailable;
-- analyzer non-zero failure;
-- workflow timeout;
-- output packaging failure;
-- Telegram delivery failure;
-- compute/storage quota exhaustion.
-
-No failure may be represented as a successful empty analysis.
+Every accepted job exposes an observable terminal/nonterminal state: queued, running, held, completed, partial, failed, rejected, cancelled or expired. Important failures include unauthorized identity, unsupported file/type/size, missing/expired artifact, byte/hash mismatch, unknown operation, local capability unavailable, network unavailable, analyzer unavailable/failure, workflow timeout, packaging failure, delivery failure and compute/storage quota exhaustion. No failure is represented as successful empty analysis.
 
 ## Retention and Privacy
 
-- Source code remains in GitHub.
-- User binaries and generated analysis artifacts remain outside Git history.
-- Temporary artifacts have explicit expiry/deletion behavior.
-- Secrets are runtime secrets, never repository files.
-- Logs should identify jobs by job/artifact IDs and avoid dumping file contents or secret-bearing URLs.
+Source stays in GitHub. User binaries/outputs stay outside Git history. Temporary cloud artifacts expire. Android cache has explicit retention/clear controls. Secrets are runtime/platform-backed secrets, never repository files. Logs use job/artifact IDs and avoid file contents or secret-bearing URLs.
 
 ## Validation Strategy
 
-Use TDD at each contract/adapter boundary. Required end-to-end evidence before calling V2 usable:
-
-1. Synthetic test artifact upload creates a valid ArtifactContract.
-2. Tampered artifact is rejected by SHA-256 verification.
-3. Valid JobContract selects exactly one registered adapter for a single operation.
-4. Unknown operation cannot execute a process.
-5. Analyzer success produces a valid ResultContract and controlled output descriptor.
-6. Analyzer failure produces a terminal failed/rejected result.
-7. DeliveryContract cannot reference an uncontrolled local path.
-8. A mocked Telegram flow proves upload → selection → dispatch → result → file delivery.
-9. GitHub workflow smoke test proves contract validation and result packaging.
-10. Existing repository validation remains green.
+Use TDD at each boundary. Required evidence:
+1. Synthetic file intake creates valid ArtifactContract from Telegram and Android adapters.
+2. Tampered cloud artifact fails SHA verification.
+3. CapabilityRouter chooses local for declared cheap capability and cloud for unavailable heavy capability.
+4. Offline cloud job becomes held/queued rather than lost.
+5. Valid JobContract selects exactly one registered adapter per single operation.
+6. Unknown operation cannot execute a process.
+7. Real analyzer success creates valid ResultContract and controlled output descriptor.
+8. Analyzer failure creates terminal failed/rejected result.
+9. DeliveryContract rejects uncontrolled local paths.
+10. Mocked Telegram flow proves upload → selection → dispatch → result → file delivery.
+11. Android instrumentation/unit flow proves share/select → operation → local/cloud routing → persisted job → result view.
+12. Android restart preserves pending/completed job state.
+13. GitHub workflow smoke test proves contract validation, hash verification, analyzer invocation and result packaging.
+14. Existing repository validation remains green.
 
 ## Definition of Done
 
-Vibe Cloud v2 is complete only when a Telegram user can upload a supported test file, invoke at least one real existing Vibe analyzer through the controlled GitHub Actions path, and receive both a structured terminal response and generated output file back through the Telegram delivery adapter, with hash verification, negative-path tests, and regression CI passing. Contract-only/no-op success does not satisfy completion.
+Vibe Cloud v2 is complete only when: (a) Telegram can upload a supported test file, invoke at least one real existing Vibe analyzer through controlled GitHub Actions, and receive structured terminal information plus a generated file; and (b) an installable Android Vibe APK can select/share a supported test file, execute at least one real local capability, dispatch at least one cloud capability using the same contracts, persist job state across restart, and display/download the validated result. Hash verification, negative-path tests and regression CI must pass. Contract-only/no-op success does not satisfy completion.
