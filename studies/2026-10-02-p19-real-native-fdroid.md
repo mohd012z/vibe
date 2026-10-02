@@ -1,6 +1,6 @@
 # P19 real production native — F-Droid .so e2e + PLT-trampoline false positive (v0.25)
 
-Date: 2026-10-02 · Branch: feat/p19-plt-false-positive (PR #13) · Author: Aliph
+Date: 2026-10-02 · Branch: feat/p19-plt-false-positive (PR #26) · Author: Aliph
 (Fatah-approved "proceed" sweep; native path on real production code)
 
 ## Gap this closes
