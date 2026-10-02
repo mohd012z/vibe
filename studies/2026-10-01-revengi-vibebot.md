@@ -530,7 +530,25 @@ P25 self-improvement eval.
   CORRECT (reads what's there); the *claim* was fixed in kotlinmeta.py
   (docstring + render footer + finding title + spec description). +5 checks
   → 481. `__version__` → 0.22.0. **P17's single-fixture / overclaim gap:
-  CLOSED.** See studies/2026-10-02-p17-real-r8.md.
+  CLOSED.** See studies/2026-10-02-p17-real-r8.md. **PR STATE (2026-10-02):
+  PR #6 was MERGED by Fatah at `1d03de5` (v0.21: P14b+P16+P18+P19, into
+  `82c5a83`); main then advanced with PR #8/#9 (Telegram runtime →
+  `198fd99`). P17b (`4c03b65`) was pushed to the #6 branch AFTER the merge
+  → stranded, NOT on main. Cherry-picked onto current main →
+  `feat/p17b-real-r8` @ `81207d3` (481 ALL PASS, CI green) → **PR #12 OPEN**
+  (https://github.com/mohd012z/vibe/pull/12). Merge = Fatah's call.
+  REPAIR #1 (2026-10-02, "cant merge"): main advanced again while #12 sat
+  open (PR #11 portable-container-runtime + #13 Vibe-job-contract → `2f2b864`);
+  rebase + 481 ALL PASS + `--force-with-lease` → head `622041b`, base `2f2b864`.
+  REPAIR #2 (2026-10-02, "cant merge" again): main advanced a THIRD time
+  (PR #14 cloud actions-runner → `880298a`, 4 new `tools/cloud/*` files — no
+  overlap with P17b); rebase + 481 ALL PASS (full-host: r2 P18/P19 positive,
+  P16 via system aarch64 cross-compiler after scratch auto-pruned cross16) +
+  `--force-with-lease` → **head `fe852df`, base `880298a` (current main), CI
+  validate PASS, CLEAN/MERGEABLE.** Lesson (recurred twice in one session): an
+  open PR on a protected main goes BEHIND every time ANY other PR merges —
+  always `git ls-remote origin main` + rebase + re-verify before a merge ask.
+  Merge = Fatah's call.**
 - ~~Kotlin @Metadata name recovery~~ — DONE above (P17, v0.16); the
   "STILL DEFERRED" state was unblocked when scratch gained JDK17 + kotlinc +
   d8, and the message-level proto numbers from `metadata.proto` were verified
