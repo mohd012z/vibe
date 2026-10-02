@@ -27,7 +27,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOKEN_FILE = "/opt/data/vibebot/token.env"
 
 COMMANDS = [
-    ("apk", "APK overview + Vibe IR entity graph: /apk <path>"),
+    ("apk", "APK overview + Vibe IR entity graph: /apk <path|bundle.apks>"),
     ("map", "entity graph tree: /map <path> (or --sha)"),
     ("find", "TargetFinder: /find <text> --sha <sha>"),
     ("xref", "references: /xref <M|Cls.m> --sha <sha>"),
@@ -41,11 +41,11 @@ COMMANDS = [
     ("native", "Radare native provider: /native <path>"),
     ("xmatch", "cross-version method match: /xmatch <src.apk> <dst.apk>"),
     ("harness", "native-harness validation (build + run C under qemu): /harness <srcdir>"),
-    ("kmeta", "recover original (pre-R8) Kotlin names from @Metadata: /kmeta <dex|apk> [class_filter]"),
+    ("kmeta", "recover original (pre-R8) Kotlin names from @Metadata: /kmeta <dex|apk|bundle.apks> [class_filter]"),
     ("commands", "searchable command registry (L0 always / L1 on demand): /commands [query]"),
     ("oracle", "Frida oracle GATE (dry-run — is a runtime call allowed?): /oracle <target> [call-only|differential] [reference]"),
-    ("analyze", "analysis job: /analyze <path> [--engine apkmod|dexmapper]"),
-    ("dex", "DEX Mapper: /dex <path> (class->method->call + JNI + integrity)"),
+    ("analyze", "analysis job: /analyze <path|bundle.apks> [--engine apkmod|dexmapper]"),
+    ("dex", "DEX Mapper: /dex <path|bundle.apks> (class->method->call + JNI + integrity)"),
     ("smali", "query Dalvik opcode table: /smali <name|0x..|substr>"),
     ("dexcheck", "validate DEX header: /dexcheck <path>"),
     ("dexrepair", "dry-run DEX repair report: /dexrepair <path>"),

@@ -28,6 +28,9 @@ import os
 import re
 import sys
 import time
+import shutil
+import hashlib
+import zipfile
 import threading
 import urllib.error
 import urllib.parse
@@ -100,6 +103,9 @@ class Gateway:
         self.sessions = core.SessionStore(work_dir)
         self.engines = engines_map or self._default_engines()
         self.jobs = core.JobManager(self.engines, self.sessions)
+        # v0.30: one-shot disclosure set by _artifact() when a .apks bundle was
+        # unpacked for this call; appended to the ACK/reply, then cleared.
+        self._bundle_note = ""
 
     def _containment_err(self, path: str) -> str | None:
         """Error string if `path` is outside the active file root, else None.
@@ -115,15 +121,84 @@ class Gateway:
                     f"containment-gated (NOT OBSERVED outside the root)")
         return None
 
-    def _artifact(self, raw: str, label: str = "artifact") -> tuple[str, str | None]:
+    # v0.30: bound on unpacking an .apks bundle's base.apk (safety; the upload
+    # is already bounded by MAX_UPLOAD_BYTES, extraction is ~1:1 with zip size)
+    _BUNDLE_MAX_EXTRACT = 512 * 1024 * 1024
+
+    def _apks_base(self, apks_path: str) -> tuple[str, str, str | None]:
+        """v0.30: unpack an .apks bundle (Android App Bundle / ApkSet).
+
+        An .apks is a ZIP containing base.apk (all DEX + manifest) plus
+        split_config.*.apk (per-ABI / per-language / per-density resources and
+        native libs). We extract base.apk into a per-bundle cache dir and
+        analyze THAT; the splits are disclosed as NOT analyzed (honest).
+
+        Returns (base_apk_path, disclosure_note, error).
+        """
+        try:
+            with zipfile.ZipFile(apks_path) as z:
+                names = z.namelist()
+                if "base.apk" not in names:
+                    return "", "", "error: .apks has no base.apk (not a valid ApkSet)"
+                info = z.getinfo("base.apk")
+                if info.is_dir():
+                    return "", "", "error: .apks 'base.apk' is a directory (corrupt bundle)"
+                if info.file_size > self._BUNDLE_MAX_EXTRACT:
+                    return "", "", (f"error: base.apk too large to unpack "
+                                    f"({info.file_size} B > {self._BUNDLE_MAX_EXTRACT})")
+                # per-bundle cache key: sha256 of the bundle itself
+                sha = hashlib.sha256()
+                with open(apks_path, "rb") as f:
+                    while True:
+                        chunk = f.read(1 << 20)
+                        if not chunk:
+                            break
+                        sha.update(chunk)
+                base = os.path.join(self.work_dir, "apks", sha.hexdigest()[:16],
+                                    "base.apk")
+                if not os.path.exists(base):
+                    os.makedirs(os.path.dirname(base), exist_ok=True)
+                    # single KNOWN member ('base.apk', exact name) — no
+                    # arbitrary-name extraction, so no zip-slip surface
+                    with z.open("base.apk") as src, open(base + ".part", "wb") as out:
+                        shutil.copyfileobj(src, out, 1 << 20)
+                    os.replace(base + ".part", base)
+                splits = [n for n in names if n != "base.apk" and not n.endswith("/")]
+                parts = []
+                for n in sorted(splits):
+                    sz = z.getinfo(n).file_size
+                    parts.append(f"{n} ({sz / 1e6:.2f} MB)" if sz >= 1 << 20
+                                 else f"{n} ({sz / 1024:.0f} KB)")
+                note = (f"⚠ .apks bundle — analyzed base.apk "
+                        f"({info.file_size / 1e6:.2f} MB); splits NOT analyzed: "
+                        + ", ".join(parts)) if parts else \
+                       (f"⚠ .apks bundle — analyzed base.apk "
+                        f"({info.file_size / 1e6:.2f} MB)")
+                return base, note, None
+        except (zipfile.BadZipFile, OSError) as e:
+            return "", "", f"error: could not unpack .apks bundle ({type(e).__name__}: {e})"
+
+    def _artifact(self, raw: str, label: str = "artifact",
+                  allow_bundle: bool = True) -> tuple[str, str | None]:
         """Resolve a user-supplied path: expand+abs, containment-gate, exist.
-        Returns (abs_path, error) — error is a ready-to-return message or None."""
+        Returns (abs_path, error) — error is a ready-to-return message or None.
+        v0.30: a .apks bundle is unpacked to its base.apk (cached per bundle);
+        the split APKs are disclosed via _bundle_note, never silently dropped."""
         path = os.path.abspath(os.path.expanduser(raw))
         ce = self._containment_err(path)
         if ce:
             return path, ce
         if not os.path.exists(path):
             return path, f"error: {label} not found (refused: {os.path.basename(path)})"
+        if path.lower().endswith(".apks"):
+            if not allow_bundle:
+                return path, (f"error: {label} is an .apks bundle — this command "
+                              f"needs a raw file/dir, not a bundle")
+            base, note, err = self._apks_base(path)
+            if err:
+                return path, err
+            self._bundle_note = note
+            return base, None
         return path, None
 
     def _default_engines(self) -> dict[str, core.Engine]:
@@ -341,6 +416,15 @@ class Gateway:
         return p
 
     # --------------------------------------------------------------- routes
+    def _bundle_ack(self, reply: str) -> str:
+        """v0.30: append the .apks split-disclosure to a reply, then clear it.
+        No-op if no bundle was unpacked this call (plain APKs/DEX unaffected)."""
+        if self._bundle_note:
+            note = self._bundle_note
+            self._bundle_note = ""
+            return f"{reply}\n  {note}"
+        return reply
+
     def _analyze(self, parts: list[str], user: str) -> tuple[str, core.Job | None]:
         if not parts:
             return "/analyze <path> [--engine apkmod|mock] [--fingerprints <json>]", None
@@ -361,9 +445,8 @@ class Gateway:
             return f"error: {e}", None
         except (FileNotFoundError, RuntimeError) as e:
             return f"error: {e}", None
-        return (f"ACK {job.id}  engine={job.engine}\n"
+        return self._bundle_ack(f"ACK {job.id}  engine={job.engine}\n"
                 f"  queued — /status {job.id}  /cancel {job.id}"), job
-
     def _dex(self, parts: list[str], user: str) -> tuple[str, core.Job | None]:
         if not parts:
             return "/dex <path>   (DEX Mapper: class->method->call + JNI + integrity)", None
@@ -379,9 +462,8 @@ class Gateway:
                                    self._budget_params(parts))
         except (KeyError, FileNotFoundError, RuntimeError) as e:
             return f"error: {e}", None
-        return (f"ACK {job.id}  engine=dexmapper\n"
+        return self._bundle_ack(f"ACK {job.id}  engine=dexmapper\n"
                 f"  queued — /status {job.id}  /cancel {job.id}"), job
-
     def _xmatch(self, parts: list[str], user: str) -> tuple[str, core.Job | None]:
         """Cross-version method match: /xmatch <src.apk> <dst.apk>."""
         if not parts:
@@ -408,10 +490,9 @@ class Gateway:
             job = self.jobs.submit("xmatch", src, user, "xmatch", params)
         except (KeyError, FileNotFoundError, RuntimeError) as e:
             return f"error: {e}", None
-        return (f"ACK {job.id}  engine=xmatch\n"
+        return self._bundle_ack(f"ACK {job.id}  engine=xmatch\n"
                 f"  src={os.path.basename(src)}  dst={os.path.basename(dst)}\n"
                 f"  queued — /status {job.id}  /report --sha <…>  /cancel {job.id}"), job
-
     def _native(self, parts: list[str], user: str) -> tuple[str, core.Job | None]:
         if not parts:
             return ("/native <path>   (Radare native provider: ELF functions/"
@@ -429,9 +510,8 @@ class Gateway:
                                    self._budget_params(parts))
         except (KeyError, FileNotFoundError, RuntimeError) as e:
             return f"error: {e}", None
-        return (f"ACK {job.id}  engine=native\n"
+        return self._bundle_ack(f"ACK {job.id}  engine=native\n"
                 f"  queued — /status {job.id}  /cancel {job.id}"), job
-
     def _harness(self, parts: list[str], user: str) -> tuple[str, core.Job | None]:
         if not parts:
             return ("/harness <srcdir>   (native-harness validation: build the "
@@ -440,7 +520,7 @@ class Gateway:
         if "harness" not in self.engines:
             return ("error: harness engine not registered (stdlib-only; "
                     "should always be available)"), None
-        path, err = self._artifact(parts[0], "source dir")
+        path, err = self._artifact(parts[0], "source dir", allow_bundle=False)
         if err:
             return err, None
         try:
@@ -448,10 +528,9 @@ class Gateway:
                                    self._budget_params(parts))
         except (KeyError, FileNotFoundError, RuntimeError) as e:
             return f"error: {e}", None
-        return (f"ACK {job.id}  engine=harness\n"
+        return self._bundle_ack(f"ACK {job.id}  engine=harness\n"
                 f"  queued (build + qemu run) — /status {job.id}  "
                 f"/cancel {job.id}"), job
-
     def _kmeta(self, parts: list[str], user: str) -> tuple[str, core.Job | None]:
         """Kotlin @Metadata name recovery: /kmeta <dex|apk> [class_filter]."""
         if not parts:
@@ -474,14 +553,13 @@ class Gateway:
             job = self.jobs.submit("kmeta", path, user, "kotlinmeta", params)
         except (KeyError, FileNotFoundError, RuntimeError) as e:
             return f"error: {e}", None
-        return (f"ACK {job.id}  engine=kotlinmeta\n"
+        return self._bundle_ack(f"ACK {job.id}  engine=kotlinmeta\n"
                 f"  {os.path.basename(path)}  filter={flt or '(all)'}\n"
                 f"  /report {job.id}   /status {job.id}"), job
-
     def _apk(self, parts: list[str], user: str) -> tuple[str, core.Job | None]:
         if not parts:
-            return ("/apk <path>   (APK overview + Vibe IR entity graph; "
-                    "then /map --sha <…>)"), None
+            return ("/apk <path|bundle.apks>   (APK overview + Vibe IR entity graph; "
+                    ".apks bundle = base.apk analyzed, splits disclosed) "), None
         if "graph" not in self.engines:
             return ("error: Vibe IR needs androguard "
                     "(uv pip install androguard); /smali /base /hash /dexcheck "
@@ -494,9 +572,8 @@ class Gateway:
                                    self._budget_params(parts))
         except (KeyError, FileNotFoundError, RuntimeError) as e:
             return f"error: {e}", None
-        return (f"ACK {job.id}  engine=graph\n"
+        return self._bundle_ack(f"ACK {job.id}  engine=graph\n"
                 f"  queued — /status {job.id}  /cancel {job.id}"), job
-
     def _session_graph(self, sha: str):
         """(session, resolved graph or None) for a stored session.
 
@@ -815,7 +892,7 @@ class Gateway:
         from . import dexmapper
         if not parts:
             return "/dexcheck <path>  — validate DEX header(s)", None
-        path, err = self._artifact(parts[0])
+        path, err = self._artifact(parts[0], allow_bundle=False)
         if err:
             return err, None
         try:
@@ -833,7 +910,7 @@ class Gateway:
         from . import dexmapper
         if not parts:
             return "/dexrepair <path>  — dry-run report (read-only; does not write)", None
-        path, err = self._artifact(parts[0])
+        path, err = self._artifact(parts[0], allow_bundle=False)
         if err:
             return err, None
         try:
@@ -904,10 +981,9 @@ class Gateway:
             job = self.jobs.submit("investigate", path, "cli", "deepdive", params)
         except (KeyError, FileNotFoundError, RuntimeError) as e:
             return f"error: {e}", None
-        return (f"ACK {job.id}  engine=deepdive  target='{target}'\n"
+        return self._bundle_ack(f"ACK {job.id}  engine=deepdive  target='{target}'\n"
                 f"  18 stages running (bounded + cancellable) — "
                 f"/status {job.id}  /cancel {job.id}"), job
-
     def _report(self, parts: list[str]) -> tuple[str, None]:
         sha = self._arg(parts, "--sha")
         if not sha or not SHA_RE.match(sha.lower()):

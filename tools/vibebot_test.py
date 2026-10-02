@@ -2759,7 +2759,7 @@ def main() -> int:
         ver = getattr(vb, "__version__", None)
         check("version: __init__.__version__ is X.Y.Z",
               isinstance(ver, str) and len(ver.split(".")) == 3, str(ver))
-        check("version: matches the current build", ver == "0.29.0", str(ver))
+        check("version: matches the current build", ver == "0.30.0", str(ver))
         r, j = gateway.Gateway(td).handle("/find zzz")
         check("session: /find without --sha is refused (no most-recent fallback)",
               "no --sha" in r and "run /apk" in r and j is None, r)
@@ -3294,6 +3294,57 @@ def main() -> int:
         _f4, _ = _gw29.handle(f"/find demo --sha {_sha}", user="t")
         check("v0.29: /find --sha still works (back-compat)",
               "TARGETS for" in _f4 or "no match" in _f4, _f4[:80])
+
+        # -- v0.30: .apks bundle (ApkSet) support ---------------------------
+        import zipfile as _zip
+        # build a real .apks: base.apk = the fixture, + 1 split config
+        _apks = os.path.join(_td29, "test_bundle.apks")
+        with _zip.ZipFile(_apks, "w") as _z:
+            _z.write(FIXTURE, "base.apk")
+            _z.writestr("split_config.arm64_v8a.apk", b"FAKE-SPLIT-ABI")
+            _z.writestr("split_config.en.apk", b"FAKE-SPLIT-EN")
+        _r30, _j30 = _gw29.handle(f"/apk {_apks}", user="t")
+        check("v0.30: /apk <.apks> ACKs and discloses splits",
+              _j30 is not None and "splits NOT analyzed" in _r30
+              and "split_config.arm64_v8a.apk" in _r30, _r30[:160])
+        check("v0.30: bundle note cleared after the ACK (no double post)",
+              _gw29._bundle_note == "", _gw29._bundle_note)
+        for _j in _gw29.process_pending():
+            pass
+        check("v0.30: base.apk of the bundle graph-analyzes to COMPLETED",
+              _j30.state.upper() == "COMPLETED",
+              f"{_j30.state} err={_j30.error}")
+        # the analyzed artifact is the extracted base, NOT the .apks
+        check("v0.30: job ran on extracted base.apk (cache dir), not the bundle",
+              _j30.artifact.endswith("base.apk")
+              and "apks" in _j30.artifact, _j30.artifact)
+        # base.apk content == fixture content (round-trip integrity)
+        check("v0.30: extracted base.apk bytes == original fixture bytes",
+              open(_j30.artifact, "rb").read() == open(FIXTURE, "rb").read(),
+              f"{_j30.artifact}")
+        # bundle cached: a second /apk of the same bundle reuses the file
+        _before = _j30.artifact
+        _r30b, _j30b = _gw29.handle(f"/apk {_apks}", user="t")
+        for _j in _gw29.process_pending():
+            pass
+        check("v0.30: repeat /apk on same bundle reuses cached base.apk",
+              _j30b.state.upper() == "COMPLETED" and _j30b.artifact == _before,
+              f"{_j30b.state} {_j30b.artifact}")
+        # /find works on the bundle session
+        _f30, _ = _gw29.handle(f"/find demo --session {_j30.id}", user="t")
+        check("v0.30: /find --session works on a bundle session",
+              "TARGETS for" in _f30 or "no match" in _f30, _f30[:80])
+        # malformed bundle: no base.apk
+        _bad = os.path.join(_td29, "no_base.apks")
+        with _zip.ZipFile(_bad, "w") as _z:
+            _z.writestr("split_config.en.apk", b"only-splits")
+        _r30c, _ = _gw29.handle(f"/apk {_bad}", user="t")
+        check("v0.30: .apks without base.apk -> honest error",
+              "no base.apk" in _r30c, _r30c[:100])
+        # dexcheck/dexrepair refuse bundles (raw-DEX commands)
+        _r30d, _ = _gw29.handle(f"/dexcheck {_apks}", user="t")
+        check("v0.30: /dexcheck refuses a .apks bundle (raw-DEX command)",
+              "bundle" in _r30d, _r30d[:100])
 
     finally:
         shutil.rmtree(td, ignore_errors=True)
