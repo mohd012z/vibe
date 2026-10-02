@@ -1872,6 +1872,44 @@ def main() -> int:
                 check("P14 e2e: fixture /apk job COMPLETED", False,
                       (j14.error or "no job") if j14 is not None else "no job")
 
+            # --- P14 REAL-HYBRID e2e: a genuinely built (aapt2 + d8 +
+            # apksigner, build-tools 37.0) APK carrying BOTH Cordova/PhoneGap
+            # AND uni-app layouts plus a real @JavascriptInterface WebView —
+            # the artifact class P14 had never seen (previously only synthetic
+            # ZIP name lists + a native-only negative fixture).
+            HYB = os.path.join(ROOT, "tests", "fixtures",
+                               "fixture-hybrid.apk")
+            if os.path.exists(HYB):
+                sig14h = HS.scan_artifact(HYB)
+                fw14 = sig14h.get("frameworks") or {}
+                check("P14 real-hybrid: uniapp + cordova BOTH detected",
+                      "uniapp" in fw14 and "cordova" in fw14, str(fw14))
+                check("P14 real-hybrid: uni-app markers on _UNI_ paths",
+                      any("_UNI_" in m for m in
+                          (fw14.get("uniapp") or {}).get("markers", [])),
+                      str(fw14.get("uniapp")))
+                check("P14 real-hybrid: cordova markers on www/ + plugins",
+                      any(m == "assets/www/cordova.js" for m in
+                          (fw14.get("cordova") or {}).get("markers", [])),
+                      str(fw14.get("cordova")))
+                check("P14 real-hybrid: js_entries list the real JS layer",
+                      any(e.endswith("app-service.js") for e in
+                          sig14h.get("js_entries", []))
+                      and any(e.endswith("index.html") for e in
+                              sig14h.get("js_entries", [])),
+                      str(sig14h.get("js_entries")))
+                check("P14 real-hybrid: webview_used=True from REAL DEX "
+                      "(invoke-virtual WebView.addJavascriptInterface)",
+                      sig14h.get("webview_used") is True,
+                      str(sig14h.get("webview_used")))
+                check("P14 real-hybrid: jsinterface honest (no @JavascriptInterface "
+                      "method called from DEX in this fixture)",
+                      sig14h.get("jsinterface") == [],
+                      str(sig14h.get("jsinterface")))
+            else:
+                print("  [P14] NOT OBSERVED: tests/fixtures/fixture-hybrid.apk "
+                      "absent — real-APK hybrid WebView path not exercised")
+
         # ------------------------------------------------------------------
         if HAVE_ANDROGUARD:
             print("== P4: /find TargetFinder + canonical EntityResolver ==")

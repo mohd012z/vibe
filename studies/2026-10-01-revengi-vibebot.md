@@ -463,6 +463,19 @@ P25 self-improvement eval.
   (457 CI shape). See studies/2026-10-02-p19-real-arm64-patterns.md.
   **P5/P15/P16 positive-e2e gaps: now CLOSED (x86-64 + aarch64).** Merge
   pending Fatah.
+- **P14b (real-hybrid APK e2e)** — DONE (v0.20, same PR #6): P14's detector
+  had only ever run on synthetic ZIP name lists + a native-only negative
+  fixture. Built a REAL signed APK (aapt2 37.0 + d8 + apksigner, JDK17)
+  carrying BOTH uni-app (`assets/apps/_UNI_*/www/app-service.js`) and Cordova
+  (`assets/www/cordova.js`, `cordova_plugins.js`) layouts plus a real
+  `@JavascriptInterface` WebView → committed `tests/fixtures/fixture-hybrid.apk`
+  (13,058 B, reproducible; recipe in scratch). scan_artifact on it detects
+  both frameworks with the right real markers, lists the real js_entries, and
+  `webview_used=True` from REAL DEX (`invoke-virtual WebView →
+  addJavascriptInterface`, E2) — the DEX path P14 had never exercised.
+  `jsinterface=[]` pinned as honest (the bridge method is called from JS at
+  runtime, never from DEX). +6 checks → 473 (463 CI shape; fixture committed
+  so it runs there too). See studies/2026-10-02-p14-real-hybrid-apk.md.
 - **P17 (Kotlin @Metadata name recovery)** — DONE (v0.16, backlog #2):
   `tools/vibebot/kotlinmeta.py` + `/kmeta <classes.dex|app.apk> [class_filter]`.
   R8 renames every DEX name, but a Kotlin class's `@kotlin.Metadata` annotation
