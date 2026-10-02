@@ -1,0 +1,30 @@
+[Unit]
+Description=VibeBot Telegram Runtime
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vibebot
+Group=vibebot
+WorkingDirectory=/opt/vibe
+EnvironmentFile=/etc/vibebot/vibebot.env
+ExecStart=/usr/bin/python3 /opt/vibe/tools/vibebot_cli.py --serve --work-dir /var/lib/vibebot/work
+Restart=on-failure
+RestartSec=5s
+StartLimitIntervalSec=60
+StartLimitBurst=5
+TimeoutStopSec=20
+KillSignal=SIGTERM
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/vibebot
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vibebot
+
+[Install]
+WantedBy=multi-user.target
