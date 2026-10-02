@@ -4,22 +4,7 @@
 RevEngi-style analysis gateway for the vibe workbench: command router +
 async job queue + normalized evidence + stateful /deepdive. The Telegram
 transport is optional (--serve, token via VIBE_TELEGRAM_TOKEN only).
-
-Usage:
-  # one-shot: analyze the fixture, print summary + sample deepdive
-  python3 tools/vibebot_cli.py --demo
-
-  # interactive (reads commands on stdin)
-  python3 tools/vibebot_cli.py --work-dir /tmp/vibe-work
-
-  # command file (one command per line)
-  python3 tools/vibebot_cli.py --commands cmds.txt --work-dir /tmp/vibe-work
-
-  # serve the Telegram bot (token from env; allowlist from env, comma-sep)
-  VIBE_TELEGRAM_TOKEN=... VIBE_BOT_ALLOWED_USERS=123,456 \
-      python3 tools/vibebot_cli.py --serve --work-dir /tmp/vibe-work
 """
-
 from __future__ import annotations
 
 import argparse
@@ -46,24 +31,19 @@ def run_command(gw: gway.Gateway, line: str, user: str = "cli") -> str:
                 if res is not None:
                     sha16 = (res.intake.get("sha256") or "")[:16]
                     reply += (f"\n[job {j.id} COMPLETE: {len(res.findings)} findings; "
-                              f"sha {sha16}…; "
-                              f"/deepdive callers --sha {sha16}]")
+                              f"sha {sha16}…; /deepdive callers --sha {sha16}]")
                 else:
                     reply += f"\n[job {j.id} COMPLETE (no result recorded)]"
     return reply
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--demo", action="store_true",
-                    help="analyze the committed fixture APK and show a sample deepdive")
-    ap.add_argument("--commands", default=None, help="file with one command per line")
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--demo", action="store_true")
+    ap.add_argument("--commands", default=None)
     ap.add_argument("--work-dir", default=os.path.join(ROOT, "vibebot-runs"))
-    ap.add_argument("--fingerprints", default=None,
-                    help="extra reduced fingerprint DB (JSON) for the apkmod engine")
-    ap.add_argument("--serve", action="store_true",
-                    help="run the Telegram transport (needs VIBE_TELEGRAM_TOKEN)")
+    ap.add_argument("--fingerprints", default=None)
+    ap.add_argument("--serve", action="store_true")
     args = ap.parse_args()
 
     engines_map = None
@@ -81,25 +61,18 @@ def main() -> int:
         if not os.path.exists(fixture):
             print(f"demo fixture missing: {fixture}", file=sys.stderr)
             return 3
-        print(run_command(gw, f"/analyze {fixture} --engine apkmod "
-                              f"--fingerprints {extra_fp}"))
-        for line in ("sessions",):
-            print()
-            print(run_command(gw, f"/{line}"))
-        # sample deepdive on the fresh session
+        print(run_command(gw, f"/analyze {fixture} --engine apkmod --fingerprints {extra_fp}"))
+        print("\n" + run_command(gw, "/sessions"))
         keys = gw.sessions.list()
         if keys:
-            k = keys[-1]
-            print()
-            print(run_command(gw, f"/deepdive callers --sha {k}"))
+            print("\n" + run_command(gw, f"/deepdive callers --sha {keys[-1]}"))
         return 0
 
     if args.commands:
         lines = [l.strip() for l in open(args.commands, encoding="utf-8")
                  if l.strip() and not l.startswith("#")]
-        for l in lines:
-            print()
-            print(run_command(gw, l))
+        for line in lines:
+            print("\n" + run_command(gw, line))
         return 0
 
     if args.serve:
@@ -110,17 +83,21 @@ def main() -> int:
             return 3
         allowed_env = os.environ.get("VIBE_BOT_ALLOWED_USERS", "").strip()
         allowed = {s.strip() for s in allowed_env.split(",") if s.strip()} or None
-        t = gway.TelegramTransport(gw, token, allowed)
-        print(f"vibebot serving Telegram (allowlist "
+        from vibebot.telegram_runtime import CategoryTelegramTransport
+        transport = CategoryTelegramTransport(gw, token, allowed)
+        print(f"vibebot serving Telegram category console (allowlist "
               f"{'on: ' + str(sorted(allowed)) if allowed else 'OFF — open; set VIBE_BOT_ALLOWED_USERS'})")
         try:
             while True:
-                t.poll_once(timeout_s=25)
+                try:
+                    transport.poll_once(timeout_s=25)
+                except Exception as exc:
+                    # Keep the long-poll service alive across transient API/runtime failures.
+                    print(f"telegram poll error: {type(exc).__name__}: {exc}", file=sys.stderr)
         except KeyboardInterrupt:
             print("\nstopped")
             return 0
 
-    # interactive
     print("vibebot REPL — type /help (Ctrl-D to quit)")
     try:
         while True:
@@ -128,9 +105,8 @@ def main() -> int:
                 line = input("vibe> ").strip()
             except EOFError:
                 break
-            if not line:
-                continue
-            print(run_command(gw, line))
+            if line:
+                print(run_command(gw, line))
     except KeyboardInterrupt:
         pass
     return 0
