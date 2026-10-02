@@ -1,6 +1,7 @@
 # generated outputs (report cards, dry-run plans, evidence logs)
 apk-runs/
 runs/
+vibebot-runs/
 __pycache__/
 *.pyc
 # opt-in raw companion — never the evidence of record, never committed
