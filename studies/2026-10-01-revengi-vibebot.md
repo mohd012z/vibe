@@ -416,6 +416,35 @@ P25 self-improvement eval.
   the fixture is a minimal native APK (no assets/), so the e2e verifies the
   NEGATIVE path; positive detection is covered by pure synthetic-name-list
   tests (uni-app/Cordova/RN/Flutter).
+- **P15 (native function-pattern classifier)** — DONE (v0.14, `0b7c731`):
+  `native.classify_function` recognizes a native function's LOGIC by its
+  NORMALIZED ARM64 mnemonic SEQUENCE (not by hex bytes) — the durable form of
+  lupoxyz's memorized hex-patch table. Six E3 flags (static disassembly
+  evidence; PROBABLE ceiling): popcount-loop (clz+ror+eor), case-fold-scan
+  (orr #32), bitset-test (tst …,lsl #imm), tbz-bit0-parity (tbz …#0/tbb),
+  fused-madd (madd/mls), string-ref-pair (adrp+add :lo12:). Pure core;
+  `parse_disasm` handles r2 pdj JSON (name + separate opcode field) and pd
+  text (addr + 4 opcode bytes + mnemonic); wired into `/native` +
+  `render_native` behind the RadareLike seam. TDD caught 2 real r2 output
+  bugs (pdj operands in a separate field; pd opcode bytes before the
+  mnemonic). 340 checks (+18). Honest limit: no r2/real .so on host —
+  unverified against a real disassembly. Backlog #11 DONE.
+- **P16 (native-harness validation)** — DONE (v0.15):
+  `tools/vibebot/harness.py` + `/harness <srcdir>` — the top of the evidence
+  chain: prove a native (ARM64) change BEHAVES via a C test harness under
+  qemu-aarch64 (E5 runtime), never "the diff looks right". Build recipe is
+  exercism-arm64 verbatim (NOT hand-rolled): cross-gcc/as, CFLAGS
+  `-g -Wall -Wextra -pedantic -Werror -std=c99 -fPIE`, LDFLAGS
+  `-pie -Wl,--fatal-warnings`, run under `qemu-aarch64 -L /usr/aarch64-
+  linux-gnu` (direct on an aarch64 host). Pure core (`detect_toolchain`
+  injectable, `build_cmd_*`/`run_cmd`/`parse_harness`/`validate_native`) +
+  `HarnessEngine` (job; auto-discovers .c/.s in the srcdir; report JSON;
+  E5 finding on SUCCESS/FAILURE, E0 NOT_OBSERVED otherwise). Verdicts
+  SUCCESS/FAILURE/NOT_OBSERVED — NOT OBSERVED ≠ the change is wrong. 363
+  checks (+23). Spec: `studies/2026-10-02-native-harness-validation-spec.md`.
+  Honest limit: no qemu/cross-compiler on this host — real run NOT OBSERVED
+  (the e2e asserts the degrade); SUCCESS/FAILURE via FakeRunner. Backlog #12
+  DONE. Closes the loop P15→patch→P16.
 - **Kotlin @Metadata name recovery** — STILL DEFERRED (honest disclosure):
   message-level field numbers verified against the authoritative
   `core/metadata/src/metadata.proto` (Function.name=2, Class.function=9,

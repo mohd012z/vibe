@@ -40,6 +40,7 @@ COMMANDS = [
     ("capabilities", "what's installed here: /capabilities"),
     ("native", "Radare native provider: /native <path>"),
     ("xmatch", "cross-version method match: /xmatch <src.apk> <dst.apk>"),
+    ("harness", "native-harness validation (build + run C under qemu): /harness <srcdir>"),
     ("analyze", "analysis job: /analyze <path> [--engine apkmod|dexmapper]"),
     ("dex", "DEX Mapper: /dex <path> (class->method->call + JNI + integrity)"),
     ("smali", "query Dalvik opcode table: /smali <name|0x..|substr>"),

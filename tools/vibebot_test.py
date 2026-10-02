@@ -1056,6 +1056,192 @@ def main() -> int:
               str(n15e["functions"][0]))
 
         # ------------------------------------------------------------------
+        print("== P16: native-harness validation (E5 — prove it BEHAVES) ==")
+        # harness is stdlib-only; import it directly (no androguard needed).
+        from vibebot import harness as H
+
+        # --- pure: toolchain detection with an INJECTABLE `which`
+        def _fake_which(present):
+            def w(name):
+                return "/fake/" + name if name in present else None
+            return w
+        tc_full = H.detect_toolchain(_fake_which(
+            {"aarch64-linux-gnu-gcc", "aarch64-linux-gnu-as", "qemu-aarch64"}))
+        check("detect_toolchain: full x86 host -> needs_qemu, all tools found",
+              tc_full["needs_qemu"] is True
+              and tc_full["cc"] == "/fake/aarch64-linux-gnu-gcc"
+              and tc_full["as"] == "/fake/aarch64-linux-gnu-as"
+              and tc_full["qemu"] == "/fake/qemu-aarch64", str(tc_full))
+
+        # --- pure: the exercism-verbatim command builders
+        check("build_cmd_c = cross-gcc CFLAGS -c (exercism CC_CMD)",
+              H.build_cmd_c("CC", "t.c", "t.o")
+              == ["CC", "-g", "-Wall", "-Wextra", "-pedantic", "-Werror",
+                  "-std=c99", "-fPIE", "-c", "-o", "t.o", "t.c"],
+              str(H.build_cmd_c("CC", "t.c", "t.o")))
+        check("build_cmd_asm = as -o (exercism %.o: %.s)",
+              H.build_cmd_asm("AS", "t.s", "t.o") == ["AS", "-o", "t.o", "t.s"],
+              str(H.build_cmd_asm("AS", "t.s", "t.o")))
+        check("build_cmd_link = CFLAGS+LDFLAGS -o (exercism tests:)",
+              H.build_cmd_link("CC", ["a.o", "b.o"], "tests")
+              == ["CC", "-g", "-Wall", "-Wextra", "-pedantic", "-Werror",
+                  "-std=c99", "-fPIE", "-pie", "-Wl,--fatal-warnings",
+                  "-o", "tests", "a.o", "b.o"],
+              str(H.build_cmd_link("CC", ["a.o", "b.o"], "tests")))
+        check("run_cmd: needs_qemu -> qemu -L sysroot (exercism MAYBE_QEMU)",
+              H.run_cmd({"needs_qemu": True, "qemu": "QEMU"}, "tests")
+              == ["QEMU", "-L", "/usr/aarch64-linux-gnu", "tests"],
+              str(H.run_cmd({"needs_qemu": True, "qemu": "QEMU"}, "tests")))
+        check("run_cmd: aarch64 host -> run the binary directly",
+              H.run_cmd({"needs_qemu": False, "qemu": None}, "tests")
+              == ["tests"], str(H.run_cmd({"needs_qemu": False, "qemu": None}, "tests")))
+
+        # --- pure: parse_harness verdicts
+        check("parse_harness unity 'x passed, y failed' -> SUCCESS",
+              H.parse_harness(" 3 passed, 0 failed, 0 ignored")["verdict"]
+              == "SUCCESS"
+              and H.parse_harness(" 3 passed, 0 failed, 0 ignored")["passed"]
+              == 3, str(H.parse_harness(" 3 passed, 0 failed, 0 ignored")))
+        check("parse_harness any failure -> FAILURE",
+              H.parse_harness("1 passed, 2 failed")["verdict"] == "FAILURE"
+              and H.parse_harness("1 passed, 2 failed")["failed"] == 2,
+              str(H.parse_harness("1 passed, 2 failed")))
+        check("parse_harness no test result -> NOT_OBSERVED",
+              H.parse_harness("compiled fine, no tests")["verdict"]
+              == "NOT_OBSERVED"
+              and H.parse_harness("")["observed"] is False,
+              str(H.parse_harness("compiled fine, no tests")))
+
+        # --- e2e: validate_native over a FakeRunner (no toolchain needed)
+        class _FHR:
+            """Dispatches by argv[0]: as->asm, qemu->run, gcc -c->compile,
+            gcc -pie->link. `run_out` is what the harness binary prints."""
+            def __init__(self, run_out, link_rc=0):
+                self.run_out = run_out
+                self.link_rc = link_rc
+                self.calls = []
+
+            def run(self, argv):
+                self.calls.append(list(argv))
+                a0 = argv[0]
+                if a0.endswith("-as") or a0.endswith("as"):
+                    return (0, "asm ok\n")
+                if a0.endswith("qemu-aarch64"):
+                    return (0, self.run_out)
+                if "-pie" in argv:
+                    return (self.link_rc, "link ok\n" if self.link_rc == 0
+                            else "undefined reference to `foo`\n")
+                return (0, "c ok\n")
+        src_c = os.path.join(td, "h.c")
+        src_s = os.path.join(td, "t.s")
+        with open(src_c, "w") as _f:
+            _f.write("int main(void){return 0;}\n")
+        with open(src_s, "w") as _f:
+            _f.write(".globl solve\nsolve:\n ret\n")
+        tc16 = {"host": "x86_64", "needs_qemu": True,
+                "cc": "/fake/aarch64-linux-gnu-gcc",
+                "as": "/fake/aarch64-linux-gnu-as",
+                "qemu": "/fake/qemu-aarch64"}
+        inputs16 = {"c": [src_c], "asm": [src_s],
+                    "out": os.path.join(td, "hb"), "binary": "tests"}
+        ok16 = H.validate_native(inputs16, _FHR(" 2 passed, 0 failed, 0 ignored"),
+                                 toolchain=tc16)
+        check("e2e SUCCESS: full build+qemu run, 2 passed [E5]",
+              ok16["verdict"] == "SUCCESS" and ok16["passed"] == 2
+              and ok16["observed"] is True
+              and ok16["build"]["ok"] is True
+              and any(c[0].endswith("qemu-aarch64") for c in ok16["commands"]),
+              str(ok16))
+        fail16 = H.validate_native(inputs16,
+                                   _FHR("1 passed, 2 failed"), toolchain=tc16)
+        check("e2e FAILURE: the change misbehaves (a test failed)",
+              fail16["verdict"] == "FAILURE" and fail16["failed"] == 2,
+              str(fail16))
+        bf16 = H.validate_native(inputs16, _FHR("", link_rc=1),
+                                 toolchain=tc16)
+        check("e2e build-fail (link error) -> NOT_OBSERVED (not a crash)",
+              bf16["verdict"] == "NOT_OBSERVED"
+              and bf16["build"]["ok"] is False
+              and bf16["build"]["stage"] == "link", str(bf16["build"]))
+        miss = H.detect_toolchain(_fake_which(set()))
+        mo16 = H.validate_native(inputs16, _FHR("x"), toolchain=miss)
+        check("e2e toolchain-missing -> NOT_OBSERVED (stage=toolchain)",
+              mo16["verdict"] == "NOT_OBSERVED"
+              and mo16["build"]["stage"] == "toolchain"
+              and "cc" in mo16["build"]["error"], str(mo16["build"]))
+        check("NOT_OBSERVED is honest: '!= the change is wrong' note present",
+              "NOT OBSERVED" in mo16["note"] or "NOT" in mo16["note"],
+              mo16["note"])
+
+        # --- engine e2e: HarnessEngine auto-discovers .c/.s, fabricates a
+        # full toolchain + FakeRunner -> SUCCESS, report JSON + E5 finding
+        srcdir = os.path.join(td, "p16src")
+        os.makedirs(srcdir, exist_ok=True)
+        with open(os.path.join(srcdir, "test.c"), "w") as _f:
+            _f.write("int main(void){return 0;}\n")
+        with open(os.path.join(srcdir, "solve.s"), "w") as _f:
+            _f.write(".globl solve\nsolve:\n ret\n")
+        eng16 = H.HarnessEngine(os.path.join(td, "hrep"),
+                                runner=_FHR(" 4 passed, 0 failed, 0 ignored"),
+                                toolchain=tc16)
+        check("engine can_run a source dir",
+              eng16.can_run(srcdir) is True, "")
+        job16 = core.Job("harness", srcdir, "harness", "cli", {})
+        res16 = eng16.run(job16)
+        h16 = res16.structural["harness"]
+        check("engine e2e SUCCESS + E5 runtime finding",
+              h16["verdict"] == "SUCCESS" and h16["passed"] == 4
+              and any(f["evidence"][0]["level"] == "E5"
+                      for f in res16.findings)
+              and "E5 runtime" in res16.report_md,
+              str(res16.report_md))
+        # auto-discovery: the engine found test.c + solve.s with no params
+        inp16 = job16.checkpoints.get("intake", {}).get("inputs", {})
+        check("engine e2e auto-discovered test.c + solve.s from the dir",
+              any("test.c" in x for x in inp16.get("c", []))
+              and any("solve.s" in x for x in inp16.get("asm", [])),
+              str(inp16))
+        check("engine e2e ran 4 stages (2 compile + link + qemu run)",
+              len(h16["commands"]) == 4
+              and h16["commands"][-1][0].endswith("qemu-aarch64"),
+              str(h16["commands"]))
+        check("engine e2e report JSON written to reports dir",
+              os.path.exists(res16.outputs["report"])
+              and "verdict" in open(res16.outputs["report"]).read(), "")
+
+        # --- HONEST DEGRADE on THIS host: real detect_toolchain() (x86_64,
+        # no cross-compiler/qemu) -> the engine still COMPLETES with
+        # NOT_OBSERVED, never a fabricated pass, never a crash.
+        eng_real = H.HarnessEngine(os.path.join(td, "hrep_real"))
+        job_real = core.Job("harness", srcdir, "harness", "cli", {})
+        res_real = eng_real.run(job_real)
+        hr_real = res_real.structural["harness"]
+        real_tc = H.detect_toolchain()
+        if real_tc["needs_qemu"] and not real_tc["qemu"]:
+            check("real-host degrade: no qemu -> NOT_OBSERVED (honest)",
+                  hr_real["verdict"] == "NOT_OBSERVED"
+                  and hr_real["build"]["stage"] == "toolchain",
+                  str(hr_real["build"]))
+            check("real-host degrade: no E5 claim made",
+                  all(f["evidence"][0]["level"] != "E5"
+                      for f in res_real.findings),
+                  str(res_real.findings))
+        else:  # toolchain present: whatever happens, it must not crash
+            check("real-host: ran to a verdict without crashing",
+                  hr_real["verdict"] in ("SUCCESS", "FAILURE", "NOT_OBSERVED"),
+                  str(hr_real["verdict"]))
+
+        # --- gateway dispatch: /harness registered + usage + missing-path
+        if "harness" in gw.engines:
+            r, j = gw.handle("/harness")
+            check("/harness no-arg shows usage", "<srcdir>" in r, r)
+            r, j = gw.handle("/harness /nope/p16/srcdir")
+            check("/harness missing path refused", "not found" in r, r)
+        else:
+            check("harness engine registered in gateway", False,
+                  str(sorted(gw.engines)))
+
+        # ------------------------------------------------------------------
         print("== P11: Falsifier — deterministic mechanical refutation (pure) ==")
         from vibebot import falsify as F
         from vibebot import claims as C

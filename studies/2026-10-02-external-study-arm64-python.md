@@ -97,8 +97,11 @@ archive.org is back up.
     string-ref-pair) by normalized sequence (not hex), E3, wired into
     `/native` + `render_native`, FakeRunner e2e. Real r2 + a real .so is the
     ground-truth to add.
-12. **qemu-aarch64 harness note** for P17/P21 validation spec (a native
-    change is proven by C tests under qemu, not by diff appearance).
+12. ~~**qemu-aarch64 harness note** for P17/P21 validation spec (a native
+    change is proven by C tests under qemu, not by diff appearance).~~ —
+    **DONE (P16, v0.15)**: operationalized as `harness.py` (`/harness <dir>`)
+    + spec `studies/2026-10-02-native-harness-validation-spec.md`.
+    FakeRunner-e2e; real-host honest degrade (no qemu/cross-compiler here).
 13. ~~xmatch.py (in-flight v0.11)~~ — **DONE → P12** (see §E).
 
 ## E. xmatch.py (v0.11) — RESOLVED

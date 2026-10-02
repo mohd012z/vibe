@@ -53,6 +53,7 @@ HELP = """vibebot commands
   /dex <path>            DEX Mapper job: class->method->call map + JNI + integrity
   /xmatch <src.apk> <dst.apk>  cross-version method match (job) — carry validated findings
   /native <path>         Radare native provider: ELF fns/imports/exports + JNI bridge
+  /harness <srcdir>      native-harness validation: build + run C test under qemu (E5)
   /smali <name|0x..|substr>   query the Dalvik opcode table
   /base <value> <from> <to>   convert between number bases (2..36)
   /hash <text>           sha256 of a text string
@@ -95,6 +96,13 @@ class Gateway:
     def _default_engines(self) -> dict[str, core.Engine]:
         m = {"apkmod": engines.ApkModEngine(os.path.join(self.work_dir, "reports")),
              "mock": engines.MockEngine()}
+        # stdlib-only engines (no androguard needed): native-harness validation
+        try:
+            from . import harness
+            m["harness"] = harness.HarnessEngine(
+                os.path.join(self.work_dir, "reports"))
+        except Exception:
+            pass
         # graph + dexmapper need androguard; register only if present so a
         # stdlib-only env still works (mock + apkmod-intake).
         try:
@@ -126,7 +134,7 @@ class Gateway:
                 "/apk", "/map", "/find", "/xref", "/callers", "/callees",
                 "/claims", "/falsify", "/why", "/plan", "/capabilities",
                 "/analyze", "/dex", "/xmatch",
-                "/native",
+                "/native", "/harness",
                 "/smali", "/base", "/hash", "/dexcheck", "/dexrepair", "/status",
                 "/jobs", "/sessions", "/deepdive", "/investigate", "/report",
                 "/cancel", "/help", "/start"):
@@ -197,6 +205,9 @@ class Gateway:
 
         if cmd == "/native":
             return self._native(parts[1:], user)
+
+        if cmd == "/harness":
+            return self._harness(parts[1:], user)
 
         if cmd == "/status":
             jid = parts[1] if len(parts) > 1 else self._last_job_id()
@@ -347,6 +358,26 @@ class Gateway:
             return f"error: {e}", None
         return (f"ACK {job.id}  engine=native\n"
                 f"  queued — /status {job.id}  /cancel {job.id}"), job
+
+    def _harness(self, parts: list[str], user: str) -> tuple[str, core.Job | None]:
+        if not parts:
+            return ("/harness <srcdir>   (native-harness validation: build the "
+                    "C/asm test harness for an ARM64 change + run it under "
+                    "qemu-aarch64 — proves the change BEHAVES, E5)"), None
+        if "harness" not in self.engines:
+            return ("error: harness engine not registered (stdlib-only; "
+                    "should always be available)"), None
+        path = os.path.abspath(os.path.expanduser(parts[0]))
+        if not os.path.exists(path):
+            return f"error: source not found (refused: {os.path.basename(path)})", None
+        try:
+            job = self.jobs.submit("harness", path, user, "harness",
+                                   self._budget_params(parts))
+        except (KeyError, FileNotFoundError, RuntimeError) as e:
+            return f"error: {e}", None
+        return (f"ACK {job.id}  engine=harness\n"
+                f"  queued (build + qemu run) — /status {job.id}  "
+                f"/cancel {job.id}"), job
 
     def _apk(self, parts: list[str], user: str) -> tuple[str, core.Job | None]:
         if not parts:
