@@ -103,36 +103,37 @@ jobs:
           profile: pixel_6
           disable-animations: true
           script: |
-            set -euxo pipefail
-            cd android-app
-            gradle --no-daemon --console=plain :app:assembleDebug
-            APK=app/build/outputs/apk/debug/app-debug.apk
-            adb install -r "$APK"
-            adb shell cmd package resolve-activity --brief com.vibe.app | tee /tmp/vibe-resolved.txt
-            adb logcat -c
-            adb shell am start -W -n com.vibe.app/.MainActivity | tee /tmp/vibe-launch.txt
-            sleep 2
-            adb shell pidof -s com.vibe.app | tee /tmp/vibe-pid.txt
-            adb shell dumpsys activity activities | grep -F 'com.vibe.app/.MainActivity'
-            adb shell am start-foreground-service -n com.vibe.app/.LiveTestService -a com.vibe.app.START
-            sleep 2
-            adb shell dumpsys activity services com.vibe.app | tee /tmp/vibe-services.txt
-            grep -F 'LiveTestService' /tmp/vibe-services.txt
-            adb shell am startservice -n com.vibe.app/.LiveTestService -a com.vibe.app.MARK_ISSUE
-            adb shell am startservice -n com.vibe.app/.LiveTestService -a com.vibe.app.SNAPSHOT
-            adb shell am startservice -n com.vibe.app/.LiveTestService -a com.vibe.app.PAUSE_RESUME
-            adb shell am startservice -n com.vibe.app/.LiveTestService -a com.vibe.app.STOP
-            sleep 1
-            adb shell dumpsys activity services com.vibe.app | tee /tmp/vibe-services-after-stop.txt
-            if grep -Fq 'LiveTestService' /tmp/vibe-services-after-stop.txt; then
-              echo 'LiveTestService still active after STOP' >&2
-              exit 1
-            fi
-            adb logcat -b crash -d | tee /tmp/vibe-crash.txt
-            if grep -E 'FATAL EXCEPTION|Process: com\.vibe\.app' /tmp/vibe-crash.txt; then
-              echo 'Vibe crash detected' >&2
-              exit 1
-            fi
+            bash -euo pipefail -c '
+              cd android-app
+              gradle --no-daemon --console=plain :app:assembleDebug
+              APK=app/build/outputs/apk/debug/app-debug.apk
+              adb install -r "$APK"
+              adb shell cmd package resolve-activity --brief com.vibe.app | tee /tmp/vibe-resolved.txt
+              adb logcat -c
+              adb shell am start -W -n com.vibe.app/.MainActivity | tee /tmp/vibe-launch.txt
+              sleep 2
+              adb shell pidof -s com.vibe.app | tee /tmp/vibe-pid.txt
+              adb shell dumpsys activity activities | grep -F "com.vibe.app/.MainActivity"
+              adb shell am start-foreground-service -n com.vibe.app/.LiveTestService -a com.vibe.app.START
+              sleep 2
+              adb shell dumpsys activity services com.vibe.app | tee /tmp/vibe-services.txt
+              grep -F "LiveTestService" /tmp/vibe-services.txt
+              adb shell am startservice -n com.vibe.app/.LiveTestService -a com.vibe.app.MARK_ISSUE
+              adb shell am startservice -n com.vibe.app/.LiveTestService -a com.vibe.app.SNAPSHOT
+              adb shell am startservice -n com.vibe.app/.LiveTestService -a com.vibe.app.PAUSE_RESUME
+              adb shell am startservice -n com.vibe.app/.LiveTestService -a com.vibe.app.STOP
+              sleep 1
+              adb shell dumpsys activity services com.vibe.app | tee /tmp/vibe-services-after-stop.txt
+              if grep -Fq "LiveTestService" /tmp/vibe-services-after-stop.txt; then
+                echo "LiveTestService still active after STOP" >&2
+                exit 1
+              fi
+              adb logcat -b crash -d | tee /tmp/vibe-crash.txt
+              if grep -E "FATAL EXCEPTION|Process: com\\.vibe\\.app" /tmp/vibe-crash.txt; then
+                echo "Vibe crash detected" >&2
+                exit 1
+              fi
+            '
       - name: Upload emulator smoke evidence
         if: always()
         uses: actions/upload-artifact@v4
