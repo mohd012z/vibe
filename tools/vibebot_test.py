@@ -3226,6 +3226,75 @@ def main() -> int:
                       "fires exactly once",
                       len(_pop) == 1 and _pop[0] == "entry0", str(_pop))
 
+    # ===== v0.29: usability batch (freeze fix + xmatch misroute + --session) =====
+        _td29 = tempfile.mkdtemp(prefix="vibebot-29-")
+        # -- xmatch.can_run: never auto-selected (the .apk.bak misroute) --
+        _bak = os.path.join(_td29, "MPatcher_5.3.apk.bak")
+        shutil.copy(FIXTURE, _bak)
+        _gw29 = gateway.Gateway(_td29)
+        _xm = _gw29.jobs.engines.get("xmatch")
+        check("v0.29: xmatch.can_run is never True (no auto-route)",
+              _xm is not None and _xm.can_run(_bak) is False
+              and _xm.can_run(FIXTURE) is False,
+              f"can_run(bak)={_xm.can_run(_bak) if _xm else 'no-xm'}")
+        # a .apk.bak falls back to apkmod (the general APK handler)
+        _r29, _j29 = _gw29.handle(f"/analyze {_bak}", user="t")
+        check("v0.29: .apk.bak auto-routes to apkmod (not xmatch)",
+              _j29 is not None and _j29.engine == "apkmod",
+              f"engine={getattr(_j29, 'engine', _r29)}")
+        for _j in _gw29.process_pending():
+            pass
+
+        # -- background worker: ack is instant, poller stays live mid-job --
+        _td29w = tempfile.mkdtemp(prefix="vibebot-29w-")
+        _gw29w = gateway.Gateway(_td29w)
+        _tr = gateway.TelegramTransport(_gw29w, token="0:fake", worker=True)
+        check("v0.29: worker defaults OFF (back-compat)",
+              gateway.TelegramTransport(_gw29w, "0:fake").worker is False)
+        _t0 = time.time()
+        _r29b, _j29b = _gw29w.handle(f"/apk {FIXTURE}", user="t")
+        _ack29 = time.time() - _t0
+        check("v0.29: ACK returned to poller immediately (<2s, not 51s)",
+              _ack29 < 2.0 and _j29b is not None, f"ack={_ack29:.2f}s")
+        check("v0.29: worker thread spawned in production mode",
+              _tr._wq_thread is not None and _tr._wq_thread.is_alive())
+        # the poll thread can still service a command while the job runs
+        _mid, _ = _gw29w.handle("/health", user="t")
+        check("v0.29: /health answered WHILE the graph job is running",
+              bool(_mid), "poller was blocked (the old freeze)")
+        # wait for the worker to drain (bounded)
+        _deadline = time.time() + 60
+        _done = False
+        while time.time() < _deadline:
+            for _j in _gw29w.jobs.all():
+                if _j["id"] == _j29b.id and _j["state"].upper() == "COMPLETED":
+                    _done = True
+            if _done:
+                break
+            time.sleep(0.2)
+        check("v0.29: worker drains the queue to COMPLETED (off the poll thread)",
+              _done, f"state={[j['state'] for j in _gw29w.jobs.all()]}")
+
+        # -- /find --session VIBE-XXXX (resolve by the short job id) --
+        _r29c, _j29c = _gw29.handle(f"/apk {FIXTURE}", user="t")
+        for _j in _gw29.process_pending():
+            pass
+        _sid = _j29c.id
+        _f1, _ = _gw29.handle(f"/find demo --session {_sid}", user="t")
+        check("v0.29: /find --session <job id> resolves to a real search",
+              "TARGETS for" in _f1 or "no match" in _f1, _f1[:80])
+        _f2, _ = _gw29.handle("/find demo --session VIBE-ZZZZ", user="t")
+        check("v0.29: /find --session unknown id -> honest 'no such job'",
+              "no such job" in _f2, _f2[:80])
+        _f3, _ = _gw29.handle("/find demo --session notaid", user="t")
+        check("v0.29: /find --session non-VIBE id -> usage hint",
+              "job id like VIBE-" in _f3, _f3[:80])
+        # --sha still works (back-compat)
+        _sha = _gw29.sessions.key(_j29c.result.intake["sha256"])
+        _f4, _ = _gw29.handle(f"/find demo --sha {_sha}", user="t")
+        check("v0.29: /find --sha still works (back-compat)",
+              "TARGETS for" in _f4 or "no match" in _f4, _f4[:80])
+
     finally:
         shutil.rmtree(td, ignore_errors=True)
 

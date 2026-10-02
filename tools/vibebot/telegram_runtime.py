@@ -14,8 +14,8 @@ from .gateway import TelegramTransport
 
 
 class CategoryTelegramTransport(TelegramTransport):
-    def __init__(self, gateway, token: str, allowed_user_ids=None):
-        super().__init__(gateway, token, allowed_user_ids)
+    def __init__(self, gateway, token: str, allowed_user_ids=None, worker: bool = False):
+        super().__init__(gateway, token, allowed_user_ids, worker=worker)
         self.offset = 0
         self.started_at = time.time()
         self.last_rx = None

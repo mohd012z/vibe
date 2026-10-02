@@ -28,6 +28,7 @@ import os
 import re
 import sys
 import time
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -537,27 +538,58 @@ class Gateway:
                     f"(engines: {', '.join(sess.get('engines', []) or ['?'])}) — run /apk <path>"), None
         return graphutil.render_map(graph, sha), None
 
+    def _session_ref(self, parts: list[str]):
+        """Resolve --session VIBE-XXXX / --sha <hex> to a sha. Returns
+        (sha, error, consumed_flag). Neither given -> (None, None, False)."""
+        jobref = self._arg(parts, "--session")
+        sha = self._arg(parts, "--sha")
+        if jobref:
+            ref = jobref.strip().upper()
+            if not ref.startswith("VIBE-"):
+                return None, "--session expects a job id like VIBE-EFCB", True
+            job = self.jobs.get(ref)
+            if job is None:
+                return None, f"no such job {ref} — check /jobs", True
+            if job.result is None:
+                # still queued/running (or failed) — tell the user honestly
+                if job.state in ("queued", "running"):
+                    return (None,
+                            f"{ref} is still {job.state} — wait for its "
+                            "COMPLETE message, then /find <text> --session "
+                            f"{ref}", True)
+                return (None, f"{ref} did not produce a session "
+                        f"(state={job.state})", True)
+            return job.result.intake.get("sha256"), None, True
+        if sha:
+            return sha, None, True
+        return None, None, False
+
     def _find(self, parts: list[str]) -> tuple[str, None]:
         from . import graphutil
-        sha = self._arg(parts, "--sha")
-        # query = every token that isn't a flag or the --sha value
+        # query = every token that isn't a flag or a flag's value
         skip = set()
         for i, p in enumerate(parts):
-            if p == "--sha":
+            if p in ("--sha", "--session"):
                 skip.update({i, i + 1})
             elif p.startswith("--"):
                 skip.add(i)
         query = " ".join(p for i, p in enumerate(parts) if i not in skip).strip()
         if not query:
-            return ("/find <text> --sha <sha256[:16]>   (TargetFinder over the Vibe IR: "
-                    "strings, resources, classes, methods, components — run /apk <path> first)"), None
-        if not sha:
+            return ("/find <text> [--session VIBE-XXXX | --sha <sha256[:16]>]   "
+                    "(TargetFinder over the Vibe IR: strings, resources, classes, "
+                    "methods, components — run /apk <path> first)"), None
+        sha, sess_err, have_ref = self._session_ref(parts)
+        if sess_err:
+            return sess_err, None
+        if have_ref and not sha:
+            return "that job has no session sha yet — run /apk <path> first", None
+        if not have_ref:
             last = self._last_job_sha()
             hint = last[:16] if last else "<sha from /apk>"
-            return ("no --sha: run /apk <path> first, then /find <text> --sha "
-                    f"{hint}"), None
+            return ("no --sha / --session: run /apk <path> first, then "
+                    f"/find <text> --session <VIBE-XXXX>  (or --sha {hint})"), None
         if not SHA_RE.match(sha.lower()):
-            return "/find <text> --sha <sha256[:16]> (hex, 8..64 chars)", None
+            return "/find <text> --session VIBE-XXXX | --sha <sha256[:16]>  (hex, 8..64)", None
         sess = self.sessions.load(sha)
         if not sess:
             return f"no session for {sha[:8]}… — run /apk <path> first", None
@@ -903,12 +935,56 @@ class TelegramTransport:
     """
 
     def __init__(self, gateway: Gateway, token: str,
-                 allowed_user_ids: set[str] | None = None):
+                 allowed_user_ids: set[str] | None = None,
+                 worker: bool = False):
         self.gw = gateway
         self.token = token
         self.allowed = allowed_user_ids
         self.api = f"https://api.telegram.org/bot{token}"
         self.inbound_dir = os.path.join(gateway.work_dir, "inbound")
+        # worker=True (production --serve): jobs run in a background thread so
+        # a heavy analysis (e.g. a 51s graph build) never blocks the poll loop.
+        # worker=False (CLI/tests, back-compat): the old synchronous behavior.
+        self.worker = worker
+        self._wq_thread: threading.Thread | None = None
+        if worker:
+            # production: start the worker immediately so it's ready to drain
+            # the moment a job is submitted (lazy start is a source of races)
+            self._ensure_worker()
+
+    def _ensure_worker(self) -> None:
+        """Start the single background job worker if not already running."""
+        if self._wq_thread is None or not self._wq_thread.is_alive():
+            t = threading.Thread(target=self._worker_loop,
+                                 name="vibe-job-worker", daemon=True)
+            t.start()
+            self._wq_thread = t
+
+    def _has_queued(self) -> bool:
+        return any(j.get("state") in (core.Job.QUEUED, core.Job.RUNNING)
+                   for j in self.gw.jobs.all())
+
+    def _worker_loop(self) -> None:
+        """Background worker: drain the job queue and send each completion.
+
+        Runs OFF the poll thread — this is the freeze fix. Only one worker
+        thread exists, so process_pending() (which drains the whole queue,
+        sequential) is never called concurrently. The poll thread only ever
+        SUBMITS jobs (GIL-atomic list append), so no lock is needed.
+        """
+        while True:
+            if self._has_queued():
+                ran = self.gw.process_pending()
+                for j in ran:
+                    chat = getattr(j, "_tg_chat", None)
+                    if chat is None:
+                        continue  # not a telegram-originated job
+                    try:
+                        self._finalize(chat, j)
+                    except Exception:  # noqa: BLE001 — never kill the worker
+                        pass
+            else:
+                time.sleep(0.3)
 
     def _call(self, method: str, payload: dict) -> dict:
         import json as _json
@@ -1035,6 +1111,14 @@ class TelegramTransport:
         return n
 
     def _work_and_finalize(self, chat_id: int, job: core.Job) -> None:
+        job._tg_chat = chat_id  # worker replies the completion to this chat
+        if self.worker:
+            # Background path (production): the poll loop returns immediately;
+            # the single worker thread drains the queue and sends each
+            # completion. A heavy job can no longer freeze the bot.
+            self._ensure_worker()
+            return
+        # Synchronous path (CLI/tests, back-compat): run here as before.
         for j in self.gw.process_pending():
             if j is job:
                 self._finalize(chat_id, j)
