@@ -445,6 +445,15 @@ P25 self-improvement eval.
   Honest limit: no qemu/cross-compiler on this host — real run NOT OBSERVED
   (the e2e asserts the degrade); SUCCESS/FAILURE via FakeRunner. Backlog #12
   DONE. Closes the loop P15→patch→P16.
+- **P18 (v0.19) — real-radare2 6.x verification** — DONE (feature branch):
+  first real r2 on the host (6.2.2 user-space). RadareRunner was never
+  exercised beyond FakeRunner and was broken on r2 6.x (argv order, ANSI,
+  iI→iij, pdj name→disasm, aXR→axtj, @hex vs decimal, PLT xref routing).
+  All fixed dual-mode (r2-6 JSON + legacy text) and verified e2e on a real
+  gcc .so: functions/exports(deduped)/imports/xrefs/`aa; pdj` all correct.
+  x86_64 only — ARM64 pattern e2e still NOT OBSERVED (no cross-gcc). 457
+  checks (451 CI shape); apkmod + redteam green. See
+  studies/2026-10-02-p18-real-radare2-6.md. Merge pending Fatah.
 - **P17 (Kotlin @Metadata name recovery)** — DONE (v0.16, backlog #2):
   `tools/vibebot/kotlinmeta.py` + `/kmeta <classes.dex|app.apk> [class_filter]`.
   R8 renames every DEX name, but a Kotlin class's `@kotlin.Metadata` annotation
