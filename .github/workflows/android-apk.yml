@@ -33,25 +33,19 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Diagnose Gradle environment
+      - name: Report build environment
         working-directory: android-app
-        timeout-minutes: 2
         run: |
           set -euxo pipefail
           java -version
           gradle --version
-          gradle --no-daemon --console=plain --stacktrace tasks >/tmp/vibe-gradle-tasks.log 2>&1 || {
-            cat /tmp/vibe-gradle-tasks.log
-            exit 1
-          }
-          tail -n 80 /tmp/vibe-gradle-tasks.log
 
       - name: Build debug APK
         working-directory: android-app
-        timeout-minutes: 8
+        timeout-minutes: 10
         run: |
           set -o pipefail
-          timeout --signal=TERM --kill-after=30s 7m \
+          timeout --signal=TERM --kill-after=30s 9m \
             gradle --no-daemon --console=plain --stacktrace --info :app:assembleDebug \
             2>&1 | tee /tmp/vibe-gradle-build.log
 
@@ -60,9 +54,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: vibe-gradle-diagnostics
-          path: |
-            /tmp/vibe-gradle-tasks.log
-            /tmp/vibe-gradle-build.log
+          path: /tmp/vibe-gradle-build.log
           if-no-files-found: ignore
           retention-days: 7
 
