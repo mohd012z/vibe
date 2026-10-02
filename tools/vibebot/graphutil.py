@@ -1,0 +1,841 @@
+"""vibebot.graphutil — Vibe IR: a normalized, stable-ID entity graph over an
+APK/DEX. This is Phase 2 of the design: every entity (artifact, component,
+class, method, field, string, resource, native method) gets a deterministic
+ID (A1, C3, M17, S8, R4, N2, …) assigned in sorted order, so the SAME
+artifact (same SHA-256) always yields the SAME graph. That makes entity IDs
+addressable — /map, /find (P3b), /xref and buttons can reference "M27" and
+mean the same method on every re-run and on every client.
+
+Built on androguard (correct-by-construction for DEX); manifest/resources
+come from androguard's binary manifest parser. Read-only: parses, never
+mutates the artifact.
+
+Node ID scheme (stable per SHA-256):
+  A{n} artifact          K{n} manifest component (activity/service/…)
+  C{n} class             M{n} method
+  F{n} field             S{n} distinct string value
+  R{n} resource          N{n} native method (JNI)
+
+Edges are NOT precomputed here (that's P3b's /xref work); the raw call list
+is carried through so a renderer can compute cross-layer paths on demand.
+"""
+
+from __future__ import annotations
+
+import re
+
+from . import core
+from . import dexmapper
+
+GRAPH_SCHEMA = 1
+
+
+def _dex_strings(d) -> dict:
+    """S-node corpus + const-string refs for one DEX.
+
+    Returns {value: {"count": int, "refs": [{class, method}], "table": [idx...]}}.
+    The KEY set is the full DEX string table (every distinct value the
+    bytecode can hold — type descriptors, method names, literals), which is
+    the searchable corpus for /find (Phase 6 "where does this text come
+    from"). ``refs`` records the const-string instructions that load it
+    (the "hot" subset — where it is actually materialized into a register).
+    ``count`` is the number of const-string refs (honest: a lower bound on
+    total references, since type/method descriptors are referenced by
+    non-const instructions we do not enumerate here).
+    """
+    table = list(d.get_strings())
+    out: dict[str, dict] = {}
+    for idx, val in enumerate(table):
+        out[str(val)] = out.setdefault(str(val), {"count": 0, "refs": [], "table": []})
+        out[str(val)]["table"].append(idx)
+    classes = list(d.get_classes())
+    for ci, c in enumerate(classes):
+        cn = c.get_name().strip("L;").replace("/", ".")
+        methods = list(c.get_methods())
+        for mi, m in enumerate(methods):
+            try:
+                insns = m.get_instructions()
+            except Exception:
+                continue
+            for ins in insns:
+                if ins.get_name() not in ("const-string", "const-string/jumbo"):
+                    continue
+                # get_output() ~ 'vA, "value"' — the quoted tail is the string
+                parts = [p.strip() for p in ins.get_output().split(",")]
+                sval = None
+                for p in reversed(parts):
+                    if p.startswith('"') and p.endswith('"') and len(p) >= 2:
+                        sval = p[1:-1]
+                        break
+                if sval is None:
+                    continue
+                e = out.setdefault(sval, {"count": 0, "refs": [], "table": []})
+                e["count"] += 1
+                e["refs"].append({"class": cn, "method": m.get_name()})
+    return out
+
+
+def build_graph(artifact: str) -> dict:
+    """Build the full Vibe IR entity graph for an APK (or bare DEX).
+
+    Returns {"schema": GRAPH_SCHEMA, "counts": {...}, "nodes": {type: [...]},
+             "calls": [...]} — every node dict carries a stable "id".
+    """
+    dexes = dexmapper._dex_bytes(artifact)
+    # per-DEX byte-level integrity (E2) — feeds the claim builder
+    from . import dexutil
+    dex_integrity = []
+    for dname, db in dexes:
+        try:
+            rep = dexutil.check_header(db)
+        except Exception as e:
+            rep = {"valid": False, "dex": dname,
+                   "error": f"header check failed: {e}", "details": []}
+        rep.setdefault("dex", dname)
+        dex_integrity.append({k: rep.get(k) for k in
+                              ("dex", "valid", "magic_ok", "version_ok",
+                               "size_ok", "checksum_ok", "sha1_ok")})
+    # ---- manifest / components (apk only) -----------------------------
+    components: list[dict] = []
+    package = None
+    version_name = None
+    version_code = None
+    min_sdk = target_sdk = None
+    perms: list[str] = []
+    res_pkg: list[str] = []
+    res_strings: list[str] = []
+    if artifact.lower().endswith((".apk", ".apkx")):
+        try:
+            from androguard.core.apk import APK
+            a = APK(artifact)
+            package = a.get_package()
+            version_name = a.get_androidversion_name()
+            version_code = a.get_androidversion_code()
+            min_sdk = a.get_min_sdk_version()
+            target_sdk = a.get_target_sdk_version()
+            perms = sorted(a.get_permissions() or [])
+            comps = (
+                [("activity", x) for x in a.get_activities()]
+                + [("service", x) for x in a.get_services()]
+                + [("receiver", x) for x in a.get_receivers()]
+                + [("provider", x) for x in a.get_providers()])
+            for kind, name in sorted(comps, key=lambda t: (t[0], t[1])):
+                components.append({"kind": kind, "name": name})
+            # resources: string resources (best-effort)
+            try:
+                res = a.get_android_resources()
+                pkgs = list(res.get_res_packages().keys())
+                res_pkg = [str(p) for p in pkgs]
+                for p in pkgs:
+                    try:
+                        res_strings = sorted(res.get_res_strings(p) or [])
+                    except Exception:
+                        res_strings = []
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    # ---- DEX layer ----------------------------------------------------
+    classes: list[dict] = []
+    methods: list[dict] = []
+    fields: list[dict] = []
+    natives: list[dict] = []
+    calls: list[dict] = []
+    str_map: dict[str, dict] = {}
+    dex_names = [n for n, _ in dexes]
+
+    for dname, db in dexes:
+        from androguard.core.dex import DEX
+        d = DEX(db)
+        cnames = sorted(c.get_name().strip("L;").replace("/", ".")
+                        for c in d.get_classes())
+        # string layer per dex, merged (value -> combined refs)
+        ds = _dex_strings(d)
+        for v, e in ds.items():
+            tgt = str_map.setdefault(v, {"count": 0, "refs": [], "table": []})
+            tgt["count"] += e["count"]
+            tgt["refs"].extend(e["refs"])
+            tgt["table"].extend(e["table"])
+        for c in d.get_classes():
+            cn = c.get_name().strip("L;").replace("/", ".")
+            for m in c.get_methods():
+                acc = m.get_access_flags_string() or ""
+                if "native" in acc:
+                    natives.append({"class": cn, "method": m.get_name()})
+            for f in c.get_fields():
+                try:
+                    # androguard 4.x: EncodedField has get_descriptor()
+                    # ("Lcom/x/Y;" / "I" / "[B"), NOT get_type() — the old
+                    # call raised AttributeError, so every field type was
+                    # silently "" (field layer was type-blind).
+                    ftype = (f.get_descriptor() or "").strip("L;").replace("/", ".")
+                    fields.append({
+                        "class": cn,
+                        "name": f.get_name(),
+                        "type": ftype,
+                    })
+                except Exception:
+                    pass
+
+    # dexmapper gives us the full call list + per-class method lists
+    for dname, db in dexes:
+        m = dexmapper.map_dex(db, dname, package or "")
+        for cn, crec in m["classes"].items():
+            classes.append({"dex": dname, "name": cn})
+            for meth in crec["methods"]:
+                methods.append({"dex": dname, "class": cn,
+                                "name": meth["name"], "native": meth["native"]})
+        calls.extend(m["calls"])
+
+    # P13: obfuscated-enum scan (R8-shrunken signature). A first-class node
+    # type so shrunken enums are discoverable / cross-referenceable like any
+    # other entity. Pure detection over compact records; androguard glue
+    # degrades to an empty list (honest "none"), never an exception.
+    enums: list[dict] = []
+    try:
+        from . import enumscan
+        for e in enumscan.scan_enums(enumscan.enum_records(artifact)):
+            enums.append(e)
+    except Exception:
+        enums = []
+
+    # P14: hybrid / JS-layer detection — WHERE is the app's real logic?
+    # (uni-app / Cordova / RN carry it in assets/, not the DEX.) Self-contained
+    # zip + DEX-bridge scan; degrades to an honest NOT OBSERVED, never throws.
+    try:
+        from . import hybridscan
+        g_hybrid = hybridscan.scan_artifact(artifact)
+    except Exception:
+        g_hybrid = {"error": "hybrid scan unavailable (NOT OBSERVED)"}
+
+    # ---- assign stable IDs (sorted, deterministic) --------------------
+    def _assign(nodes: list[dict], prefix: str) -> None:
+        for i, n in enumerate(nodes, 1):
+            n["id"] = f"{prefix}{i}"
+
+    _assign(components, "K")
+    _assign(sorted(classes, key=lambda x: (x["dex"], x["name"])), "C")
+    _assign(sorted(methods, key=lambda x: (x["dex"], x["class"], x["name"])), "M")
+    _assign(sorted(fields, key=lambda x: (x["class"], x["name"])), "F")
+    _assign(sorted(natives, key=lambda x: (x["class"], x["method"])), "N")
+    _assign(sorted(enums, key=lambda x: x["class"]), "E")
+    strings = []
+    for i, v in enumerate(sorted(str_map), 1):
+        e = str_map[v]
+        strings.append({"id": f"S{i}", "value": v, "count": e["count"],
+                        "refs": e["refs"]})
+    resources = []
+    for i, s in enumerate(res_strings, 1):
+        resources.append({"id": f"R{i}", "value": s, "source": "res-string"})
+    resources.append({"id": "R0", "value": "AndroidManifest.xml",
+                      "source": "manifest"})
+
+    counts = {
+        "artifact": 1,
+        "component": len(components),
+        "class": len(classes),
+        "method": len(methods),
+        "field": len(fields),
+        "string": len(strings),
+        "resource": len(resources),
+        "native": len(natives),
+        "call": len(calls),
+        "enum": len(enums),
+    }
+    return {
+        "schema": GRAPH_SCHEMA,
+        "package": package,
+        "version_name": version_name,
+        "version_code": version_code,
+        "min_sdk": min_sdk,
+        "target_sdk": target_sdk,
+        "permissions": perms,
+        "dex_files": dex_names,
+        "library_files": [],  # populated by the engine from intake
+        "certificates": [],   # populated by the engine
+        "counts": counts,
+        "dex_integrity": dex_integrity,
+        "hybrid": g_hybrid,
+        "nodes": {
+            "artifact": [{"id": "A1", "path": None}],  # path set by caller
+            "component": components,
+            "class": classes,
+            "method": methods,
+            "field": fields,
+            "string": strings,
+            "resource": resources,
+            "native": natives,
+            "enum": enums,
+        },
+        "calls": calls,
+    }
+
+
+class ApkGraphEngine(core.Engine):
+    """Engine: APK -> Vibe IR entity graph (Phase 1 overview + Phase 2 graph).
+
+    This is the 'fast inventory before deep analysis' step: it produces the
+    APK OVERVIEW card AND stores the stable-ID graph in the session so
+    /map, /find (P4) and /xref (P5) can traverse it without rescanning.
+
+    Correct-by-construction on DEX (androguard decoder); manifest/resources
+    via androguard's binary manifest. Read-only.
+    """
+
+    spec = core.EngineSpec(
+        name="graph",
+        description="Vibe IR: APK overview + normalized entity graph "
+                    "(stable A/C/M/F/S/R/N/K IDs, reproducible per SHA)",
+        formats=("apk", "apkx", "dex"),
+    )
+
+    def __init__(self, report_dir: str):
+        self.report_dir = report_dir
+
+    def can_run(self, artifact: str) -> bool:
+        return artifact.lower().endswith((".apk", ".apkx", ".dex"))
+
+    def run(self, job: core.Job) -> core.EngineResult:
+        import os
+        import json as _json
+
+        job.progress("intake", 10, "SHA-256 + container inventory")
+        sha = core._sha256(job.artifact)
+        job.checkpoint("intake", {"sha256": sha})
+
+        job.progress("graph", 45, "building Vibe IR (manifest + DEX + strings)")
+        g = build_graph(job.artifact)
+        g["nodes"]["artifact"][0]["path"] = os.path.basename(job.artifact)
+
+        # native libs + certificates (androguard)
+        try:
+            from androguard.core.apk import APK
+            import hashlib
+            a = APK(job.artifact)
+            g["library_files"] = sorted(a.get_libraries() or [])
+            certs = []
+            for c in a.get_certificates():
+                subj = ""
+                try:
+                    subj = c.subject.human_friendly
+                except Exception:
+                    pass
+                certs.append({"sig": "v1", "subject": subj,
+                              "sha256": c.sha256_fingerprint})
+            g["certificates"] = certs
+        except Exception:
+            pass
+
+        job.checkpoint("graph", g["counts"])
+
+        # write the graph report (the evidence artifact)
+        os.makedirs(self.report_dir, exist_ok=True)
+        ts = core.time.strftime("%Y%m%d-%H%M%S")
+        rep = os.path.join(self.report_dir, f"vibe-graph-{ts}.json")
+        _json.dump(g, open(rep, "w"), indent=2)
+        job.progress("report", 100, "done")
+        job.checkpoint("report", rep)
+
+        # overview findings: a few honest, evidence-anchored structural notes
+        findings = []
+        n_native = g["counts"]["native"]
+        if g["library_files"]:
+            raw = {
+                "sdk": "NATIVE", "title": f"{len(g['library_files'])} native lib(s): "
+                    + ", ".join(os.path.basename(x) for x in g["library_files"][:4]),
+                "classification": "NATIVE",
+                "evidence": [{"level": "E1", "artifact": "lib/",
+                              "detail": "native libraries declared in container"}],
+                "falsification": ["presence != use — a lib may be bundled unused"],
+            }
+            findings.append(core.normalize_finding(raw, self.spec.name, 1))
+        if n_native:
+            raw = {
+                "sdk": "JNI", "title": f"{n_native} native (JNI) method(s)",
+                "classification": "NATIVE",
+                "evidence": [{"level": "E1", "artifact": "classes.dex",
+                              "detail": "native methods present (JNI entry points)"}],
+                "falsification": ["Java-side only; C impl in .so unverified"],
+            }
+            findings.append(core.normalize_finding(raw, self.spec.name, 2))
+
+        # P3: derive the first-class claim set from the graph (+ DEX integrity)
+        from . import claims as _claims
+        from . import falsify as _falsify
+        claims_list = _claims.build_claims(g, g.get("dex_integrity"))
+
+        # P11: FALSIFIER — challenge the claims against an independent reading
+        # of the graph. A contradiction moves the claim to CONFLICTED (or
+        # REJECTED if PROPOSED) via the legal state-machine transition; the
+        # board gains a FALSIFIED section. Deterministic, no AI, no androguard.
+        f_findings = _falsify.falsify_graph(g) + _falsify.falsify_claims(
+            claims_list, g)
+        claims_list = _falsify.apply_falsifications(claims_list, f_findings)
+        claims_board = _claims.render_claims(claims_list, sha)
+        fals_board = _falsify.render_falsifications(f_findings, sha)
+
+        return core.EngineResult(
+            intake={"sha256": sha, "package": g.get("package"),
+                    "dexCount": len(g.get("dex_files", [])),
+                    "classCount": g["counts"]["class"],
+                    "methodCount": g["counts"]["method"]},
+            structural={"graph": g, "overview": render_overview(g, sha),
+                        "claims": claims_list,
+                        "falsifications": f_findings,
+                        "claims_board": claims_board,
+                        "falsification_board": fals_board},
+            findings=findings,
+            report_md=render_overview(g, sha) + "\n\n" + render_map(g, sha),
+            outputs={"report": rep, "overview": render_overview(g, sha),
+                     "map": render_map(g, sha),
+                     "claims": claims_board + "\n\n" + fals_board},
+        )
+
+
+def cross_layer_paths(graph: dict, limit: int = 10) -> list[dict]:
+    """Component → class → method → (JNI target) paths.
+
+    A "cross-layer path" connects a manifest-declared component to the class
+    it maps to, then to the native/JNI calls that class's methods make. This
+    is the Phase-3 "where does this button eventually go" primitive — here
+    restricted to component→class→native (the deepest layer reachable without
+    P3b's full call-chain walk).
+    """
+    paths: list[dict] = []
+    methods = graph["nodes"]["method"]
+    # class -> method ids
+    by_class: dict[str, list[str]] = {}
+    for m in methods:
+        by_class.setdefault(m["class"], []).append(m["id"])
+    # class -> native methods (from the native node list)
+    class_to_native: dict[str, list[str]] = {}
+    for n in graph["nodes"]["native"]:
+        class_to_native.setdefault(n["class"], []).append(n["id"])
+    native_classes = set(class_to_native)  # classes that HAVE native methods
+    for comp in graph["nodes"]["component"]:
+        cname = comp["name"]
+        mids = by_class.get(cname, [])
+        nat = class_to_native.get(cname, [])
+        # only a call to a class that has a native method is a JNI boundary —
+        # a call to e.g. android.app.Activity is a framework call, not JNI.
+        called_nat = set()
+        for c in graph.get("calls", []):
+            if c["caller"] == cname and c["targetClass"] in native_classes:
+                called_nat.add(c["targetClass"])
+        if mids or nat or called_nat:
+            paths.append({
+                "component": comp["id"], "componentKind": comp["kind"],
+                "componentName": cname,
+                "methods": mids,
+                "native": nat,
+                "callsNativeOf": sorted(called_nat),
+            })
+        if len(paths) >= limit:
+            break
+    return paths
+
+
+# ======================================================================
+# P4 — TargetFinder  +  canonical EntityResolver (deterministic service)
+# ======================================================================
+
+def find_targets(graph: dict, query: str, limit: int = 10) -> list[dict]:
+    """Phase 6 /find: locate where a query string comes from, androguard-only.
+
+    Cheapest-capable search over the Vibe IR layers:
+      string (S) → resource (R) → class (C) → method (M) → component (K)
+    Substring, case-insensitive. Every hit returns a TARGET with:
+      layer, entity id(s), location chain (A1 → dex → class → method),
+      references, evidence level + claim state (CodeTransparent #14).
+    """
+    q = (query or "").strip().lower()
+    if not q:
+        return []
+    targets: list[dict] = []
+    nodes = graph["nodes"]
+
+    # method/class name lookup needs a class -> dex map
+    class_dex = {c["name"]: c["dex"] for c in nodes["class"]}
+
+    # --- strings (the Phase-6 signature layer) --------------------------
+    for s in nodes["string"]:
+        if q in s["value"].lower():
+            refs = s.get("refs", [])
+            evid = "E2" if refs else "E1"   # E2 = DEX instruction ref; E1 = in table only
+            state = "SUPPORTED" if refs else "PROPOSED"
+            locs = []
+            for r in refs[:5]:
+                cls = r["class"]
+                locs.append(f"A1 → {class_dex.get(cls, '?')} → {cls} → {r['method']}()")
+            targets.append({
+                "query": query, "layer": "string", "id": s["id"],
+                "value": s["value"], "count": s["count"],
+                "location": locs, "refs": refs,
+                "evidence": evid, "claim": state,
+                "detail": f"string in {len(refs)} method(s) (of {s['count']} refs)",
+            })
+
+    # --- resources -----------------------------------------------------
+    for r in nodes["resource"]:
+        if q in r["value"].lower():
+            targets.append({
+                "query": query, "layer": "resource", "id": r["id"],
+                "value": r["value"], "count": 1,
+                "location": [f"A1 → res → {r['value']}"],
+                "refs": [], "evidence": "E1", "claim": "PROPOSED",
+                "detail": f"resource ({r['source']})",
+            })
+
+    # --- classes -------------------------------------------------------
+    for c in nodes["class"]:
+        if q in c["name"].lower():
+            mids = [m["id"] for m in nodes["method"] if m["class"] == c["name"]]
+            targets.append({
+                "query": query, "layer": "class", "id": c["id"],
+                "value": c["name"], "count": len(mids),
+                "location": [f"A1 → {c['dex']} → {c['name']}"],
+                "refs": [], "evidence": "E2", "claim": "SUPPORTED",
+                "detail": f"class with {len(mids)} method(s): {', '.join(mids[:4])}",
+            })
+
+    # --- methods -------------------------------------------------------
+    for m in nodes["method"]:
+        if q in (m["class"] + "." + m["name"]).lower():
+            targets.append({
+                "query": query, "layer": "method", "id": m["id"],
+                "value": f"{m['class']}.{m['name']}", "count": 1,
+                "location": [f"A1 → {m['dex']} → {m['class']} → {m['name']}()"],
+                "refs": [], "evidence": "E2",
+                "claim": "SUPPORTED",
+                "detail": "native" if m["native"] else "dex method",
+            })
+
+    # --- components (manifest-declared) --------------------------------
+    for k in nodes["component"]:
+        if q in k["name"].lower() or q in k["kind"].lower():
+            targets.append({
+                "query": query, "layer": "component", "id": k["id"],
+                "value": k["name"], "count": 1,
+                "location": [f"A1 → manifest → {k['kind']} {k['name']}"],
+                "refs": [], "evidence": "E1", "claim": "SUPPORTED",
+                "detail": f"manifest {k['kind']}",
+            })
+
+    # --- enums (P13: R8-shrunken / un-shrunken enum signature) ----------
+    for e in nodes.get("enum", []):
+        if q in e["class"].lower():
+            mids = [m["id"] for m in nodes["method"] if m["class"] == e["class"]]
+            targets.append({
+                "query": query, "layer": "enum", "id": e["id"],
+                "value": e["class"], "count": len(e.get("fields", [])),
+                "location": [f"A1 → dex → {e['class']} ({e['verdict']})"],
+                "refs": [],
+                "evidence": e.get("level") or "E2",
+                "claim": "PROPOSED" if e["verdict"] != "enum" else "SUPPORTED",
+                "detail": f"{e['verdict']} enum — {e['reason']} "
+                          f"(methods: {', '.join(mids[:4]) or 'none'})",
+            })
+
+    # rank: strings/resources (Phase-6 answer) first, then structural
+    order = {"string": 0, "resource": 1, "class": 2, "method": 3,
+             "component": 4, "enum": 5}
+    targets.sort(key=lambda t: (order.get(t["layer"], 9), t["id"]))
+    return targets[:limit]
+
+
+def render_find(targets: list[dict], query: str, sha: str) -> str:
+    if not targets:
+        return (f"find '{query}': no match in Vibe IR (strings, resources, "
+                f"classes, methods, components) — sha[:8]={sha[:8]}")
+    lines = [f"TARGETS for '{query}'  (sha[:8]={sha[:8]}  — /find is cheapest-capable)"]
+    for i, t in enumerate(targets, 1):
+        lines.append(f"  T-{i}  [{t['layer']}] {t['id']}  {t['value']}")
+        for loc in t["location"]:
+            lines.append(f"         {loc}")
+        lines.append(f"         evidence {t['evidence']}  claim {t['claim']}  {t['detail']}")
+    return "\n".join(lines)
+
+
+# ---------------- canonical EntityResolver (deterministic) -------------
+
+MAPPING_STATUS = ("EXACT", "STRONG", "PROBABLE", "AMBIGUOUS", "CONFLICT", "UNRESOLVED")
+
+
+def _fp_fingerprints(name: str) -> dict:
+    """Cheap structural fingerprints for cross-provider matching.
+
+    These are NOT byte-level (a real provider supplies module_sha256 /
+    instruction bytes); for the skeleton they are name-derived so the
+    STRONG-vs-PROBABLE logic is exercised and testable. A real Radare/Ghidra
+    provider will replace this with true byte/instruction/cfg fingerprints.
+    """
+    import hashlib
+    return {"name_sha1": hashlib.sha1(name.lower().encode()).hexdigest()[:16]}
+
+
+def resolve_entity(known: list[dict], provider: str, name: str,
+                   fingerprints: dict | None = None) -> dict:
+    """Map a provider entity to a canonical entity — deterministically.
+
+    known: list of {"provider","name","canonical_id","fingerprints"}.
+    Returns {"status","canonical_id","candidates","note"}.
+
+    Rules (CodeTransparent-safe — never merge PROBABLE as EXACT):
+      EXACT      same provider + same name (deterministic provider)
+      STRONG     another provider + matching structural fingerprint
+      CONFLICT   fingerprint matches but candidate already EXACT-matched to a
+                 DIFFERENT name
+      AMBIGUOUS  name matches >1 candidate with no fingerprint to disambiguate
+      PROBABLE   no other candidate, name similar (last resort, low trust)
+      UNRESOLVED nothing close
+    """
+    name_l = (name or "").lower()
+    fp = fingerprints or _fp_fingerprints(name)
+    # EXACT
+    for k in known:
+        if k["provider"] == provider and (k["name"] or "").lower() == name_l:
+            return {"status": "EXACT", "canonical_id": k["canonical_id"],
+                    "candidates": [k["canonical_id"]],
+                    "note": "same provider + same name"}
+    # STRONG / CONFLICT by fingerprint
+    fp_hits = [k for k in known
+               if (k.get("fingerprints") or {}).get("name_sha1") == fp.get("name_sha1")]
+    if fp_hits:
+        if any((k["name"] or "").lower() != name_l for k in fp_hits):
+            return {"status": "CONFLICT", "canonical_id": None,
+                    "candidates": [k["canonical_id"] for k in fp_hits],
+                    "note": "fingerprint matches but name differs (provider disagreement)"}
+        return {"status": "STRONG", "canonical_id": fp_hits[0]["canonical_id"],
+                "candidates": [k["canonical_id"] for k in fp_hits],
+                "note": "cross-provider structural fingerprint match"}
+    # AMBIGUOUS by name (multiple, no fingerprint)
+    name_hits = [k for k in known if name_l and name_l in (k["name"] or "").lower()]
+    if len(name_hits) > 1:
+        return {"status": "AMBIGUOUS", "canonical_id": None,
+                "candidates": [k["canonical_id"] for k in name_hits],
+                "note": f"{len(name_hits)} candidates share the name; need a fingerprint"}
+    # PROBABLE (single partial name, low trust)
+    if name_hits:
+        return {"status": "PROBABLE", "canonical_id": name_hits[0]["canonical_id"],
+                "candidates": [name_hits[0]["canonical_id"]],
+                "note": "single name-similarity candidate (low trust — do not treat as EXACT)"}
+    return {"status": "UNRESOLVED", "canonical_id": None, "candidates": [],
+            "note": "no matching known entity"}
+
+
+# ------------------------------------------------------------------ P7 xref
+def _xref_target(graph: dict, ref: str):
+    """Resolve an xref/callers/callees target to a method node.
+
+    Accepts a canonical M-id ('M12') or a dotted 'Class.method' (optionally
+    package-qualified). Returns (method_node, external). external=True means
+    the name is not an in-APK method (a framework/external call) — the caller
+    must report that honestly, never treat it as a real in-graph method.
+    """
+    ref = ref.strip()
+    nodes = graph.get("nodes", {})
+    for m in nodes.get("method", []):
+        if m["id"] == ref:
+            return m, False
+    dotted = (ref[1:] if ref.startswith("L") else ref)
+    if "." in dotted:
+        cls, _, meth = dotted.rpartition(".")
+        for m in nodes.get("method", []):
+            if m["class"].endswith(cls) and m["name"] == meth:
+                return m, False
+    # not an in-APK method -> external (split Class.method so callers of an
+    # external method still match the graph's targetClass/targetMethod)
+    if "." in dotted:
+        cls, _, meth = dotted.rpartition(".")
+        return {"id": None, "class": cls, "name": meth, "dex": None,
+                "external": True}, True
+    return {"id": None, "class": dotted, "name": dotted, "dex": None,
+            "external": True}, True
+
+
+def xrefs(graph: dict, target: str) -> dict:
+    """All in-APK references for a target: callers (incoming invokes),
+    callees (outgoing invokes), and strings the method references.
+
+    Deterministic. 'no static xref found' is reported as such — absence of
+    a static reference is NOT proof of non-use (NOT OBSERVED != IMPOSSIBLE).
+    """
+    m, external = _xref_target(graph, target)
+    mid = m.get("id")
+    callers = [c for c in graph.get("calls", [])
+               if (c.get("targetClass") or "").endswith(m["class"])
+               and c.get("targetMethod") == m["name"]]
+    callees = [c for c in graph.get("calls", [])
+               if c.get("caller") == m["class"]
+               and c.get("callerMethod") == m["name"]]
+    strings = [s for s in graph.get("nodes", {}).get("string", [])
+               if any((r.get("class") or "").endswith(m["class"])
+                      and r.get("method") == m["name"]
+                      for r in s.get("refs", []))]
+    return {"target": target, "method_id": mid, "external": external,
+            "callers": callers, "callees": callees, "strings": strings,
+            "note": ("target is external (not an in-APK method)"
+                     if external else
+                     ("no static xref found — absence is NOT proof of "
+                      "non-use (reflection / native / dynamic dispatch)"
+                      if not (callers or callees or strings) else None))}
+
+
+def callers(graph: dict, target: str) -> list[dict]:
+    return [c for c in xrefs(graph, target)["callers"]]
+
+
+def callees(graph: dict, target: str) -> list[dict]:
+    return [c for c in xrefs(graph, target)["callees"]]
+
+
+def render_xref(x: dict, mode: str, sha: str) -> str:
+    mode = mode or "xref"
+    ref = (x["method_id"] or "") + (" " + x["target"] if not x["method_id"]
+                                    else "")
+    head = {"xref": f"XREF {ref.strip()}", "callers": f"CALLERS {ref.strip()}",
+            "callees": f"CALLEES {ref.strip()}"}[mode]
+    lines = [f"{head}  (sha[:8]={sha[:8]})"]
+    if x["external"]:
+        lines.append("  target is EXTERNAL (not an in-APK method) — "
+                     "no in-graph owner; listing references only")
+    if mode in ("xref", "callers"):
+        cl = x["callers"]
+        lines.append(f"  callers ({len(cl)}):")
+        for c in cl:
+            lines.append(f"    <- {c.get('caller')}.{c.get('callerMethod')}"
+                         f"  [{c.get('invokeKind')}]  ({c.get('dex')})")
+        if not cl:
+            lines.append("    (none found statically)")
+    if mode in ("xref", "callees"):
+        ca = x["callees"]
+        lines.append(f"  callees ({len(ca)}):")
+        for c in ca:
+            lines.append(f"    -> {c.get('targetClass')}.{c.get('targetMethod')}"
+                         f"  [{c.get('invokeKind')}]  ({c.get('dex')})")
+        if not ca:
+            lines.append("    (none found statically)")
+    if mode == "xref":
+        st = x["strings"]
+        lines.append(f"  strings referenced ({len(st)}):")
+        for s in st[:12]:
+            lines.append(f"    {s['id']} '{s['value']}'")
+        if not st:
+            lines.append("    (none)")
+        elif len(st) > 12:
+            lines.append(f"    … {len(st) - 12} more")
+    if x.get("note"):
+        lines.append(f"  note: {x['note']}")
+    return "\n".join(lines)
+
+
+def render_overview(graph: dict, sha: str) -> str:
+    """/apk Phase-1 card: situational awareness, not deep RE.
+
+    Mirrors the /360 'APK OVERVIEW' block. Everything references the
+    artifact by SHA-256 (immutable identity)."""
+    c = graph["counts"]
+    libs = graph.get("library_files") or []
+    abi = sorted({lib.rsplit("/", 1)[0] for lib in libs if "/" in lib}) or ["-"]
+    certs = graph.get("certificates") or []
+    lines = []
+    lines.append(f"APK OVERVIEW   A1 sha256[:8]={sha[:8]}")
+    lines.append(f"  package        {graph.get('package') or '-'}")
+    lines.append(f"  version        {graph.get('version_name')} "
+                 f"(code {graph.get('version_code')})")
+    lines.append(f"  min/target sdk {graph.get('min_sdk')}/{graph.get('target_sdk')}")
+    lines.append(f"  DEX            {len(graph.get('dex_files', []))} "
+                 f"({', '.join(graph.get('dex_files', [])) or '-'})")
+    lines.append(f"  classes        {c['class']}    methods {c['method']}    "
+                 f"fields {c['field']}")
+    lines.append(f"  strings        {c['string']} (S-ids)   "
+                 f"resources {c['resource']} (R-ids)")
+    lines.append(f"  native libs    {len(libs)}   ABI {', '.join(abi)}   "
+                 f"JNI methods {c['native']} (N-ids)")
+    comps = graph["nodes"]["component"]
+    k = {t: sum(1 for x in comps if x["kind"] == t) for t in
+         ("activity", "service", "receiver", "provider")}
+    lines.append(f"  components     {c['component']}  "
+                 f"(act {k['activity']} / svc {k['service']} / "
+                 f"rec {k['receiver']} / prov {k['provider']})")
+    lines.append(f"  permissions    {len(graph.get('permissions', []))} "
+                 f"({', '.join((graph.get('permissions') or [])[:4])}"
+                 f"{', …' if len(graph.get('permissions', [])) > 4 else ''})")
+    if certs:
+        ct = certs[0]
+        lines.append(f"  signature      {ct.get('sig') or 'detected'}  "
+                     f"{(ct.get('subject') or '')[:40]}")
+    else:
+        lines.append("  signature      not extracted (certs need androguard)")
+    lines.append(f"  call edges     {c['call']} (raw; /xref in P5)")
+    # P14: one-line hybrid/JS-layer summary (full section in /map)
+    hyb = graph.get("hybrid") or {}
+    if hyb.get("frameworks"):
+        fwnames = ", ".join(sorted(hyb["frameworks"]))
+        js = hyb.get("js_entries") or []
+        lines.append(f"  logic layer    HYBRID ({fwnames}) — {len(js)} JS "
+                     f"entry/entries; patch the JS, not the smali")
+    elif hyb.get("kind") == "dex":
+        lines.append("  logic layer    bare DEX (no asset layer)")
+    elif hyb.get("error"):
+        lines.append(f"  logic layer    {hyb['error']}")
+    else:
+        lines.append("  logic layer    DEX (no hybrid/JS signature)")
+    lines.append("  Analysis       READY  [Map] [Find P4] [JNI] [Strings] [Deep Dive]")
+    return "\n".join(lines)
+
+
+def render_map(graph: dict, sha: str, limit: int = 10) -> str:
+    """/map: tree + cross-layer paths from a stored graph."""
+    c = graph["counts"]
+    lines = []
+    lines.append("VIBE MAP   (Vibe IR — stable entity IDs, reproducible per SHA)")
+    lines.append(f"sha[:8]={sha[:8]}  schema={graph['schema']}")
+    lines.append("")
+    lines.append(f"A1  artifact")
+    lines.append(f"     └─ manifest  package={graph.get('package')}  "
+                 f"min/target sdk={graph.get('min_sdk')}/{graph.get('target_sdk')}")
+    lines.append(f"     ├─ DEX   {len(graph.get('dex_files', []))} "
+                 f"({', '.join(graph.get('dex_files', []))})")
+    lines.append(f"     ├─ components  {c['component']} "
+                 f"(K-ids)   strings {c['string']} (S-ids)   "
+                 f"resources {c['resource']} (R-ids)")
+    lines.append(f"     ├─ classes   {c['class']} (C-ids)")
+    lines.append(f"     ├─ methods   {c['method']} (M-ids)   fields {c['field']} (F-ids)")
+    lines.append(f"     ├─ enums     {c.get('enum', 0)} (E-ids)   [P13 R8-shrunken scan]")
+    lines.append(f"     ├─ native/JNI {c['native']} (N-ids)   native libs "
+                 f"{len(graph.get('library_files', []))}")
+    lines.append(f"     └─ call edges {c['call']} (raw; /xref resolves in P3b)")
+    lines.append("")
+    paths = cross_layer_paths(graph, limit=limit)
+    if paths:
+        lines.append(f"cross-layer paths (component → class → native):")
+        for p in paths:
+            m = p["methods"][:2]
+            mtxt = " ".join(m) if m else "(no body in dex)"
+            nat = p["native"] or (["→" + x for x in p["callsNativeOf"]][:1])
+            lines.append(f"  {p['component']} {p['componentName']}")
+            lines.append(f"      → methods {mtxt}{'' if m else ''}"
+                         + (f"   → JNI {' '.join(nat)}" if nat else ""))
+        if len(paths) >= limit:
+            lines.append(f"  … (showing first {limit})")
+    else:
+        lines.append("cross-layer paths: (none — no component maps to a dex class "
+                     "with a body, or no native/JNI edges)")
+    # P13: enum / R8-shrunken-enum detection (a patch candidate list)
+    from . import enumscan
+    enum_nodes = graph.get("nodes", {}).get("enum") or []
+    if enum_nodes:
+        lines.append("")
+        lines.append(enumscan.render_enums(enum_nodes, sha))
+    else:
+        lines.append("")
+        lines.append("ENUM DETECTION: none (no enum / R8-shrunken-enum signatures)")
+    # P14: hybrid / JS-layer — WHERE is the app's real logic?
+    from . import hybridscan
+    hyb = graph.get("hybrid")
+    if hyb is not None:
+        lines.append("")
+        lines.append(hybridscan.render_hybrid(hyb, sha))
+    return "\n".join(lines)
