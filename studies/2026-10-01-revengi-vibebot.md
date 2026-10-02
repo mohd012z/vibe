@@ -512,11 +512,90 @@ P25 self-improvement eval.
   xi=48; **d1 is NOT base64** (the old study note was wrong for Kotlin 2.x).
   E2/PROBABLE ceiling (recovered names are the source's intent; re-validate
   against behavior before acting). 385 checks (+22). Backlog #2 DONE.
-  Honest limits: single-fixture coverage (one kotlinc 2.0.21 / d8 shape —
-  8-to-7 mode unexercised by a real sample; un-marked d1 is a documented
-  fallback); oracle cross-check only runs where a Kotlin toolchain is present
-  (NOT OBSERVED elsewhere, never a fake pass). Design origin:
+  Honest limits: single-fixture coverage (one kotlinc 2.0.21 / d8 shape).
+  8-to-7 mode was originally unexercised by a real sample — that gap is now
+  CLOSED by P17 8-to-7 below (which also found + fixed a real bug in the
+  no-marker path). Oracle cross-check only runs where a Kotlin toolchain is
+  present (NOT OBSERVED elsewhere, never a fake pass). Design origin:
   `studies/2026-10-02-external-study-lupoxyz-ghidra-mcp.md` (backlog item 2).
+- **P17b (real-R8 verification, v0.22)** — DONE (same PR #6): P17's
+  single-fixture gap closed with REAL R8 9.4.28 outputs of the same sample
+  (r8.jar from Google Maven; kotlinc → R8 → d8). Committed
+  `tests/fixtures/ktmeta_r8/{classes-kept,classes-stripped}.dex`. The real
+  run found the docstring OVERCLAIMED: "ORIGINAL (pre-R8) names" is only
+  true for a plain DEX. On a REAL R8'd DEX: (a) default config STRIPS
+  @Metadata entirely (0 records → honest "no @kotlin.Metadata"); (b) with
+  `-keepattributes *Annotation*` it survives but **d2 is POST-R8** —
+  class/function names decode to the obfuscated a–f, while property names
+  survive (gateway/totalCents/amountCents/sku/orderId). The decoder was
+  CORRECT (reads what's there); the *claim* was fixed in kotlinmeta.py
+  (docstring + render footer + finding title + spec description). +5 checks
+  → 481. `__version__` → 0.22.0. **P17's single-fixture / overclaim gap:
+  CLOSED.** See studies/2026-10-02-p17-real-r8.md. **PR STATE (2026-10-02):
+  PR #6 was MERGED by Fatah at `1d03de5` (v0.21: P14b+P16+P18+P19, into
+  `82c5a83`); main then advanced with PR #8/#9 (Telegram runtime →
+  `198fd99`). P17b (`4c03b65`) was pushed to the #6 branch AFTER the merge
+  → stranded, NOT on main. Cherry-picked onto current main →
+  `feat/p17b-real-r8` @ `81207d3` (481 ALL PASS, CI green) → **PR #12 OPEN**
+  (https://github.com/mohd012z/vibe/pull/12). Merge = Fatah's call.
+  REPAIR #1 (2026-10-02, "cant merge"): main advanced again while #12 sat
+  open (PR #11 portable-container-runtime + #13 Vibe-job-contract → `2f2b864`);
+  rebase + 481 ALL PASS + `--force-with-lease` → head `622041b`, base `2f2b864`.
+  REPAIR #2 (2026-10-02, "cant merge" again): main advanced a THIRD time
+  (PR #14 cloud actions-runner → `880298a`, 4 new `tools/cloud/*` files — no
+  overlap with P17b); rebase + 481 ALL PASS (full-host: r2 P18/P19 positive,
+  P16 via system aarch64 cross-compiler after scratch auto-pruned cross16) +
+  `--force-with-lease` → **head `4ac6937`, base `880298a` (current main), CI
+  validate PASS, CLEAN/MERGEABLE.** Lesson (recurred twice in one session): an
+  open PR on a protected main goes BEHIND every time ANY other PR merges —
+  always `git ls-remote origin main` + rebase + re-verify before a merge ask.
+  Then (Anam "proceed"): the in-flight P17 8-to-7 real-verification (below)
+  was folded into #12 as a new commit family → **PR #12 = v0.23.0, 485 ALL
+  PASS** (see P17 8-to-7 entry). Merge = Fatah's call.**
+- **P17 8-to-7 (real-compiler verification, v0.23)** — DONE (same PR #12):
+  P17's "8-to-7 mode unexercised by a real sample" gap CLOSED. Fetched the
+  authoritative JetBrains `BitEncoding.java` + `utfEncoding.kt`; forced the
+  REAL compiler into 8-to-7 mode (`-Dkotlin.jvm.serialization.use8to7=true` —
+  the flag is read in a static initializer, so hand-flipping the field in
+  main is too late) and differentially verified the pure decoder against the
+  compiler's own `decodeBytes` in BOTH modes. **Found a real bug**: the
+  decoder had a third, invented "raw char→byte" fallback; the authoritative
+  `decodeBytes` has only two modes (U+0000→UTF-8, else→8-to-7). Old code
+  mismatched the compiler on 6/20 cases (exactly the no-marker 8-to-7 path —
+  the common small payload, where NO U+FFFF marker is prepended); fixed
+  decoder matches all 20, incl. the compiler's own lossy lone-high-byte cases
+  (where we must match the compiler, not the original). Docstring also
+  corrected (marker was documented as U+00FF; real = U+FFFF, only on
+  multi-part splits). Added `tools/vibebot/BE8to7.java` (subprocess
+  differential oracle, same license-safe pattern as KMeta.java) +
+  `run_be8to7_oracle` + 4 test checks (per-mode differential, "mode is REAL"
+  guard, BIG-case U+FFFF-marker guard, no-marker unit test); NOT-OBSERVED
+  degrade when the Kotlin toolchain is absent. `__version__` 0.22.0 →
+  0.23.0. **485 full-host ALL PASS / CI-shape ALL PASS.** See
+  studies/2026-10-02-p17-8to7-real.md.
+- **P17 real production APK (F-Droid e2e + DEX-glue bug, v0.24)** — DONE
+  (same PR #12): P17's last "synthetic-only" gap CLOSED. Downloaded a real
+  R8'd production app (F-Droid client, 12.5MB, 3 DEX, ~24.5k classes) and
+  ran the production decoder on it — which immediately **crashed**:
+  `_string_of` read DEX `encoded_value` string indices as ULEB128 varints,
+  but they are **fixed-width little-endian** (authoritative: androguard
+  `_getintvalue`). Masked because a small string table keeps every index
+  < 128 (1 byte) where the two encodings agree; a real app's large table
+  reaches 2+ bytes → `IndexError` / wrong string. Fixed to prefer
+  androguard's already-resolved `el.value` (correct for any width) with a
+  fixed-width LE fallback. **Also corrected P17b**: a real production R8'd
+  app **keeps** `@Metadata` (1,544 classes) — "default R8 strips @Metadata"
+  is config-specific, not universal, so P17 name-recovery is a live
+  real-world capability. Real-APK result: 1,544 metadata classes → 1,108
+  decoded with original property names, 436 honest empty-d1, **0
+  exceptions**. Added a real kotlinc/d8 19KB regression DEX
+  (`tests/fixtures/ktmeta_multibyte/classes.dex`) + **8 checks** (synthetic
+  1/2/3-byte LE unit + real-fixture proof the OLD varint read gets a string
+  wrong + FIXED read matches androguard for every item); all 8 **pinned in
+  CI-shape** too (need only androguard + fixture, not the optional
+  toolchain). `__version__` 0.23.0 → 0.24.0. **493 full-host ALL PASS /
+  480 CI-shape ALL PASS / redteam 32/32 / apkmod ALL PASS.** See
+  studies/2026-10-02-p17-real-apk-fdroid.md.
 - ~~Kotlin @Metadata name recovery~~ — DONE above (P17, v0.16); the
   "STILL DEFERRED" state was unblocked when scratch gained JDK17 + kotlinc +
   d8, and the message-level proto numbers from `metadata.proto` were verified

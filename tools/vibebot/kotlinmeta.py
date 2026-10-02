@@ -1,10 +1,23 @@
 """P17 — Kotlin @Metadata name recovery.
 
-Recover the ORIGINAL (pre-R8) Kotlin names from an APK/DEX. R8 can rename
-every DEX method/field/class, but a Kotlin class's `@kotlin.Metadata`
-annotation carries the original names: `d1` = the serialized `Class` proto +
-name-resolver, `d2` = the base string table. Decoding them yields the true
-`fq_name`, nested classes, and every function/property name.
+Recover the ORIGINAL Kotlin names from an APK/DEX. R8 can rename every DEX
+method/field/class, but a Kotlin class's `@kotlin.Metadata` annotation
+carries the names: `d1` = the serialized `Class` proto + name-resolver,
+`d2` = the base string table. Decoding them yields `fq_name`, nested
+classes, and every function/property name.
+
+REAL R8 CEILING (verified 2026-10-02 on an actual R8 9.4.28 output of the
+ktmeta fixture — see tests/fixtures/ktmeta_r8/):
+- Plain (un-R8'd) DEX: `d2` holds the ORIGINAL names -> full recovery.
+- R8'd DEX, build KEEPS @Metadata (`-keepattributes *Annotation*`):
+  the annotation survives but `d2` is POST-R8 — class + method names are
+  the obfuscated ones, while data-bearing property/field names usually
+  survive. Recovery is PARTIAL: properties are the original names,
+  class/function names are not recoverable from the DEX alone.
+- R8'd DEX, default config: R8 STRIPS @Metadata entirely -> 0 records,
+  `recover_names` reports "no @kotlin.Metadata" (honest, not a failure).
+So "original (pre-R8) names" is guaranteed only for the plain-DEX case;
+for an R8'd DEX the ceiling is whatever `d2` still contains.
 
 Why this is the /360-correct shape:
 - The DEX names are what you *see* (E2, often R8-minified: `a`, `b`, `c`).
@@ -39,9 +52,17 @@ known by construction.
 d1 encoding modes (BitEncoding.decodeBytes):
   UTF-8 mode  (marker U+0000, the DEFAULT since Kotlin 1.x):
       proto[i] = char_code(d1[1 + i])          # drop the marker, char->byte
-  8-to-7 mode (marker U+00FF, only when
-      kotlin.jvm.serialization.use8to7=true; rare):
-      raw = [(char-1) mod 128 for char in d1[1:]]; proto = decode7to8(raw)
+  8-to-7 mode (kotlin.jvm.serialization.use8to7=true; off by default, rare):
+      The ONLY two decode modes are UTF-8 (first char U+0000) and 8-to-7
+      (EVERYTHING ELSE) — there is no third "raw" mode.
+      - Multi-part (input >= ~65533 bytes): the FIRST string is prefixed with
+        _8TO7_MODE_MARKER U+FFFF (splitBytesToStringArray) -> drop that char.
+      - Single-part (the common small case): NO marker char is prepended;
+        d1[0] is real data (a modulo-incremented 8to7 byte, U+0001..U+0080).
+      Both: raw = [(char-1) mod 128 for char in body]; proto = decode7to8(raw).
+      NOTE: 8-to-7 is lossy on a lone high byte (e.g. 0x7f/0xff) — the
+      compiler's own decodeBytes roundtrip of a single 0x7f yields 0x01, not
+      0x7f. Our decoder is a faithful port, so it matches the compiler.
 """
 
 from __future__ import annotations
@@ -116,13 +137,18 @@ def bitencoding_decode(d1: str) -> bytes:
     if marker == UTF8_MODE_MARKER:
         # stringsToBytes(dropMarker(data)): drop char 0, char->byte
         return bytes((ord(c) & 0xFF) for c in d1[1:])
-    if marker == _8TO7_MODE_MARKER:
-        raw = bytes(((ord(c) - 1) & 0x7F) for c in d1[1:])
-        return _decode7to8(raw)
-    # No known mode marker: treat the whole string as raw char->byte (the
-    # combineStringArrayIntoBytes fallback, un-marked). Honest: some hand
-    # emitters omit the marker.
-    return bytes((ord(c) & 0xFF) for c in d1)
+    # 8-to-7 mode. AUTHORITATIVE (BitEncoding.decodeBytes): the only two modes
+    # are UTF8 (first char \u0000) and 8-to-7 (EVERYTHING ELSE). There is no
+    # third "raw" mode. Within 8-to-7:
+    #   - multi-part (input >= ~65533 bytes): splitBytesToStringArray prepends
+    #     _8TO7_MODE_MARKER (\uFFFF) to the first part -> drop it (dropMarker).
+    #   - single-part (the common small case): NO marker char is prepended, so
+    #     d1[0] is real data (a modulo-incremented 8to7 byte, \u0001..\u0080).
+    # Both then run the same combineStringArrayIntoBytes + addModuloByte(0x7f)
+    # (== (char-1)&0x7f) + decode7to8.
+    body = d1[1:] if marker == _8TO7_MODE_MARKER else d1
+    raw = bytes(((ord(c) - 1) & 0x7F) for c in body)
+    return _decode7to8(raw)
 
 
 # ------------------------------------------------- PREDEFINED_STRINGS (src) --
@@ -276,10 +302,28 @@ def decode_class_metadata(d1: str, d2: list[str]) -> dict | None:
     return parse_class_names(class_bytes, records, list(d2))
 
 
-# ------------------------------------------------------------- DEX glue -----
+# ------------------------------------------------------------- DEX glue ----
 def _string_of(dex, el) -> str | list[str]:
-    """An EncodedValue for a Metadata string element -> its DEX string(s)."""
-    sid = _varint(bytes(el.raw_value))[0]
+    """An EncodedValue for a Metadata string element -> its DEX string.
+
+    androguard 4.x resolves a VALUE_STRING EncodedValue to the raw DEX
+    string at parse time, so `el.value` is the string itself (correct by
+    construction for any index width). Prefer it. Fallback: read the index
+    as a FIXED-WIDTH LITTLE-ENDIAN integer (width = len(raw_value)).
+
+    Do NOT read it as a ULEB128 varint: DEX encoded_value indices are
+    fixed-width, not varints. On a small string table (every index < 128,
+    one byte) the two encodings agree — which is exactly why a single
+    small synthetic fixture masks this bug. A real R8'd production APK has
+    a large string table, so string indices reach 2+ bytes (e.g.
+    b'\\xaf\\xe0' == 0x80af), and a varint read walks off the end of
+    raw_value -> IndexError. Verified on a real F-Droid client (1544
+    @Metadata classes) 2026-10-02.
+    """
+    v = el.value
+    if isinstance(v, str):
+        return v
+    sid = int.from_bytes(bytes(el.raw_value), "little")
     return dex.get_cm_string(sid)
 
 
@@ -361,10 +405,12 @@ def render_kmeta(recovered: list[dict]) -> str:
             lines.append(f"    fns:     {', '.join(str(x) for x in dec['functions'])}")
         if dec["properties"]:
             lines.append(f"    props:   {', '.join(str(x) for x in dec['properties'])}")
-    lines.append("  (recovered ORIGINAL names from @Metadata — R8-minified "
-                 "DEX names are the falsifiable view; re-validate before "
-                 "acting. E2 annotation evidence, PROBABLE until behavior "
-                 "confirms.)")
+    lines.append("  (names recovered from @Metadata — on a PLAIN DEX these "
+                 "are the originals; on an R8'd DEX they may be post-R8 "
+                 "(properties often survive, class/method names may not) "
+                 "or @Metadata may be stripped entirely. DEX names are the "
+                 "falsifiable view; re-validate before acting. E2 annotation "
+                 "evidence, PROBABLE until behavior confirms.)")
     return "\n".join(lines)
 
 
@@ -447,6 +493,60 @@ def run_jvm_oracle(d1: str, d2: list[str], workdir: str) -> dict | None:
     return res
 
 
+def _find_be8to7_verifier() -> str | None:
+    here = os.path.dirname(os.path.abspath(__file__))
+    p = os.path.join(here, "BE8to7.java")
+    return p if os.path.exists(p) else None
+
+
+def run_be8to7_oracle(hex_cases: list[str], mode: str,
+                      workdir: str) -> list[dict] | None:
+    """Run tools/vibebot/BE8to7.java (the Kotlin compiler's OWN
+    BitEncoding.encodeBytes/decodeBytes) and return, per case,
+    {"rt": bool, "d1": str, "dech": str} (dech = the compiler's decode
+    hex = the oracle). mode is "8to7" (launches java with
+    -Dkotlin.jvm.serialization.use8to7=true, the authoritative trigger)
+    or "utf8". Returns None if the toolchain is absent (honest degrade)."""
+    tc = _find_kotlin_toolchain()
+    v = _find_be8to7_verifier()
+    if not tc or not v:
+        return None
+    java, javac, cp = tc
+    os.makedirs(workdir, exist_ok=True)
+    try:
+        if not os.path.exists(os.path.join(workdir, "BE8to7.class")):
+            subprocess.run([javac, "-cp", cp, "-d", workdir, v],
+                           check=True, capture_output=True, timeout=120)
+        cmd = [java]
+        if mode == "8to7":
+            cmd.append("-Dkotlin.jvm.serialization.use8to7=true")
+        cmd += ["-cp", workdir + ":" + cp, "BE8to7"] + list(hex_cases)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except Exception:
+        return None
+    if p.returncode != 0:
+        return None
+    out = []
+    for ln in p.stdout.splitlines():
+        ln = ln.strip()
+        if not ln.startswith("CASE"):
+            continue
+        import re as _re
+        m = _re.match(r"CASE (\d+) RT([01]) D1H=(\S+) DECH=(\S+)$", ln)
+        if not m:
+            continue
+        out.append({"rt": m.group(2) == "1",
+                    "d1": _hexchars_to_str(m.group(3)),
+                    "dech": m.group(4)})
+    return out if out else None
+
+
+def _hexchars_to_str(s: str) -> str:
+    """BE8to7 emits d1 as 2-hex-per-char (a Java char is 0..65535, so
+    %04x is lossless). Reconstruct the actual string."""
+    return "".join(chr(int(s[i:i + 4], 16)) for i in range(0, len(s), 4))
+
+
 # ------------------------------------------------------------- engine -------
 class KotlinMetaEngine(core.Engine):
     """Engine: recover original Kotlin names from an APK/DEX @Metadata
@@ -457,8 +557,10 @@ class KotlinMetaEngine(core.Engine):
 
     spec = core.EngineSpec(
         name="kotlin-meta",
-        description="Kotlin @Metadata name recovery: original (pre-R8) "
-                    "class/method/field names from an APK/DEX",
+        description="Kotlin @Metadata name recovery: the names @Metadata's "
+                    "d2 table carries (originals on a plain DEX; on an R8'd "
+                    "DEX possibly post-R8 or @Metadata stripped — see the "
+                    "module docstring's R8 ceiling note)",
         formats=("apk", "dex", "apkx"),
     )
 
@@ -534,18 +636,22 @@ class KotlinMetaEngine(core.Engine):
                           if c.get("decoded") and c["decoded"].get("fq_name"))
             raw = {
                 "sdk": "KOTLIN-META",
-                "title": f"recovered original Kotlin names for {n_named} "
-                         f"class(s) from @Metadata (E2, PROBABLE)",
+                "title": f"recovered Kotlin names for {n_named} class(s) from "
+                         f"@Metadata (E2, PROBABLE; originals only on a "
+                         f"plain DEX — see the R8 ceiling note)",
                 "classification": "KOTLIN_RECOVERY",
                 "evidence": [{"level": "E2", "artifact": "@kotlin.Metadata",
                               "detail": f"{result['class_count']} annotated "
                                         f"class(es), pure-Python decode" +
                                         ("; JVM-verified" if result.get("oracle")
                                          else "")}],
-                "falsification": ["recovered names are the SOURCE's intent; "
-                                  "the R8-minified DEX names are what's "
-                                  "observable — re-validate against behavior "
-                                  "before acting (PROBABLE ceiling)"],
+                "falsification": ["recovered names are what @Metadata's d2 "
+                                  "table carries: on a plain DEX the source "
+                                  "originals; on an R8'd DEX possibly "
+                                  "post-R8 (properties often survive, "
+                                  "class/method names may not) or @Metadata "
+                                  "stripped entirely — re-validate against "
+                                  "behavior before acting (PROBABLE ceiling)"],
             }
             findings.append(core.normalize_finding(raw, self.spec.name, 1))
         return core.EngineResult(

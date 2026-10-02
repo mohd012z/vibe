@@ -1345,9 +1345,19 @@ def main() -> int:
               repr(KM.bitencoding_decode(enc)))
         check("utf8 decode: empty d1 -> empty bytes",
               KM.bitencoding_decode("") == b"", "")
-        check("utf8 decode: un-marked fallback = char->byte (no drop)",
-              KM.bitencoding_decode("ab") == b"ab",
-              repr(KM.bitencoding_decode("ab")))
+        # AUTHORITATIVE: decodeBytes has only two modes — UTF-8 (first char
+        # \u0000) and 8-to-7 (everything else). There is no raw char->byte
+        # fallback. A no-marker d1 is 8-to-7: raw = (char-1)&0x7f per char,
+        # then decode7to8 (floor(7*len/8) bytes). The genuine no-marker 8to7
+        # encoding of a 1-byte proto 0x00 is d1 = "\u0001\u0001" (raw 00 00
+        # -> 0x00), NOT ascii "ab" (0x61/0x62, which are not valid 8to7 d1
+        # bytes). Pinned here so the (removed) raw-fallback assumption
+        # can't survive; the real-compiler differential below is
+        # authoritative.
+        check("decode: no-marker 8to7 d1 decodes via 8-to-7 (not raw char->byte)",
+              KM.bitencoding_decode("\u0001\u0001") == b"\x00"
+              and KM.bitencoding_decode("\u0001") == b"",
+              repr(KM.bitencoding_decode("\u0001\u0001")))
         # --- DEX annotation extraction: envelope + d2 name table
         krecs = KM.extract_kotlin_metadata(ktdex)
         check("extract: 6 @Metadata classes in the fixture",
@@ -1436,6 +1446,242 @@ def main() -> int:
             check("differential: NOT OBSERVED here (no Kotlin toolchain) — "
                   "pure decode stands, unverified against oracle",
                   True, "toolchain absent; disclosed, not skipped")
+
+        # --- P17 8-to-7 BitEncoding DIFFERENTIAL vs the REAL compiler ---
+        # The 8-to-7 d1 mode is only ever used under
+        # kotlin.jvm.serialization.use8to7=true (off by default) and is the
+        # one decode path a hand-rolled port gets wrong: the common
+        # single-part case carries NO mode marker (d1[0] is real data),
+        # only the >=~65533-byte multi-part case gets a \uFFFF prefix on
+        # the first part. We exercise the real compiler's BitEncoding
+        # (encodeBytes + decodeBytes) in BOTH modes and assert our pure
+        # bitencoding_decode produces the SAME bytes as the compiler's own
+        # decode of the identical d1. Covers no-marker 8to7, \uFFFF marker,
+        # and the compiler's own lossy lone-high-byte cases (RT0) where we
+        # still must match the compiler, not the original.
+        BE8_CASES = ["00", "7f", "80", "ff", "00000000",
+                     "41007f80ff011121", "0102030405060708090a",
+                     "BIG:70000"]
+        be8_res = {}
+        for _be8_mode in ("utf8", "8to7"):
+            be8_res[_be8_mode] = KM.run_be8to7_oracle(
+                BE8_CASES, _be8_mode, os.path.join(td, "be8_" + _be8_mode))
+        if any(v is not None for v in be8_res.values()):
+            for _be8_mode in ("utf8", "8to7"):
+                _be8_r = be8_res[_be8_mode]
+                if _be8_r is None:
+                    continue
+                _m = sum(1 for _c in _be8_r
+                         if KM.bitencoding_decode(_c["d1"]).hex() == _c["dech"])
+                check("8to7-differential[%s]: bitencoding_decode == compiler "
+                      "decodeBytes on all %d cases" % (
+                          _be8_mode, len(_be8_r)),
+                      _m == len(_be8_r),
+                      "matched %d/%d" % (_m, len(_be8_r)))
+        if be8_res.get("8to7") is not None:
+            _be8_8 = be8_res["8to7"]
+            # Case 0 (orig 0x00) encodes to the no-marker 8to7 d1 "
+            # \u0001\u0001" — first char is real data, NOT the UTF-8 \u0000
+            # marker. If 8to7 had silently fallen back to UTF-8, encodeBytes
+            # would have produced a \u0000 marker here. (Case 1, orig 0x7f,
+            # encodes to a SINGLE \u0000 char — a data byte, not a marker —
+            # so we check case 0, not case 1.)
+            check("8to7-differential: 8to7 mode is REAL (no UTF-8 \\u0000 "
+                  "marker on the no-marker small case)",
+                  _be8_8[0]["d1"][:1] != "\u0000"
+                  and len(_be8_8[0]["d1"]) == 2,
+                  repr(_be8_8[0]["d1"]))
+            # The BIG case must actually split into multi-part and carry the
+            # \uFFFF mode marker on the first part (the only case where the
+            # marker exists) — proves that path is exercised, not assumed.
+            _be8_big = _be8_8[len(_be8_8) - 1]
+            check("8to7-differential: BIG case is multi-part with \\uFFFF "
+                  "marker (marker path exercised)",
+                  "\uFFFF" in _be8_big["d1"],
+                  "no \\uFFFF marker found; d1 head=" + repr(
+                      _be8_big["d1"][:4]))
+        else:
+            check("8to7-differential: NOT OBSERVED here (no Kotlin "
+                  "toolchain) — pure 8to7 decode stands, unverified",
+                  True, "toolchain absent; disclosed, not skipped")
+
+        # --- P17 REAL R8 e2e: the actual obfuscation R8 applies to this same
+        # sample, committed as ground truth. Proves the E2 ceiling is HONEST:
+        # on a plain (un-R8'd) DEX the d2 table carries the ORIGINAL names
+        # (the fixture above); on a REAL R8 output the d2 table is POST-R8 —
+        # class/method names obfuscated, property names usually preserved —
+        # and if the build didn't keep @Metadata, R8 strips it entirely.
+        # The decoder is CORRECT in both cases (it faithfully reads what's
+        # there); this block pins the observed ceiling so a future change
+        # that pretends to recover pre-R8 class names from an R8 DEX fails.
+        R8_KEPT = os.path.join(ROOT, "tests", "fixtures", "ktmeta_r8",
+                               "classes-kept.dex")
+        R8_STRIPPED = os.path.join(ROOT, "tests", "fixtures", "ktmeta_r8",
+                                   "classes-stripped.dex")
+        if os.path.exists(R8_KEPT) and os.path.exists(R8_STRIPPED):
+            r8k = open(R8_KEPT, "rb").read()
+            r8s = open(R8_STRIPPED, "rb").read()
+            rk = KM.extract_kotlin_metadata(r8k)
+            check("R8-kept: @Metadata survives obfuscation (6 records)",
+                  len(rk) == 6, str(len(rk)))
+            obf = {r["class_desc"]: KM.decode_class_metadata(
+                r["d1"] or "", r["d2"]) or {} for r in rk}
+            fqs = {v.get("fq_name") for v in obf.values()}
+            check("R8-kept: class names ARE obfuscated (not the originals)",
+                  "CheckoutService" not in fqs and "Order" not in fqs
+                  and all(isinstance(f, str) and len(f) <= 3 for f in fqs
+                          if f), str(fqs))
+            props = set()
+            for v in obf.values():
+                props |= set(v.get("properties") or [])
+            check("R8-kept: property names SURVIVE R8 (the d2 table keeps "
+                  "them)", {"gateway", "totalCents", "amountCents", "sku",
+                            "orderId"} <= props, str(props))
+            plain_charge = any(
+                "charge" in (KM.decode_class_metadata(
+                    r["d1"] or "", r["d2"]) or {}).get("functions", [])
+                for r in krecs
+                if r["class_desc"].endswith("CheckoutService;"))
+            r8_charge = any(
+                "charge" in (v.get("functions") or []) for v in obf.values())
+            check("the ceiling is REAL: the plain DEX recovers 'charge' "
+                  "but the R8 DEX cannot (same decoder, different source)",
+                  plain_charge and not r8_charge,
+                  f"plain_charge={plain_charge} r8_charge={r8_charge}")
+            check("R8-stripped: default R8 config strips @Metadata entirely "
+                  "-> recover_names honest 'no @kotlin.Metadata'",
+                  KM.extract_kotlin_metadata(r8s) == []
+                  and "no @kotlin.Metadata" in
+                  KM.render_kmeta(KM.recover_names(r8s)),
+                  str(KM.extract_kotlin_metadata(r8s)))
+        else:
+            print("  [P17] NOT OBSERVED: ktmeta_r8 fixtures absent — "
+                  "real-R8 ceiling not pinned")
+
+        # --- P17 multi-byte string-index regression (v0.24) ---------------
+        # DEX encoded_value string indices are FIXED-WIDTH LITTLE-ENDIAN, not
+        # ULEB128 varints. A single small synthetic fixture (every index < 128,
+        # one byte) has the two encodings AGREE, which is exactly why it masked
+        # the original `sid = _varint(el.raw_value)` bug. A real R8'd
+        # production APK (large string table) has 2+ byte indices and the
+        # varint read overruns raw_value -> IndexError / silent wrong string.
+        # Synthetic unit: the fixed _string_of reads wide indices little-endian
+        # (correct for 1, 2, 3-byte widths). Real-fixture regression: a real
+        # kotlinc/d8 DEX whose @Metadata carries wide string indices must
+        # decode with ZERO exceptions and ZERO misreads.
+        if HAVE_ANDROGUARD:
+            class _FakeEl:
+                def __init__(self, raw, val):
+                    self.raw_value = raw
+                    self.value = val
+
+            class _FakeDex:
+                def __init__(self, table):
+                    self._t = table
+
+                def get_cm_string(self, idx):
+                    return self._t[idx]
+
+            _tbl = ["Lcom/reg/Target;", "repoId", "packageName",
+                    "displayName", "w2", "w3"]
+            _fd = _FakeDex(_tbl)
+            # 1-byte LE index (idx=2)
+            check("multi-byte: 1-byte LE index reads correctly",
+                  KM._string_of(_fd, _FakeEl(b"\x02", None)) == "packageName",
+                  repr(KM._string_of(_fd, _FakeEl(b"\x02", None))))
+            # 2-byte LE index (idx=0x0805=2053 -> but our table is small; use
+            # a wide index that the OLD varint read would misparse)
+            # raw b'\x05\x08' LE = 0x0805 = 2053 (out of small table) — so
+            # instead assert the little-endian VALUE directly via a wide table.
+            _wide_tbl = ["x"] * 2054
+            _wfd = _FakeDex(_wide_tbl)
+            check("multi-byte: 2-byte LE index 0x0805==2053 (not varint)",
+                  KM._string_of(_wfd, _FakeEl(b"\x05\x08", None))
+                  == _wide_tbl[2053]
+                  and 2053 != KM._varint(b"\x05\x08")[0],
+                  f"LE={2053} varint={KM._varint(b'\x05\x08')[0]}")
+            # 3-byte LE index (idx=0x100000=1048576)
+            _huge_tbl = ["y"] * 1048577
+            _hfd = _FakeDex(_huge_tbl)
+            check("multi-byte: 3-byte LE index 0x100000==1048576",
+                  KM._string_of(_hfd, _FakeEl(b"\x00\x00\x10", None))
+                  == _huge_tbl[1048576],
+                  "3-byte LE")
+            # androguard's own resolved string is preferred when present
+            check("multi-byte: uses androguard's resolved el.value when set",
+                  KM._string_of(_fd, _FakeEl(b"\x02", "RESOLVED"))
+                  == "RESOLVED", repr("RESOLVED"))
+
+            MB = os.path.join(ROOT, "tests", "fixtures", "ktmeta_multibyte",
+                              "classes.dex")
+            if os.path.exists(MB):
+                mb = open(MB, "rb").read()
+                recs = KM.extract_kotlin_metadata(mb)
+                check("multi-byte regression fixture: @Metadata classes "
+                      "extracted WITHOUT exception (old varint code "
+                      "IndexErrors / misreads here)",
+                      len(recs) >= 1, f"{len(recs)} classes")
+                # the target data class must carry wide (2-byte) string idxs
+                d = None
+                from androguard.core.dex import DEX
+                d = DEX(mb)
+                wide = 0
+                old_wrong = 0
+                tot = 0
+                for cls in d.get_classes():
+                    for a in cls._get_annotation_type_ids():
+                        if "kotlin/Metadata" not in str(
+                                d.get_cm_type(a.get_type_idx())):
+                            continue
+                        for el in a.get_elements():
+                            nm = d.get_cm_string(el.name_idx)
+                            if nm in ("d1", "d2"):
+                                for e in el.value.get_value().get_values():
+                                    tot += 1
+                                    rv = bytes(e.raw_value)
+                                    if len(rv) >= 2:
+                                        wide += 1
+                                    # what the OLD varint read produced
+                                    try:
+                                        old = d.get_cm_string(
+                                            KM._varint(rv)[0])
+                                    except Exception:
+                                        old = None  # IndexError / overrun
+                                    if old != e.value:
+                                        old_wrong += 1
+                check("multi-byte regression fixture: OLD varint read gets a "
+                      "string WRONG here (the bug this fix removes)",
+                      old_wrong > 0,
+                      f"old_wrong={old_wrong}/{tot} (wide2b={wide})")
+                check("multi-byte regression fixture: FIXED read resolves "
+                      "every @Metadata string to androguard's value",
+                      all(
+                          KM._string_of(d, e) == e.value
+                          for cls in d.get_classes()
+                          for a in cls._get_annotation_type_ids()
+                          if "kotlin/Metadata" in str(
+                              d.get_cm_type(a.get_type_idx()))
+                          for el in a.get_elements()
+                          if d.get_cm_string(el.name_idx) in ("d1", "d2")
+                          for e in el.value.get_value().get_values()),
+                      "fixed == androguard for all items")
+                dec = KM.decode_class_metadata(
+                    next(r["d1"] for r in recs
+                         if r["class_desc"].endswith("Lcom/reg/Target;")
+                         and r.get("d1")),
+                    next(r["d2"] for r in recs
+                         if r["class_desc"].endswith("Lcom/reg/Target;")))
+                check("multi-byte regression fixture: Target decodes with "
+                      "its original property names",
+                      dec is not None and
+                      {"repoId", "packageName", "displayName"}
+                      <= set(dec.get("properties") or []),
+                      str(dec.get("properties") if dec else None))
+            else:
+                print("  [P17] NOT OBSERVED: ktmeta_multibyte fixture "
+                      "absent — multi-byte string-index regression "
+                      "not pinned (synthetic unit still applies)")
+
         # --- gateway dispatch: /kmeta registered + usage + missing path
         if "kotlinmeta" in gw.engines:
             r, j = gw.handle("/kmeta")
@@ -2327,7 +2573,7 @@ def main() -> int:
         ver = getattr(vb, "__version__", None)
         check("version: __init__.__version__ is X.Y.Z",
               isinstance(ver, str) and len(ver.split(".")) == 3, str(ver))
-        check("version: matches the current build", ver == "0.21.0", str(ver))
+        check("version: matches the current build", ver == "0.24.0", str(ver))
         r, j = gateway.Gateway(td).handle("/find zzz")
         check("session: /find without --sha is refused (no most-recent fallback)",
               "no --sha" in r and "run /apk" in r and j is None, r)
