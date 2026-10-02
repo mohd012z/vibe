@@ -1243,6 +1243,79 @@ def main() -> int:
                   hr_real["verdict"] in ("SUCCESS", "FAILURE", "NOT_OBSERVED"),
                   str(hr_real["verdict"]))
 
+        # --- P16 REAL e2e: actually BUILD + RUN the harness on a real aarch64
+        # toolchain (cross gcc + qemu-aarch64, user-space in scratch) — the
+        # E5 top of the chain P16 had only ever exercised via FakeRunner.
+        # Degrades to an honest NOT-OBSERVED line when the toolchain is
+        # absent (CI shape stays green).
+        _CROSS16 = "/opt/data/cache/scratch/toolchain/cross16/usr/bin"
+        import os as _os16
+        _which16 = shutil
+        _cc16 = _which16.which("aarch64-linux-gnu-gcc") or \
+            (_os16.path.join(_CROSS16, "aarch64-linux-gnu-gcc")
+             if _os16.path.exists(_os16.path.join(_CROSS16, "aarch64-linux-gnu-gcc")) else None)
+        _q16 = _which16.which("qemu-aarch64") or \
+            (_os16.path.join(_CROSS16, "qemu-aarch64")
+             if _os16.path.exists(_os16.path.join(_CROSS16, "qemu-aarch64")) else None)
+        if _cc16 and _q16:
+            import subprocess as _sub16
+            _SR16 = "/opt/data/cache/scratch/toolchain/cross16"  # extract root
+            # qemu's -L <sysroot> resolves the baked-in aarch64 interpreter
+            # '/lib/ld-linux-aarch64.so.1' as <sysroot>/lib/... — ensure the
+            # user-space extract has that /lib link (idempotent; host state a
+            # fresh re-extract would lose).
+            try:
+                _liblink = _os16.path.join(_SR16, "lib")
+                if not _os16.path.exists(_liblink):
+                    _os16.symlink(
+                        _os16.path.join("usr", "aarch64-linux-gnu", "lib"),
+                        _liblink)
+            except OSError:
+                pass
+            _env16 = dict(os.environ)
+            _env16["PATH"] = _os16.path.dirname(_cc16) + os.pathsep + \
+                _os16.path.dirname(_q16) + os.pathsep + _env16.get("PATH", "")
+            # the cross gcc's internal as/ld are shared-lib builds needing
+            # the host lib dir (libbfd/libopcodes) — same as P19's binut.
+            _env16["LD_LIBRARY_PATH"] = \
+                _os16.path.join(_SR16, "usr", "lib", "x86_64-linux-gnu") + \
+                os.pathsep + _env16.get("LD_LIBRARY_PATH", "")
+
+            class _R16:
+                """RealSubprocess under the scratch toolchain PATH/LD paths."""
+                def run(self, argv):
+                    p = _sub16.run(argv, capture_output=True, text=True,
+                                   env=_env16, timeout=120)
+                    return (p.returncode, p.stdout + p.stderr)
+
+            _src16 = os.path.join(ROOT, "tests", "fixtures", "harness",
+                                  "popcount.c")
+            _out16 = os.path.join(td, "p16real")
+            _os16.makedirs(_out16, exist_ok=True)
+            _tc16 = {"host": "x86_64", "needs_qemu": True,
+                     "cc": _cc16,
+                     "as": (_which16.which("aarch64-linux-gnu-as")
+                            or _os16.path.join(_CROSS16, "aarch64-linux-gnu-as")),
+                     "qemu": _q16}
+            _inp16 = {"c": [_src16], "asm": [], "out": _out16,
+                      "binary": "tests", "sysroot": _SR16}
+            _res16 = H.validate_native(_inp16, runner=_R16(), toolchain=_tc16)
+            check("P16 real e2e: cross-gcc BUILD + qemu-aarch64 RUN observed",
+                  _res16["verdict"] == "SUCCESS"
+                  and _res16["passed"] == 6 and _res16["failed"] == 0
+                  and _res16["build"]["ok"] is True,
+                  str(_res16))
+            check("P16 real e2e: final command is qemu-aarch64 -L sysroot",
+                  _res16["commands"][-1][0] == _q16
+                  and _res16["commands"][-1][1] == "-L",
+                  str(_res16["commands"][-1]))
+            check("P16 real e2e: E5 ceiling note (proves THIS build, not "
+                  "generally-correct)", "E5" in _res16["note"], _res16["note"])
+        else:
+            print("  [P16] NOT OBSERVED: real aarch64 toolchain (cross gcc + "
+                  "qemu-aarch64) absent on this host — P16 real-run path "
+                  "not exercised (FakeRunner e2e above still applies)")
+
         # --- gateway dispatch: /harness registered + usage + missing-path
         if "harness" in gw.engines:
             r, j = gw.handle("/harness")
@@ -2254,7 +2327,7 @@ def main() -> int:
         ver = getattr(vb, "__version__", None)
         check("version: __init__.__version__ is X.Y.Z",
               isinstance(ver, str) and len(ver.split(".")) == 3, str(ver))
-        check("version: matches the current build", ver == "0.20.0", str(ver))
+        check("version: matches the current build", ver == "0.21.0", str(ver))
         r, j = gateway.Gateway(td).handle("/find zzz")
         check("session: /find without --sha is refused (no most-recent fallback)",
               "no --sha" in r and "run /apk" in r and j is None, r)

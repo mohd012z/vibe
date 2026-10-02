@@ -473,9 +473,23 @@ P25 self-improvement eval.
   both frameworks with the right real markers, lists the real js_entries, and
   `webview_used=True` from REAL DEX (`invoke-virtual WebView →
   addJavascriptInterface`, E2) — the DEX path P14 had never exercised.
-  `jsinterface=[]` pinned as honest (the bridge method is called from JS at
+  `jsinterface=[]` pinned as honest (bridge method called from JS at
   runtime, never from DEX). +6 checks → 473 (463 CI shape; fixture committed
   so it runs there too). See studies/2026-10-02-p14-real-hybrid-apk.md.
+- **P16 real-run (v0.21)** — DONE (same PR #6): the E5 top of the chain
+  finally EXECUTED on a real toolchain (was FakeRunner-only; NOT OBSERVED on
+  this host before). Installed user-space: `aarch64-linux-gnu-gcc` (cross
+  cc) + `qemu-aarch64` (user-mode) + aarch64 glibc sysroot (`libc6-dev-arm64-
+  cross`, `/usr/aarch64-linux-gnu`). Committed `tests/fixtures/harness/
+  popcount.c` (Kernighan popcount — the same idiom P15 classifies — + a
+  `main()` printing `6 passed, 0 failed`); the P16 real-e2e block builds it
+  with the real cross gcc (exercism-verbatim CFLAGS/LDFLAGS) and runs it under
+  real qemu-aarch64 → **verdict SUCCESS, E5 runtime**. TDD exposed + fixed:
+  sysroot had to be threaded through ALL THREE stages (compile/link/run), not
+  just compile. Closes the P15(static) → P16(runtime) loop on a real build.
+  +3 checks → 476 (CI shape unchanged; degrades to honest NOT-OBSERVED line).
+  `__version__` → 0.21.0 (real harness.py runtime change). See
+  studies/2026-10-02-p16-real-run.md. **P16's real-run gap: CLOSED.**
 - **P17 (Kotlin @Metadata name recovery)** — DONE (v0.16, backlog #2):
   `tools/vibebot/kotlinmeta.py` + `/kmeta <classes.dex|app.apk> [class_filter]`.
   R8 renames every DEX name, but a Kotlin class's `@kotlin.Metadata` annotation
