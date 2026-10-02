@@ -13,7 +13,14 @@ permissions:
 jobs:
   build-apk:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
+    env:
+      GRADLE_OPTS: >-
+        -Dorg.gradle.daemon=false
+        -Dorg.gradle.parallel=false
+        -Dorg.gradle.workers.max=2
+        -Dorg.gradle.internal.http.connectionTimeout=30000
+        -Dorg.gradle.internal.http.socketTimeout=30000
     steps:
       - uses: actions/checkout@v4
 
@@ -26,9 +33,38 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Diagnose Gradle environment
+        working-directory: android-app
+        timeout-minutes: 2
+        run: |
+          set -euxo pipefail
+          java -version
+          gradle --version
+          gradle --no-daemon --console=plain --stacktrace tasks >/tmp/vibe-gradle-tasks.log 2>&1 || {
+            cat /tmp/vibe-gradle-tasks.log
+            exit 1
+          }
+          tail -n 80 /tmp/vibe-gradle-tasks.log
+
       - name: Build debug APK
         working-directory: android-app
-        run: gradle --no-daemon :app:assembleDebug
+        timeout-minutes: 8
+        run: |
+          set -o pipefail
+          timeout --signal=TERM --kill-after=30s 7m \
+            gradle --no-daemon --console=plain --stacktrace --info :app:assembleDebug \
+            2>&1 | tee /tmp/vibe-gradle-build.log
+
+      - name: Upload Gradle diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vibe-gradle-diagnostics
+          path: |
+            /tmp/vibe-gradle-tasks.log
+            /tmp/vibe-gradle-build.log
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Verify APK exists and is a ZIP/APK
         run: |
