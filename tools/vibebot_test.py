@@ -2662,6 +2662,119 @@ def main() -> int:
         check("boundary terminator present", body.rstrip().endswith(b"--"))
 
         # ------------------------------------------------------------------
+        print("== v0.28: URL ingestion — /apk <https://…> (bypasses Telegram's 20MB getFile cap) ==")
+        # The single choke point is Gateway._artifact(): every path-accepting
+        # command routes through it. URLs are downloaded into inbound/ (bounded,
+        # retries); local paths keep the EXACT prior behavior (regression below).
+        # Pure helpers first (no network):
+        check("_is_url: https URL is a url", gateway._is_url("https://example.com/a.apk"))
+        check("_is_url: http URL is a url", gateway._is_url("http://example.com/a.apk"))
+        check("_is_url: local path is NOT a url", not gateway._is_url("./a.apk"))
+        check("_is_url: file:// is NOT a url (local, normal branch)", not gateway._is_url("file:///a.apk"))
+        check("_is_url: ftp:// is NOT a url (unsupported source)", not gateway._is_url("ftp://example.com/a.apk"))
+        check("_url_basename: last path segment",
+              gateway._url_basename("https://h/p/Ultima_14.apk") == "Ultima_14.apk")
+        check("_url_basename: query+fragment stripped",
+              gateway._url_basename("https://h/p/a.apk?sig=x#f") == "a.apk")
+        check("_url_basename: Content-Disposition filename wins",
+              gateway._url_basename("https://h/p/dl",
+                                    'attachment; filename="real.apk"') == "real.apk")
+        check("_url_basename: RFC5987 filename* (UTF-8) parsed",
+              gateway._url_basename("https://h/p/dl",
+                                    "attachment; filename*=UTF-8''my%20app.apk") == "my_app.apk")
+        check("_url_basename: unsafe chars sanitized (no path escape)",
+              "/" not in gateway._url_basename("https://h/a/../../etc/passwd"))
+        check("_url_basename: no safe name -> upload.bin",
+              gateway._url_basename("https://h/???") == "upload.bin")
+        # SSRF guard: non-public IP literals must be refused WITHOUT a network call
+        check("SSRF: loopback 127.0.0.1 refused", gateway._url_host_rejected("127.0.0.1"))
+        check("SSRF: private 10.x refused", gateway._url_host_rejected("10.0.0.5"))
+        check("SSRF: private 192.168.x refused", gateway._url_host_rejected("192.168.1.1"))
+        check("SSRF: link-local 169.254 (metadata) refused", gateway._url_host_rejected("169.254.169.254"))
+        check("SSRF: ::1 (IPv6 loopback) refused", gateway._url_host_rejected("::1"))
+        check("SSRF: 0.0.0.0 (unspecified) refused", gateway._url_host_rejected("0.0.0.0"))
+        check("SSRF: public IP allowed", not gateway._url_host_rejected("93.184.216.34"))
+        check("SSRF: hostname allowed (not an IP literal)", not gateway._url_host_rejected("example.com"))
+        gu = gateway.Gateway(os.path.join(td, "wurl"))
+        _orig_urlopen = urllib.request.urlopen
+        # a download that ALWAYS fails (HTTP 404) -> _artifact reports it, no job
+        def _fail_404(*a, **k):
+            raise urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+        urllib.request.urlopen = _fail_404
+        try:
+            p, err = gu._artifact("https://example.com/missing.apk")
+            check("url 404 -> honest 'download failed', NOT not-found",
+                  err is not None and "download failed" in err and "not found" not in err, str(err))
+            check("url 404 -> no local file created",
+                  not os.path.exists(os.path.join(gu.work_dir, "inbound", "missing.apk")))
+            r, j = gu.handle("/apk https://example.com/missing.apk")
+            check("url 404 -> /apk returns the error, no job queued",
+                  j is None and "download failed" in r, r)
+        finally:
+            urllib.request.urlopen = _orig_urlopen
+        # private host -> refused BEFORE any network (SSRF guard)
+        r, j = gu.handle("/apk http://127.0.0.1:9/x.apk")
+        check("SSRF: loopback URL refused by /apk (no fetch)",
+              j is None and "refused" in r and "private/loopback" in r, r)
+        # successful download (mocked bytes) -> real local path, byte-identical
+        fixture_bytes = b"PK\x03\x04 fake apkgzip bytes " * 50
+        class _FakeResp:
+            def __init__(self):
+                self.pos = 0
+                self.headers = {}  # no Content-Length: bound checked as we stream
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def read(self, n=-1):
+                out = fixture_bytes[self.pos:self.pos + (n if n > 0 else len(fixture_bytes))]
+                self.pos += len(out)
+                return out
+        urllib.request.urlopen = lambda *a, **k: _FakeResp()
+        try:
+            p, err = gu._artifact("https://example.com/p/Good_Name.apk")
+            check("url ok -> local inbound path returned",
+                  err is None and p.startswith(gu.work_dir) and p.endswith("Good_Name.apk"), str((p, err)))
+            check("url ok -> bytes on disk identical",
+                  os.path.exists(p) and open(p, "rb").read() == fixture_bytes)
+            r, j = gu.handle("/hash " + p)
+            check("url-ingested file is hashable (real file, not a URL string)",
+                  "sha256" in r and j is None, r)
+        finally:
+            urllib.request.urlopen = _orig_urlopen
+        # size bound: declared Content-Length over MAX -> aborted, no file
+        # (bound is read at call time, so monkeypatch the module global safely)
+        _orig_bound = gateway.MAX_UPLOAD_BYTES
+        class _BigResp:
+            def __init__(self):
+                self.headers = {"Content-Length": str(1 << 30)}  # 1 GB declared
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def read(self, n=-1):
+                return b""
+        urllib.request.urlopen = lambda *a, **k: _BigResp()
+        try:
+            gateway.MAX_UPLOAD_BYTES = 1 << 20  # 1 MB for the test
+            p, err = gu._artifact("https://example.com/huge.apk")
+            check("url oversized (declared) -> refused, no job file",
+                  err is not None and "too large" in err
+                  and not os.path.exists(os.path.join(gu.work_dir, "inbound", "huge.apk")),
+                  str(err))
+        finally:
+            gateway.MAX_UPLOAD_BYTES = _orig_bound
+            urllib.request.urlopen = _orig_urlopen
+        # REGRESSION: a LOCAL path behaves EXACTLY as before (no download)
+        local = os.path.join(td, "local_ok.apk"); open(local, "wb").write(b"PK")
+        p, err = gu._artifact(local)
+        check("regression: local path unchanged (resolves, no download)",
+              err is None and os.path.realpath(p) == os.path.realpath(local), str((p, err)))
+        p, err = gu._artifact(os.path.join(td, "nope.apk"))
+        check("regression: missing local path -> not found (unchanged wording)",
+              err is not None and "not found" in err and "download" not in err, str(err))
+
+        # ------------------------------------------------------------------
         print("== v0.17: hardening batch (lupoxyz #6/#7/#8/#10) ==")
         from vibebot import registry, deepdive
         import vibebot as vb

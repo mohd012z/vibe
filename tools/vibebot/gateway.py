@@ -6,7 +6,7 @@ id, and the caller runs `process_pending()` to work the queue (Telegram does
 this in a worker thread; CLI just calls it directly).
 
 Command surface (v0.1):
-  /analyze <path> [--engine apkmod|mock]   run the pipeline as a job (ACK now)
+  /analyze <path-or-url> [--engine apkmod|mock]   run the pipeline as a job (ACK now)
   /status [job-id]                         job state + progress
   /jobs                                    all jobs
   /sessions                                stored analysis sessions
@@ -14,6 +14,8 @@ Command surface (v0.1):
   /report --sha <sha256[:16]>              stored markdown report card
   /cancel <job-id>                         cancel a queued/running job
   /help                                    this surface
+  (any <path-or-url> arg also accepts https:// — v0.28 URL ingestion for
+   artifacts >20MB that can't cross Telegram's getFile cap; public hosts only)
 
 Security boundary (v0.1):
   * paths must exist; basename is sanitized into the report (never echoed
@@ -26,6 +28,7 @@ from __future__ import annotations
 
 import os
 import re
+import hashlib
 import sys
 import time
 import shutil
@@ -42,7 +45,7 @@ from . import core
 from . import engines
 
 HELP = """vibebot commands
-  /apk <path>            APK overview + Vibe IR entity graph (stable IDs)
+  /apk <path|url>        APK overview + Vibe IR entity graph (stable IDs)
   /map <path>            entity graph tree + cross-layer paths (or --sha <…>)
   /find <text> --sha <…> TargetFinder: strings/resources/classes/methods/components
   /xref <M|Cls.m> --sha <…>  references: callers + callees + strings
@@ -53,10 +56,10 @@ HELP = """vibebot commands
   /why <C-id> [--sha <…>] CodeTransparent trace: claim -> evidence -> bytes
   /plan <goal>           cheapest-capable method plan (live providers)
   /capabilities          what's installed here (honest detection)
-  /analyze <path> [--engine apkmod|dexmapper] [--fingerprints <json>]
-  /dex <path>            DEX Mapper job: class->method->call map + JNI + integrity
-  /xmatch <src.apk> <dst.apk>  cross-version method match (job) — carry validated findings
-  /native <path>         Radare native provider: ELF fns/imports/exports + JNI bridge
+  /analyze <path|url> [--engine apkmod|dexmapper] [--fingerprints <json>]
+  /dex <path|url>        DEX Mapper job: class->method->call map + JNI + integrity
+  /xmatch <src.apk|url> <dst.apk|url>  cross-version method match (job) — carry validated findings
+  /native <path|url>     Radare native provider: ELF fns/imports/exports + JNI bridge
   /harness <srcdir>      native-harness validation: build + run C test under qemu (E5)
   /kmeta <dex|apk> [f]   recover original (pre-R8) Kotlin names from @Metadata (E2)
   /commands [query]      searchable command registry (L0 always · L1 on demand)
@@ -69,6 +72,8 @@ HELP = """vibebot commands
   /status [job-id]       job state + progress
   /jobs                  all jobs
   /sessions              stored analysis sessions
+  (path-accepting commands above also accept https://<url> — v0.28 URL
+   ingestion for artifacts >20MB; public hosts only, 200MB bound)
   /deepdive <target> --sha <sha>   stateful traverse (callers|native|references|<name>|jni|calls)
   /investigate <path> [target]     orchestrated 18-stage investigation (job)
   /report --sha <sha>    stored report card
@@ -90,6 +95,71 @@ def sanitize_filename(name: str, max_len: int = 80) -> str:
     base = re.sub(r"[^A-Za-z0-9._-]", "_", base)
     base = base[:max_len].strip("._")
     return base or "upload.bin"
+
+
+def _is_url(raw: str) -> bool:
+    """True if `raw` is an http(s) URL we should ingest by download.
+
+    Only http/https — not file:// (that is a local path, handled by the
+    normal branch) and not ftp/etc (not a supported ingest source)."""
+    if not isinstance(raw, str):
+        return False
+    return re.match(r"^https?://", raw.strip(), re.IGNORECASE) is not None
+
+
+def _url_host_rejected(host: str) -> bool:
+    """SSRF guard: is this URL host a non-public IP literal we must not fetch?
+
+    Blocks loopback (127/8), private (10/8, 172.16/12, 192.168/16),
+    link-local (169.254/16), reserved, and unspecified IPv4/IPv6 literals —
+    the classic SSRF targets (cloud metadata, local services). Host NAMES are
+    not IP-resolved (no DNS in this guard): a name that resolves to a private
+    address is out of scope for this layer and is an honest, disclosed limit.
+    """
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address((host or "").strip().strip("[]"))
+    except ValueError:
+        return False  # not an IP literal — it is a hostname (allowed)
+    return (ip.is_loopback or ip.is_private or ip.is_link_local
+            or ip.is_reserved or ip.is_unspecified or ip.is_multicast)
+
+
+def _url_basename(url: str, content_disposition: str | None = None) -> str:
+    """Derive a safe on-disk file name for a downloaded artifact.
+
+    Preference: Content-Disposition `filename=` (server's intent) → last
+    URL path segment → `upload.bin`. Always passed through sanitize_filename
+    so it can never be a path or carry metachars."""
+    if content_disposition:
+        # RFC 5987 extended form first (it takes precedence): filename*=UTF-8''name%20x
+        m = re.search(r"filename\*\s*=\s*([^;]+)", content_disposition,
+                      re.IGNORECASE)
+        if m:
+            cand = m.group(1).strip().strip("'\"")
+            # drop the `charset''` prefix, then URL-decode the name
+            cand = cand.split("''")[-1]
+            try:
+                cand = urllib.parse.unquote(cand)
+            except (ValueError, UnicodeDecodeError):
+                pass
+            if cand:
+                return sanitize_filename(cand)
+        # plain form: filename="name" or filename=name
+        m = re.search(r'filename\s*=\s*["\']?([^"\';]+)', content_disposition,
+                      re.IGNORECASE)
+        if m:
+            cand = m.group(1).strip().strip("'\"")
+            if cand:
+                return sanitize_filename(cand)
+    # fall back to the URL's PATH component (not the host, not query/fragment)
+    try:
+        path = urllib.parse.urlparse(url).path
+    except (ValueError, AttributeError):
+        path = ""
+    for seg in reversed([s for s in path.split("/") if s]):
+        return sanitize_filename(seg)
+    return "upload.bin"
 
 
 class Gateway:
@@ -178,13 +248,100 @@ class Gateway:
         except (zipfile.BadZipFile, OSError) as e:
             return "", "", f"error: could not unpack .apks bundle ({type(e).__name__}: {e})"
 
+    def _inbound_dir(self) -> str:
+        d = os.path.join(self.work_dir, "inbound")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def download_url(self, url: str) -> str:
+        """Fetch `url` into the work dir's inbound/ (bounded, retries).
+
+        The plain-HTTP path for large artifacts — Telegram's getFile is
+        capped at 20 MB by the Bot API, but a direct download is only
+        limited by our MAX_UPLOAD_BYTES bound. Streamed in 1 MB chunks; a
+        transfer that exceeds the bound is ABORTED (no partial file left
+        under the final name). Network errors retry (4 attempts); a 4xx
+        response is terminal (retries can't fix a 404). Returns the local
+        path; raises RuntimeError on refusal/failure.
+        """
+        import urllib.parse as _up
+        host = _up.urlparse(url).hostname or ""
+        if _url_host_rejected(host):
+            raise RuntimeError(
+                f"refused (private/loopback host: {host}) — URL ingestion "
+                f"only fetches public addresses (SSRF guard)")
+        base = _url_basename(url)
+        digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:8]
+        final = os.path.join(self._inbound_dir(), base)
+        if os.path.exists(final) and os.path.getsize(final) > 0:
+            # same URL + same filename already ingested this run — reuse it.
+            # (A re-ingest of a CHANGED upstream file is a new URL/name in
+            # practice; a byte-identical re-fetch is a no-op by design.)
+            return final
+        tmp = os.path.join(self._inbound_dir(), f".dl-{digest}-{base}")
+        last = None
+        for attempt in range(4):
+            try:
+                req = urllib.request.Request(
+                    url, headers={
+                        "User-Agent": "Mozilla/5.0 (compatible; VibeBot/0.28)",
+                    })
+                with urllib.request.urlopen(req, timeout=300) as r:
+                    # honor a declared Content-Length up front when present
+                    cl = r.headers.get("Content-Length")
+                    if cl and cl.isdigit() and int(cl) > MAX_UPLOAD_BYTES:
+                        raise RuntimeError(
+                            f"file too large ({cl} B > {MAX_UPLOAD_BYTES} bound)")
+                    written = 0
+                    with open(tmp, "wb") as out:
+                        while True:
+                            chunk = r.read(1 << 20)
+                            if not chunk:
+                                break
+                            written += len(chunk)
+                            if written > MAX_UPLOAD_BYTES:
+                                raise RuntimeError(
+                                    f"file too large (>{MAX_UPLOAD_BYTES} B bound)")
+                            out.write(chunk)
+                os.replace(tmp, final)  # atomic: final name appears whole
+                return final
+            except RuntimeError as e:
+                # bound exceeded (or a real error) — drop the partial temp,
+                # re-raise so _artifact() reports it as a failed download
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+                raise e
+            except urllib.error.HTTPError as e:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+                if 400 <= e.code < 500:
+                    raise RuntimeError(f"HTTP {e.code} {e.reason}") from e
+                last = e
+                time.sleep(2 * (attempt + 1))
+            except (urllib.error.URLError, ConnectionResetError,
+                    TimeoutError) as e:
+                last = e
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+                time.sleep(2 * (attempt + 1))
+        raise RuntimeError(f"url download failed after retries: {last}")
+
     def _artifact(self, raw: str, label: str = "artifact",
                   allow_bundle: bool = True) -> tuple[str, str | None]:
-        """Resolve a user-supplied path: expand+abs, containment-gate, exist.
+        """Resolve a user-supplied artifact: local path OR http(s) URL, and
+        optionally an .apks bundle.
         Returns (abs_path, error) — error is a ready-to-return message or None.
-        v0.30: a .apks bundle is unpacked to its base.apk (cached per bundle);
-        the split APKs are disclosed via _bundle_note, never silently dropped."""
-        path = os.path.abspath(os.path.expanduser(raw))
+        v0.28: URLs download into inbound/ (bounded, retries) — bypasses the
+        20 MB Telegram getFile cap. v0.30: a .apks bundle is unpacked to its
+        base.apk (cached per bundle); splits disclosed, never silently dropped.
+        """
+        if _is_url(raw):
+            try:
+                path = self.download_url(raw.strip())
+            except (RuntimeError, OSError, ValueError) as e:
+                return raw, f"error: {label} download failed ({e})"
+        else:
+            path = os.path.abspath(os.path.expanduser(raw))
         ce = self._containment_err(path)
         if ce:
             return path, ce
