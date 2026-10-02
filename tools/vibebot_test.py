@@ -1345,9 +1345,19 @@ def main() -> int:
               repr(KM.bitencoding_decode(enc)))
         check("utf8 decode: empty d1 -> empty bytes",
               KM.bitencoding_decode("") == b"", "")
-        check("utf8 decode: un-marked fallback = char->byte (no drop)",
-              KM.bitencoding_decode("ab") == b"ab",
-              repr(KM.bitencoding_decode("ab")))
+        # AUTHORITATIVE: decodeBytes has only two modes — UTF-8 (first char
+        # \u0000) and 8-to-7 (everything else). There is no raw char->byte
+        # fallback. A no-marker d1 is 8-to-7: raw = (char-1)&0x7f per char,
+        # then decode7to8 (floor(7*len/8) bytes). The genuine no-marker 8to7
+        # encoding of a 1-byte proto 0x00 is d1 = "\u0001\u0001" (raw 00 00
+        # -> 0x00), NOT ascii "ab" (0x61/0x62, which are not valid 8to7 d1
+        # bytes). Pinned here so the (removed) raw-fallback assumption
+        # can't survive; the real-compiler differential below is
+        # authoritative.
+        check("decode: no-marker 8to7 d1 decodes via 8-to-7 (not raw char->byte)",
+              KM.bitencoding_decode("\u0001\u0001") == b"\x00"
+              and KM.bitencoding_decode("\u0001") == b"",
+              repr(KM.bitencoding_decode("\u0001\u0001")))
         # --- DEX annotation extraction: envelope + d2 name table
         krecs = KM.extract_kotlin_metadata(ktdex)
         check("extract: 6 @Metadata classes in the fixture",
@@ -1435,6 +1445,64 @@ def main() -> int:
         else:
             check("differential: NOT OBSERVED here (no Kotlin toolchain) — "
                   "pure decode stands, unverified against oracle",
+                  True, "toolchain absent; disclosed, not skipped")
+
+        # --- P17 8-to-7 BitEncoding DIFFERENTIAL vs the REAL compiler ---
+        # The 8-to-7 d1 mode is only ever used under
+        # kotlin.jvm.serialization.use8to7=true (off by default) and is the
+        # one decode path a hand-rolled port gets wrong: the common
+        # single-part case carries NO mode marker (d1[0] is real data),
+        # only the >=~65533-byte multi-part case gets a \uFFFF prefix on
+        # the first part. We exercise the real compiler's BitEncoding
+        # (encodeBytes + decodeBytes) in BOTH modes and assert our pure
+        # bitencoding_decode produces the SAME bytes as the compiler's own
+        # decode of the identical d1. Covers no-marker 8to7, \uFFFF marker,
+        # and the compiler's own lossy lone-high-byte cases (RT0) where we
+        # still must match the compiler, not the original.
+        BE8_CASES = ["00", "7f", "80", "ff", "00000000",
+                     "41007f80ff011121", "0102030405060708090a",
+                     "BIG:70000"]
+        be8_res = {}
+        for _be8_mode in ("utf8", "8to7"):
+            be8_res[_be8_mode] = KM.run_be8to7_oracle(
+                BE8_CASES, _be8_mode, os.path.join(td, "be8_" + _be8_mode))
+        if any(v is not None for v in be8_res.values()):
+            for _be8_mode in ("utf8", "8to7"):
+                _be8_r = be8_res[_be8_mode]
+                if _be8_r is None:
+                    continue
+                _m = sum(1 for _c in _be8_r
+                         if KM.bitencoding_decode(_c["d1"]).hex() == _c["dech"])
+                check("8to7-differential[%s]: bitencoding_decode == compiler "
+                      "decodeBytes on all %d cases" % (
+                          _be8_mode, len(_be8_r)),
+                      _m == len(_be8_r),
+                      "matched %d/%d" % (_m, len(_be8_r)))
+        if be8_res.get("8to7") is not None:
+            _be8_8 = be8_res["8to7"]
+            # Case 0 (orig 0x00) encodes to the no-marker 8to7 d1 "
+            # \u0001\u0001" — first char is real data, NOT the UTF-8 \u0000
+            # marker. If 8to7 had silently fallen back to UTF-8, encodeBytes
+            # would have produced a \u0000 marker here. (Case 1, orig 0x7f,
+            # encodes to a SINGLE \u0000 char — a data byte, not a marker —
+            # so we check case 0, not case 1.)
+            check("8to7-differential: 8to7 mode is REAL (no UTF-8 \\u0000 "
+                  "marker on the no-marker small case)",
+                  _be8_8[0]["d1"][:1] != "\u0000"
+                  and len(_be8_8[0]["d1"]) == 2,
+                  repr(_be8_8[0]["d1"]))
+            # The BIG case must actually split into multi-part and carry the
+            # \uFFFF mode marker on the first part (the only case where the
+            # marker exists) — proves that path is exercised, not assumed.
+            _be8_big = _be8_8[len(_be8_8) - 1]
+            check("8to7-differential: BIG case is multi-part with \\uFFFF "
+                  "marker (marker path exercised)",
+                  "\uFFFF" in _be8_big["d1"],
+                  "no \\uFFFF marker found; d1 head=" + repr(
+                      _be8_big["d1"][:4]))
+        else:
+            check("8to7-differential: NOT OBSERVED here (no Kotlin "
+                  "toolchain) — pure 8to7 decode stands, unverified",
                   True, "toolchain absent; disclosed, not skipped")
 
         # --- P17 REAL R8 e2e: the actual obfuscation R8 applies to this same
@@ -2381,7 +2449,7 @@ def main() -> int:
         ver = getattr(vb, "__version__", None)
         check("version: __init__.__version__ is X.Y.Z",
               isinstance(ver, str) and len(ver.split(".")) == 3, str(ver))
-        check("version: matches the current build", ver == "0.22.0", str(ver))
+        check("version: matches the current build", ver == "0.23.0", str(ver))
         r, j = gateway.Gateway(td).handle("/find zzz")
         check("session: /find without --sha is refused (no most-recent fallback)",
               "no --sha" in r and "run /apk" in r and j is None, r)

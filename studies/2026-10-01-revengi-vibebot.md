@@ -512,10 +512,11 @@ P25 self-improvement eval.
   xi=48; **d1 is NOT base64** (the old study note was wrong for Kotlin 2.x).
   E2/PROBABLE ceiling (recovered names are the source's intent; re-validate
   against behavior before acting). 385 checks (+22). Backlog #2 DONE.
-  Honest limits: single-fixture coverage (one kotlinc 2.0.21 / d8 shape —
-  8-to-7 mode unexercised by a real sample; un-marked d1 is a documented
-  fallback); oracle cross-check only runs where a Kotlin toolchain is present
-  (NOT OBSERVED elsewhere, never a fake pass). Design origin:
+  Honest limits: single-fixture coverage (one kotlinc 2.0.21 / d8 shape).
+  8-to-7 mode was originally unexercised by a real sample — that gap is now
+  CLOSED by P17 8-to-7 below (which also found + fixed a real bug in the
+  no-marker path). Oracle cross-check only runs where a Kotlin toolchain is
+  present (NOT OBSERVED elsewhere, never a fake pass). Design origin:
   `studies/2026-10-02-external-study-lupoxyz-ghidra-mcp.md` (backlog item 2).
 - **P17b (real-R8 verification, v0.22)** — DONE (same PR #6): P17's
   single-fixture gap closed with REAL R8 9.4.28 outputs of the same sample
@@ -544,11 +545,34 @@ P25 self-improvement eval.
   (PR #14 cloud actions-runner → `880298a`, 4 new `tools/cloud/*` files — no
   overlap with P17b); rebase + 481 ALL PASS (full-host: r2 P18/P19 positive,
   P16 via system aarch64 cross-compiler after scratch auto-pruned cross16) +
-  `--force-with-lease` → **head `fe852df`, base `880298a` (current main), CI
+  `--force-with-lease` → **head `4ac6937`, base `880298a` (current main), CI
   validate PASS, CLEAN/MERGEABLE.** Lesson (recurred twice in one session): an
   open PR on a protected main goes BEHIND every time ANY other PR merges —
   always `git ls-remote origin main` + rebase + re-verify before a merge ask.
-  Merge = Fatah's call.**
+  Then (Anam "proceed"): the in-flight P17 8-to-7 real-verification (below)
+  was folded into #12 as a new commit family → **PR #12 = v0.23.0, 485 ALL
+  PASS** (see P17 8-to-7 entry). Merge = Fatah's call.**
+- **P17 8-to-7 (real-compiler verification, v0.23)** — DONE (same PR #12):
+  P17's "8-to-7 mode unexercised by a real sample" gap CLOSED. Fetched the
+  authoritative JetBrains `BitEncoding.java` + `utfEncoding.kt`; forced the
+  REAL compiler into 8-to-7 mode (`-Dkotlin.jvm.serialization.use8to7=true` —
+  the flag is read in a static initializer, so hand-flipping the field in
+  main is too late) and differentially verified the pure decoder against the
+  compiler's own `decodeBytes` in BOTH modes. **Found a real bug**: the
+  decoder had a third, invented "raw char→byte" fallback; the authoritative
+  `decodeBytes` has only two modes (U+0000→UTF-8, else→8-to-7). Old code
+  mismatched the compiler on 6/20 cases (exactly the no-marker 8-to-7 path —
+  the common small payload, where NO U+FFFF marker is prepended); fixed
+  decoder matches all 20, incl. the compiler's own lossy lone-high-byte cases
+  (where we must match the compiler, not the original). Docstring also
+  corrected (marker was documented as U+00FF; real = U+FFFF, only on
+  multi-part splits). Added `tools/vibebot/BE8to7.java` (subprocess
+  differential oracle, same license-safe pattern as KMeta.java) +
+  `run_be8to7_oracle` + 4 test checks (per-mode differential, "mode is REAL"
+  guard, BIG-case U+FFFF-marker guard, no-marker unit test); NOT-OBSERVED
+  degrade when the Kotlin toolchain is absent. `__version__` 0.22.0 →
+  0.23.0. **485 full-host ALL PASS / CI-shape ALL PASS.** See
+  studies/2026-10-02-p17-8to7-real.md.
 - ~~Kotlin @Metadata name recovery~~ — DONE above (P17, v0.16); the
   "STILL DEFERRED" state was unblocked when scratch gained JDK17 + kotlinc +
   d8, and the message-level proto numbers from `metadata.proto` were verified
