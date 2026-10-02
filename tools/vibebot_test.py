@@ -1558,6 +1558,130 @@ def main() -> int:
             print("  [P17] NOT OBSERVED: ktmeta_r8 fixtures absent — "
                   "real-R8 ceiling not pinned")
 
+        # --- P17 multi-byte string-index regression (v0.24) ---------------
+        # DEX encoded_value string indices are FIXED-WIDTH LITTLE-ENDIAN, not
+        # ULEB128 varints. A single small synthetic fixture (every index < 128,
+        # one byte) has the two encodings AGREE, which is exactly why it masked
+        # the original `sid = _varint(el.raw_value)` bug. A real R8'd
+        # production APK (large string table) has 2+ byte indices and the
+        # varint read overruns raw_value -> IndexError / silent wrong string.
+        # Synthetic unit: the fixed _string_of reads wide indices little-endian
+        # (correct for 1, 2, 3-byte widths). Real-fixture regression: a real
+        # kotlinc/d8 DEX whose @Metadata carries wide string indices must
+        # decode with ZERO exceptions and ZERO misreads.
+        if HAVE_ANDROGUARD:
+            class _FakeEl:
+                def __init__(self, raw, val):
+                    self.raw_value = raw
+                    self.value = val
+
+            class _FakeDex:
+                def __init__(self, table):
+                    self._t = table
+
+                def get_cm_string(self, idx):
+                    return self._t[idx]
+
+            _tbl = ["Lcom/reg/Target;", "repoId", "packageName",
+                    "displayName", "w2", "w3"]
+            _fd = _FakeDex(_tbl)
+            # 1-byte LE index (idx=2)
+            check("multi-byte: 1-byte LE index reads correctly",
+                  KM._string_of(_fd, _FakeEl(b"\x02", None)) == "packageName",
+                  repr(KM._string_of(_fd, _FakeEl(b"\x02", None))))
+            # 2-byte LE index (idx=0x0805=2053 -> but our table is small; use
+            # a wide index that the OLD varint read would misparse)
+            # raw b'\x05\x08' LE = 0x0805 = 2053 (out of small table) — so
+            # instead assert the little-endian VALUE directly via a wide table.
+            _wide_tbl = ["x"] * 2054
+            _wfd = _FakeDex(_wide_tbl)
+            check("multi-byte: 2-byte LE index 0x0805==2053 (not varint)",
+                  KM._string_of(_wfd, _FakeEl(b"\x05\x08", None))
+                  == _wide_tbl[2053]
+                  and 2053 != KM._varint(b"\x05\x08")[0],
+                  f"LE={2053} varint={KM._varint(b'\x05\x08')[0]}")
+            # 3-byte LE index (idx=0x100000=1048576)
+            _huge_tbl = ["y"] * 1048577
+            _hfd = _FakeDex(_huge_tbl)
+            check("multi-byte: 3-byte LE index 0x100000==1048576",
+                  KM._string_of(_hfd, _FakeEl(b"\x00\x00\x10", None))
+                  == _huge_tbl[1048576],
+                  "3-byte LE")
+            # androguard's own resolved string is preferred when present
+            check("multi-byte: uses androguard's resolved el.value when set",
+                  KM._string_of(_fd, _FakeEl(b"\x02", "RESOLVED"))
+                  == "RESOLVED", repr("RESOLVED"))
+
+            MB = os.path.join(ROOT, "tests", "fixtures", "ktmeta_multibyte",
+                              "classes.dex")
+            if os.path.exists(MB):
+                mb = open(MB, "rb").read()
+                recs = KM.extract_kotlin_metadata(mb)
+                check("multi-byte regression fixture: @Metadata classes "
+                      "extracted WITHOUT exception (old varint code "
+                      "IndexErrors / misreads here)",
+                      len(recs) >= 1, f"{len(recs)} classes")
+                # the target data class must carry wide (2-byte) string idxs
+                d = None
+                from androguard.core.dex import DEX
+                d = DEX(mb)
+                wide = 0
+                old_wrong = 0
+                tot = 0
+                for cls in d.get_classes():
+                    for a in cls._get_annotation_type_ids():
+                        if "kotlin/Metadata" not in str(
+                                d.get_cm_type(a.get_type_idx())):
+                            continue
+                        for el in a.get_elements():
+                            nm = d.get_cm_string(el.name_idx)
+                            if nm in ("d1", "d2"):
+                                for e in el.value.get_value().get_values():
+                                    tot += 1
+                                    rv = bytes(e.raw_value)
+                                    if len(rv) >= 2:
+                                        wide += 1
+                                    # what the OLD varint read produced
+                                    try:
+                                        old = d.get_cm_string(
+                                            KM._varint(rv)[0])
+                                    except Exception:
+                                        old = None  # IndexError / overrun
+                                    if old != e.value:
+                                        old_wrong += 1
+                check("multi-byte regression fixture: OLD varint read gets a "
+                      "string WRONG here (the bug this fix removes)",
+                      old_wrong > 0,
+                      f"old_wrong={old_wrong}/{tot} (wide2b={wide})")
+                check("multi-byte regression fixture: FIXED read resolves "
+                      "every @Metadata string to androguard's value",
+                      all(
+                          KM._string_of(d, e) == e.value
+                          for cls in d.get_classes()
+                          for a in cls._get_annotation_type_ids()
+                          if "kotlin/Metadata" in str(
+                              d.get_cm_type(a.get_type_idx()))
+                          for el in a.get_elements()
+                          if d.get_cm_string(el.name_idx) in ("d1", "d2")
+                          for e in el.value.get_value().get_values()),
+                      "fixed == androguard for all items")
+                dec = KM.decode_class_metadata(
+                    next(r["d1"] for r in recs
+                         if r["class_desc"].endswith("Lcom/reg/Target;")
+                         and r.get("d1")),
+                    next(r["d2"] for r in recs
+                         if r["class_desc"].endswith("Lcom/reg/Target;")))
+                check("multi-byte regression fixture: Target decodes with "
+                      "its original property names",
+                      dec is not None and
+                      {"repoId", "packageName", "displayName"}
+                      <= set(dec.get("properties") or []),
+                      str(dec.get("properties") if dec else None))
+            else:
+                print("  [P17] NOT OBSERVED: ktmeta_multibyte fixture "
+                      "absent — multi-byte string-index regression "
+                      "not pinned (synthetic unit still applies)")
+
         # --- gateway dispatch: /kmeta registered + usage + missing path
         if "kotlinmeta" in gw.engines:
             r, j = gw.handle("/kmeta")
@@ -2449,7 +2573,7 @@ def main() -> int:
         ver = getattr(vb, "__version__", None)
         check("version: __init__.__version__ is X.Y.Z",
               isinstance(ver, str) and len(ver.split(".")) == 3, str(ver))
-        check("version: matches the current build", ver == "0.23.0", str(ver))
+        check("version: matches the current build", ver == "0.24.0", str(ver))
         r, j = gateway.Gateway(td).handle("/find zzz")
         check("session: /find without --sha is refused (no most-recent fallback)",
               "no --sha" in r and "run /apk" in r and j is None, r)

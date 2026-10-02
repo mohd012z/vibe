@@ -302,10 +302,28 @@ def decode_class_metadata(d1: str, d2: list[str]) -> dict | None:
     return parse_class_names(class_bytes, records, list(d2))
 
 
-# ------------------------------------------------------------- DEX glue -----
+# ------------------------------------------------------------- DEX glue ----
 def _string_of(dex, el) -> str | list[str]:
-    """An EncodedValue for a Metadata string element -> its DEX string(s)."""
-    sid = _varint(bytes(el.raw_value))[0]
+    """An EncodedValue for a Metadata string element -> its DEX string.
+
+    androguard 4.x resolves a VALUE_STRING EncodedValue to the raw DEX
+    string at parse time, so `el.value` is the string itself (correct by
+    construction for any index width). Prefer it. Fallback: read the index
+    as a FIXED-WIDTH LITTLE-ENDIAN integer (width = len(raw_value)).
+
+    Do NOT read it as a ULEB128 varint: DEX encoded_value indices are
+    fixed-width, not varints. On a small string table (every index < 128,
+    one byte) the two encodings agree — which is exactly why a single
+    small synthetic fixture masks this bug. A real R8'd production APK has
+    a large string table, so string indices reach 2+ bytes (e.g.
+    b'\\xaf\\xe0' == 0x80af), and a varint read walks off the end of
+    raw_value -> IndexError. Verified on a real F-Droid client (1544
+    @Metadata classes) 2026-10-02.
+    """
+    v = el.value
+    if isinstance(v, str):
+        return v
+    sid = int.from_bytes(bytes(el.raw_value), "little")
     return dex.get_cm_string(sid)
 
 

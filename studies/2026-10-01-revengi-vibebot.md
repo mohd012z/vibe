@@ -573,6 +573,29 @@ P25 self-improvement eval.
   degrade when the Kotlin toolchain is absent. `__version__` 0.22.0 →
   0.23.0. **485 full-host ALL PASS / CI-shape ALL PASS.** See
   studies/2026-10-02-p17-8to7-real.md.
+- **P17 real production APK (F-Droid e2e + DEX-glue bug, v0.24)** — DONE
+  (same PR #12): P17's last "synthetic-only" gap CLOSED. Downloaded a real
+  R8'd production app (F-Droid client, 12.5MB, 3 DEX, ~24.5k classes) and
+  ran the production decoder on it — which immediately **crashed**:
+  `_string_of` read DEX `encoded_value` string indices as ULEB128 varints,
+  but they are **fixed-width little-endian** (authoritative: androguard
+  `_getintvalue`). Masked because a small string table keeps every index
+  < 128 (1 byte) where the two encodings agree; a real app's large table
+  reaches 2+ bytes → `IndexError` / wrong string. Fixed to prefer
+  androguard's already-resolved `el.value` (correct for any width) with a
+  fixed-width LE fallback. **Also corrected P17b**: a real production R8'd
+  app **keeps** `@Metadata` (1,544 classes) — "default R8 strips @Metadata"
+  is config-specific, not universal, so P17 name-recovery is a live
+  real-world capability. Real-APK result: 1,544 metadata classes → 1,108
+  decoded with original property names, 436 honest empty-d1, **0
+  exceptions**. Added a real kotlinc/d8 19KB regression DEX
+  (`tests/fixtures/ktmeta_multibyte/classes.dex`) + **8 checks** (synthetic
+  1/2/3-byte LE unit + real-fixture proof the OLD varint read gets a string
+  wrong + FIXED read matches androguard for every item); all 8 **pinned in
+  CI-shape** too (need only androguard + fixture, not the optional
+  toolchain). `__version__` 0.23.0 → 0.24.0. **493 full-host ALL PASS /
+  480 CI-shape ALL PASS / redteam 32/32 / apkmod ALL PASS.** See
+  studies/2026-10-02-p17-real-apk-fdroid.md.
 - ~~Kotlin @Metadata name recovery~~ — DONE above (P17, v0.16); the
   "STILL DEFERRED" state was unblocked when scratch gained JDK17 + kotlinc +
   d8, and the message-level proto numbers from `metadata.proto` were verified
