@@ -246,18 +246,31 @@ backend.
 5. **Hybrid-app layer detection** — `/apk` overview reports bundled web
    assets (`/assets/**/app-service.js` etc.) → "logic may be JS, not DEX"
    coverage note.
-6. **File-root containment** on all path-accepting commands (D-5 from B).
-7. **`/investigate` summary split**: actionable-gaps vs unobservable-gaps
-   (B3 structure, our vocabulary).
-8. **L0/L1 command split + searchable registry** when surface > ~20 commands
-   (B4).
+6. ~~**File-root containment** on all path-accepting commands (D-5 from B)~~
+   — DONE (v0.17): `Gateway(file_root=…)` / `VIBE_FILE_ROOT` env (opt-in,
+   GHIDRA_MCP_FILE_ROOT pattern); all 13 path-accepting handlers route
+   through `_artifact()`; unset → unchanged (no-gate), set → outside-root
+   + `../`-escape refused (NOT OBSERVED outside the root).
+7. ~~**`/investigate` summary split**: actionable-gaps vs unobservable-gaps
+   (B3 structure, our vocabulary)~~ — DONE (v0.17): `deepdive.classify_gaps`
+   (pure) — native-provider stages (11/12) = **actionable** (install r2/ghidra
+   + re-run); runtime/data-boundary stages = **unobservable** (NOT OBSERVED
+   != IMPOSSIBLE); rendered under the /investigate card.
+8. ~~**L0/L1 command split + searchable registry** when surface > ~20
+   commands (B4)~~ — DONE (v0.17): `registry.py` (single source of truth,
+   tiered) + `/commands [query]` searchable surface. /help kept short and
+   intact; L1 found by keyword.
 9. **P17 oracle gating spec**: off-by-default, named-exports only,
    call-only vs differential (B, oracle) — design note before any Frida
-   work. (Note: the build "P17" label is reused for the Kotlin @Metadata
-   name recovery above, item #2 — that one is DONE; this Frida oracle
-   spec is still open and is its own backlog line.)
-10. **Invariant tests**: no "most recent session" fallback (B5); version
-    string consistency across `__init__`/pyproject (B, test pitfalls).
+   work. (STILL OPEN — needs a Frida runtime on the host; not buildable
+   androguard-only. The build "P17" label is reused for the Kotlin
+   @Metadata name recovery, item #2 — that one is DONE; this Frida oracle
+   spec is its own backlog line.)
+10. ~~**Invariant tests**: no "most recent session" fallback (B5); version
+    string consistency across `__init__`/pyproject (B, test pitfalls)~~
+    — DONE (v0.17): test asserts `/find`/`/xref` without `--sha` are refused
+    (no silent last-session use) and `__init__.__version__` is X.Y.Z and
+    matches the build (bumped to 0.17.0 — it had been stuck at 0.1.0).
 
 Items 1–6 are androguard-only → buildable on this host today, same workflow
 (branch + TDD + PR, Fatah merges). 2, 3, 4, 5, 6 are small; 1 is the

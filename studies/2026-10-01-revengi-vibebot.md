@@ -477,6 +477,33 @@ P25 self-improvement eval.
   d8, and the message-level proto numbers from `metadata.proto` were verified
   against real compiler output end-to-end.
 
+- **v0.17 hardening batch (lupoxyz #6/#7/#8/#10)** — DONE (v0.17):
+  closes the remaining host-buildable lupoxyz backlog items in one batch.
+  - **#6 file-root containment** (GHIDRA_MCP_FILE_ROOT pattern):
+    `Gateway(file_root=…)` / `VIBE_FILE_ROOT` env, **opt-in** — unset keeps
+    current no-gate behavior (no test/deploy churn), set gates all 13
+    path-accepting handlers through `_artifact()`. Outside-root and `../`
+    escape → refused ("outside the file root … NOT OBSERVED"); missing
+    inside-root path still reports not-found.
+  - **#7 /investigate gap split** (B3): `deepdive.classify_gaps` (pure)
+    separates **actionable** gaps (native stages 11/12 — install r2/ghidra
+    + re-run; a tool install is an action) from **unobservable** gaps
+    (runtime/data-boundary — NOT OBSERVED != IMPOSSIBLE); rendered under the
+    card. Pure over the result dict (unit-testable, no androguard).
+  - **#8 L0/L1 command split + searchable registry** (B4): `registry.py` is
+    the single source of truth (tiered: L0 always, L1 searchable) with
+    `/commands [query]` keyword search. /help stays short and intact (tests +
+    live menu depend on it); the surface is now >20 so the split is warranted.
+  - **#10 invariant tests**: asserts no "most recent session" fallback
+    (`/find`/`/xref` without `--sha` are refused, last-job sha is only a hint)
+    and version-string consistency — `__init__.__version__` bumped to `0.17.0`
+    (it had been stuck at `0.1.0` through v0.16 — this is the invariant that
+    was actually lagging).
+  407 checks (+22). apkmod + redteam 32/32. **#9 (Frida oracle gating spec)
+  stays OPEN** — needs a Frida runtime on the host, not androguard-only.
+  Lupoxyz study backlog: all androguard-only items now DONE; only #9 (Frida)
+  remains.
+
 ## Open items (need Fatah/Anam decision)
 
 1. **Bot identity** — new Telegram bot via BotFather (token never

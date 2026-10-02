@@ -2106,6 +2106,109 @@ def main() -> int:
         check("caption field present", b"caption" in body and b"x" in body)
         check("boundary terminator present", body.rstrip().endswith(b"--"))
 
+        # ------------------------------------------------------------------
+        print("== v0.17: hardening batch (lupoxyz #6/#7/#8/#10) ==")
+        from vibebot import registry, deepdive
+        import vibebot as vb
+
+        # --- #8: command registry (L0/L1 + searchable) --------------------
+        names = [c["name"] for c in registry.COMMANDS]
+        check("registry: every entry has name/tier/summary",
+              all(c["name"] and c["tier"] in (0, 1) and c["summary"]
+                  for c in registry.COMMANDS), "")
+        check("registry: no duplicate command names",
+              len(names) == len(set(names)), str(sorted(names)))
+        check("registry: >20 commands (L0/L1 split justified)",
+              registry.count() > 20, str(registry.count()))
+        check("registry: L0 non-empty and is a proper subset",
+              len(registry.by_tier(0)) > 0
+              and len(registry.by_tier(0)) < registry.count(),
+              str(len(registry.by_tier(0))))
+        r, _ = gateway.Gateway(td).handle("/commands")
+        check("/commands no-arg: L0 advertised then L1",
+              "L0" in r and "L1" in r and "/kmeta" in r, r)
+        r, _ = gateway.Gateway(td).handle("/commands kotlin")
+        check("/commands kotlin: finds /kmeta via keyword",
+              "/kmeta" in r, r)
+        r, _ = gateway.Gateway(td).handle("/commands zzz_no_such_thing")
+        check("/commands unknown query: honest empty, not a fake match",
+              "no commands match" in r, r)
+
+        # --- #6: file-root containment (GHIDRA_MCP_FILE_ROOT pattern) ------
+        root = os.path.join(td, "cont_root"); os.makedirs(root, exist_ok=True)
+        os.makedirs(os.path.join(root, "in"), exist_ok=True)
+        inpath = os.path.join(root, "in", "a.apk")
+        open(inpath, "w").write("x")
+        outdir = os.path.join(td, "cont_out"); os.makedirs(outdir, exist_ok=True)
+        outpath = os.path.join(outdir, "b.apk")
+        open(outpath, "w").write("y")
+        gwcont = gateway.Gateway(os.path.join(td, "wcont"), file_root=root)
+        check("containment unset->set: file_root is honored",
+              gwcont.file_root == os.path.realpath(root), gwcont.file_root)
+        r, j = gwcont.handle(f"/dexcheck {outpath}")
+        check("containment: outside-root path refused (NOT OBSERVED)",
+              "outside the file root" in r and j is None, r)
+        r, j = gwcont.handle(f"/dexcheck {inpath}")
+        check("containment: inside-root path NOT refused",
+              "outside the file root" not in r, r)
+        # traversal that resolves outside the root must also be caught
+        r, j = gwcont.handle(f"/dexcheck {os.path.join(root, '../../etc/hostname')}")
+        check("containment: ../ traversal escaping the root refused",
+              "outside the file root" in r, r)
+        # missing path inside the root -> the normal not-found, not containment
+        r, j = gwcont.handle(f"/dexcheck {os.path.join(root, 'in', 'nope.apk')}")
+        check("containment: missing inside-root path -> not found",
+              "not found" in r and "outside" not in r, r)
+        # env-var form: VIBE_FILE_ROOT
+        os.environ["VIBE_FILE_ROOT"] = root
+        try:
+            gwenv = gateway.Gateway(os.path.join(td, "wenv"))
+            r, j = gwenv.handle(f"/dexcheck {outpath}")
+            check("containment: VIBE_FILE_ROOT env honored",
+                  "outside the file root" in r, r)
+        finally:
+            del os.environ["VIBE_FILE_ROOT"]
+        # unset -> no gating (unchanged behavior for existing deployments)
+        gwnone = gateway.Gateway(os.path.join(td, "wnone"))
+        r, j = gwnone.handle(f"/dexcheck {outpath}")
+        check("containment unset: no gating (outside path not refused)",
+              "outside the file root" not in r, r)
+
+        # --- #7: /investigate gap split (B3: actionable vs unobservable) ---
+        res17 = {"target": "apk", "stages": [
+            {"num": "01", "title": "Identity", "mark": "✓", "lines": ["a"], "note": ""},
+            {"num": "11", "title": "Blocks", "mark": "n/a", "lines": [], "note": ""},
+            {"num": "12", "title": "CFG", "mark": "n/a", "lines": [], "note": ""},
+            {"num": "15", "title": "Unknowns", "mark": "?", "lines": [], "note": ""},
+        ]}
+        gaps = deepdive.classify_gaps(res17)
+        check("gaps: native stages (11/12) are actionable with a next step",
+              {g["stage"] for g in gaps["actionable"]} == {"11", "12"}
+              and all("next_step" in g for g in gaps["actionable"]),
+              str(gaps["actionable"]))
+        check("gaps: non-native unestablished (15) is unobservable",
+              {g["stage"] for g in gaps["unobservable"]} == {"15"},
+              str(gaps["unobservable"]))
+        check("gaps: established stages (01) excluded from both buckets",
+              all(g["stage"] != "01" for g in gaps["actionable"] + gaps["unobservable"]), "")
+        gr = deepdive.render_gaps(gaps)
+        check("gaps render: both sections + NOT OBSERVED honesty",
+              "actionable" in gr and "unobservable" in gr
+              and "NOT OBSERVED" in gr, gr)
+        empty = deepdive.classify_gaps({"stages": [
+            {"num": "01", "title": "Identity", "mark": "✓", "lines": ["a"], "note": ""}]})
+        check("gaps: all-established -> no actionable, no unobservable",
+              empty["actionable"] == [] and empty["unobservable"] == [], str(empty))
+
+        # --- #10: invariant tests (version + no most-recent-session) ------
+        ver = getattr(vb, "__version__", None)
+        check("version: __init__.__version__ is X.Y.Z",
+              isinstance(ver, str) and len(ver.split(".")) == 3, str(ver))
+        check("version: matches the v0.17 build", ver == "0.17.0", str(ver))
+        r, j = gateway.Gateway(td).handle("/find zzz")
+        check("session: /find without --sha is refused (no most-recent fallback)",
+              "no --sha" in r and "run /apk" in r and j is None, r)
+
     finally:
         shutil.rmtree(td, ignore_errors=True)
 

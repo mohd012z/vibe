@@ -57,6 +57,65 @@ def _mark(available: bool, native: bool, runtime: bool) -> str:
     return NOTESTED
 
 
+def classify_gaps(res: dict) -> dict:
+    """B3 (lupoxyz #7): split the not-established stages into
+
+    - **actionable** gaps: a concrete next step closes them here
+      (install the native provider + re-run). A tool install is an action.
+    - **unobservable** gaps: a coverage boundary — runtime observation needs
+      a live device, or the data simply isn't in this artifact / the target
+      didn't resolve. Labeled NOT OBSERVED, NEVER "impossible".
+
+    Pure over the result dict (no androguard, no router) — unit-testable with
+    a synthetic stages list. Deterministic: keyed by the STAGES provider table.
+    """
+    need = {n: (nat, rt) for n, _t, nat, rt in STAGES}
+    actionable, unobservable = [], []
+    for s in res.get("stages", []):
+        if s["mark"] == DONE:
+            continue
+        nat, rt = need.get(s["num"], (False, False))
+        if rt and not nat:
+            unobservable.append({"stage": s["num"], "title": s["title"],
+                                 "reason": "runtime observation needs a live "
+                                           "device (Frida) — NOT OBSERVED here"})
+        elif nat:
+            actionable.append({"stage": s["num"], "title": s["title"],
+                               "reason": "native provider (radare2/ghidra) "
+                                         "absent",
+                               "next_step": "install radare2 (or ghidra) and "
+                                            "re-run /investigate"})
+        else:
+            unobservable.append({"stage": s["num"], "title": s["title"],
+                                 "reason": (s.get("note")
+                                            or "no such data in this artifact "
+                                               "/ target did not resolve — "
+                                               "NOT OBSERVED")})
+    return {"actionable": actionable, "unobservable": unobservable}
+
+
+def render_gaps(gaps: dict) -> str:
+    lines = ["", "GAPS (B3 split — actionable = concrete next step; "
+             "unobservable = coverage boundary, NOT OBSERVED != IMPOSSIBLE)"]
+    a, u = gaps.get("actionable", []), gaps.get("unobservable", [])
+    if a:
+        lines.append(f"  actionable ({len(a)}):")
+        for g in a:
+            lines.append(f"    {g['stage']} {g['title']:<15} {g['reason']} "
+                         f"-> {g.get('next_step', '')}")
+    else:
+        lines.append("  actionable: (none)")
+    if u:
+        lines.append(f"  unobservable ({len(u)}):")
+        for g in u:
+            lines.append(f"    {g['stage']} {g['title']:<15} {g['reason']}")
+    else:
+        lines.append("  unobservable: (none)")
+    if not a and not u:
+        lines.append("  (all 18 stages established — no gaps)")
+    return "\n".join(lines)
+
+
 def _resolve_target(graph: dict, target: str):
     """Resolve a deepdive target to (method_node|None, unrecognized: bool).
 
@@ -394,6 +453,7 @@ def render_deepdive(res: dict, sha: str) -> str:
                      f"{first[:56]}{detail}")
     lines.append("\n  stages needing native/runtime: not established here "
                  "(NOT OBSERVED != IMPOSSIBLE)")
+    lines.append(render_gaps(classify_gaps(res)))
     return "\n".join(lines)
 
 

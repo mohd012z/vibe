@@ -55,6 +55,7 @@ HELP = """vibebot commands
   /native <path>         Radare native provider: ELF fns/imports/exports + JNI bridge
   /harness <srcdir>      native-harness validation: build + run C test under qemu (E5)
   /kmeta <dex|apk> [f]   recover original (pre-R8) Kotlin names from @Metadata (E2)
+  /commands [query]      searchable command registry (L0 always · L1 on demand)
   /smali <name|0x..|substr>   query the Dalvik opcode table
   /base <value> <from> <to>   convert between number bases (2..36)
   /hash <text>           sha256 of a text string
@@ -87,12 +88,41 @@ def sanitize_filename(name: str, max_len: int = 80) -> str:
 
 
 class Gateway:
-    def __init__(self, work_dir: str, engines_map: dict[str, core.Engine] | None = None):
+    def __init__(self, work_dir: str, engines_map: dict[str, core.Engine] | None = None,
+                 file_root: str | None = None):
         self.work_dir = work_dir
         os.makedirs(work_dir, exist_ok=True)
+        # opt-in path containment (GHIDRA_MCP_FILE_ROOT pattern, lupoxyz #6):
+        # set via file_root= or VIBE_FILE_ROOT. Unset -> no gating (unchanged).
+        self.file_root = file_root or os.environ.get("VIBE_FILE_ROOT") or None
         self.sessions = core.SessionStore(work_dir)
         self.engines = engines_map or self._default_engines()
         self.jobs = core.JobManager(self.engines, self.sessions)
+
+    def _containment_err(self, path: str) -> str | None:
+        """Error string if `path` is outside the active file root, else None.
+        Enforced ONLY when file_root is set — the containment gate is opt-in so
+        unset deployments keep their current (no-gate) behavior."""
+        if not self.file_root:
+            return None
+        root = os.path.realpath(self.file_root)
+        p = os.path.realpath(path)
+        if p != root and not p.startswith(root + os.sep):
+            return (f"error: {os.path.basename(path)} is outside the file root "
+                    f"(VIBE_FILE_ROOT) — path-accepting commands are "
+                    f"containment-gated (NOT OBSERVED outside the root)")
+        return None
+
+    def _artifact(self, raw: str, label: str = "artifact") -> tuple[str, str | None]:
+        """Resolve a user-supplied path: expand+abs, containment-gate, exist.
+        Returns (abs_path, error) — error is a ready-to-return message or None."""
+        path = os.path.abspath(os.path.expanduser(raw))
+        ce = self._containment_err(path)
+        if ce:
+            return path, ce
+        if not os.path.exists(path):
+            return path, f"error: {label} not found (refused: {os.path.basename(path)})"
+        return path, None
 
     def _default_engines(self) -> dict[str, core.Engine]:
         m = {"apkmod": engines.ApkModEngine(os.path.join(self.work_dir, "reports")),
@@ -142,12 +172,17 @@ class Gateway:
                 "/kmeta",
                 "/smali", "/base", "/hash", "/dexcheck", "/dexrepair", "/status",
                 "/jobs", "/sessions", "/deepdive", "/investigate", "/report",
-                "/cancel", "/help", "/start"):
+                "/cancel", "/help", "/start", "/commands"):
             return HELP, None
         cmd = parts[0]
 
         if cmd in ("/help", "/start"):
             return HELP, None
+
+        if cmd == "/commands":
+            from . import registry
+            query = " ".join(parts[1:]).strip()
+            return registry.render(query), None
 
         # ---- synchronous utility commands (fast; no heavy work) ---------
         if cmd == "/map":
@@ -279,16 +314,16 @@ class Gateway:
     def _analyze(self, parts: list[str], user: str) -> tuple[str, core.Job | None]:
         if not parts:
             return "/analyze <path> [--engine apkmod|mock] [--fingerprints <json>]", None
-        path = os.path.abspath(os.path.expanduser(parts[0]))
-        if not os.path.exists(path):
-            return f"error: artifact not found (refused: {os.path.basename(path)})", None
+        path, err = self._artifact(parts[0])
+        if err:
+            return err, None
         engine = self._arg(parts, "--engine") or None
         fp = self._arg(parts, "--fingerprints")
         params = self._budget_params(parts)
         if fp:
-            fp_path = os.path.abspath(os.path.expanduser(fp))
-            if not os.path.exists(fp_path):
-                return f"error: fingerprints file not found: {os.path.basename(fp)}", None
+            fp_path, fp_err = self._artifact(fp, "fingerprints file")
+            if fp_err:
+                return fp_err, None
             params["fingerprints"] = fp_path
         try:
             job = self.jobs.submit("analyze", path, user, engine, params)
@@ -306,9 +341,9 @@ class Gateway:
             return ("error: DEX Mapper needs androguard "
                     "(uv pip install androguard); /smali /base /hash /dexcheck "
                     "/dexrepair still work on stdlib"), None
-        path = os.path.abspath(os.path.expanduser(parts[0]))
-        if not os.path.exists(path):
-            return f"error: artifact not found (refused: {os.path.basename(path)})", None
+        path, err = self._artifact(parts[0])
+        if err:
+            return err, None
         try:
             job = self.jobs.submit("dex", path, user, "dexmapper",
                                    self._budget_params(parts))
@@ -326,17 +361,17 @@ class Gateway:
         if "xmatch" not in self.engines:
             return ("error: cross-version match needs androguard "
                     "(uv pip install androguard)"), None
-        src = os.path.abspath(os.path.expanduser(parts[0]))
-        if not os.path.exists(src):
-            return f"error: src artifact not found (refused: {os.path.basename(src)})", None
+        src, err = self._artifact(parts[0], "src artifact")
+        if err:
+            return err, None
         # dst = 2nd positional, or --dst <path>
         dst_raw = (parts[1] if len(parts) > 1 and not parts[1].startswith("--")
                    else self._arg(parts, "--dst"))
         if not dst_raw:
             return "/xmatch <src.apk> <dst.apk>", None
-        dst = os.path.abspath(os.path.expanduser(dst_raw))
-        if not os.path.exists(dst):
-            return f"error: dst artifact not found (refused: {os.path.basename(dst)})", None
+        dst, err = self._artifact(dst_raw, "dst artifact")
+        if err:
+            return err, None
         params = self._budget_params(parts)
         params["dst"] = dst
         try:
@@ -356,9 +391,9 @@ class Gateway:
             return ("error: native provider needs androguard (uv pip install "
                     "androguard); degrades to 'not installed' if radare2 is "
                     "also absent"), None
-        path = os.path.abspath(os.path.expanduser(parts[0]))
-        if not os.path.exists(path):
-            return f"error: artifact not found (refused: {os.path.basename(path)})", None
+        path, err = self._artifact(parts[0])
+        if err:
+            return err, None
         try:
             job = self.jobs.submit("native", path, user, "native",
                                    self._budget_params(parts))
@@ -375,9 +410,9 @@ class Gateway:
         if "harness" not in self.engines:
             return ("error: harness engine not registered (stdlib-only; "
                     "should always be available)"), None
-        path = os.path.abspath(os.path.expanduser(parts[0]))
-        if not os.path.exists(path):
-            return f"error: source not found (refused: {os.path.basename(path)})", None
+        path, err = self._artifact(parts[0], "source dir")
+        if err:
+            return err, None
         try:
             job = self.jobs.submit("harness", path, user, "harness",
                                    self._budget_params(parts))
@@ -397,9 +432,9 @@ class Gateway:
         if "kotlinmeta" not in self.engines:
             return ("error: @Metadata recovery needs androguard "
                     "(uv pip install androguard)"), None
-        path = os.path.abspath(os.path.expanduser(parts[0]))
-        if not os.path.exists(path):
-            return f"error: artifact not found (refused: {os.path.basename(path)})", None
+        path, err = self._artifact(parts[0])
+        if err:
+            return err, None
         flt = (parts[1] if len(parts) > 1 and not parts[1].startswith("--")
                else None)
         params = self._budget_params(parts)
@@ -421,9 +456,9 @@ class Gateway:
             return ("error: Vibe IR needs androguard "
                     "(uv pip install androguard); /smali /base /hash /dexcheck "
                     "/dexrepair still work on stdlib"), None
-        path = os.path.abspath(os.path.expanduser(parts[0]))
-        if not os.path.exists(path):
-            return f"error: artifact not found (refused: {os.path.basename(path)})", None
+        path, err = self._artifact(parts[0])
+        if err:
+            return err, None
         try:
             job = self.jobs.submit("apk", path, user, "graph",
                                    self._budget_params(parts))
@@ -438,6 +473,9 @@ class Gateway:
         if not sha:
             if parts and not parts[0].startswith("--"):
                 path = os.path.abspath(os.path.expanduser(parts[0]))
+                ce = self._containment_err(path)
+                if ce:
+                    return ce, None
                 if not os.path.exists(path):
                     return f"error: artifact not found (refused: {os.path.basename(path)})", None
                 sha = core._sha256(path)
@@ -700,9 +738,9 @@ class Gateway:
         from . import dexmapper
         if not parts:
             return "/dexcheck <path>  — validate DEX header(s)", None
-        path = os.path.abspath(os.path.expanduser(parts[0]))
-        if not os.path.exists(path):
-            return f"error: artifact not found (refused: {os.path.basename(path)})", None
+        path, err = self._artifact(parts[0])
+        if err:
+            return err, None
         try:
             rows = dexmapper.dex_integrity(path)
         except Exception as e:
@@ -718,9 +756,9 @@ class Gateway:
         from . import dexmapper
         if not parts:
             return "/dexrepair <path>  — dry-run report (read-only; does not write)", None
-        path = os.path.abspath(os.path.expanduser(parts[0]))
-        if not os.path.exists(path):
-            return f"error: artifact not found (refused: {os.path.basename(path)})", None
+        path, err = self._artifact(parts[0])
+        if err:
+            return err, None
         try:
             rows = dexmapper.dex_repair(path)
         except Exception as e:
@@ -779,9 +817,9 @@ class Gateway:
         pos = [p for p in parts if not p.startswith("--")]
         if not pos:
             return "/investigate <path> [target]", None
-        path = os.path.abspath(os.path.expanduser(pos[0]))
-        if not os.path.exists(path):
-            return f"error: artifact not found (refused: {os.path.basename(path)})", None
+        path, err = self._artifact(pos[0])
+        if err:
+            return err, None
         target = " ".join(pos[1:]).strip() or "apk"
         params = {"target": target, "sha": self._arg(parts, "--sha")}
         params.update(self._budget_params(parts))
