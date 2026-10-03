@@ -434,12 +434,68 @@ def main() -> int:
                               "graph" in sess["engines"] and "dexmapper" in sess["engines"],
                               str(sess.get("engines")))
                         check("session merge: graph layer intact after /dex",
-                              (sess["structural"].get("graph") or {}).get("counts", {})
+                              (gwf.sessions.load_graph(sess) or {}).get("counts", {})
                               .get("class") == graph["counts"]["class"])
                         check("session merge: dexmapper jni layer present",
                               "jni" in sess["structural"])
                         check("session merge: intake package preserved",
                               sess["intake"].get("package") == "com.fixture.demo")
+
+        # --- v0.27: graph-split storage (session stays small; graph $ref) ---
+        # The graph engine stores a big Vibe IR (real APK = 163MB). Storing it
+        # inline made the session 274MB + re-rewritten on every /deepdive. Now
+        # upsert() writes the graph to a stable per-artifact file and keeps a
+        # fingerprinted $ref in the session. Verify: ref is written, session
+        # is small, load_graph resolves it (byte-identical to the engine's),
+        # the integrity check rejects a tampered file, and a pre-v0.27 INLINE
+        # graph still loads (back-compat).
+        if HAVE_ANDROGUARD:
+            import json as _j27
+            gwf27 = gwf  # same gateway (its work dir has the graph fixture)
+            sess27 = gwf27.sessions.load(sha_g)
+            ref = (sess27.get("structural") or {}).get("graph") or {}
+            check("v0.27 upsert: session carries a $ref, NOT the inline graph",
+                  "$ref" in ref and "$sha256" in ref
+                  and "nodes" not in ref,
+                  _j27.dumps(ref)[:120])
+            check("v0.27 upsert: $ref is a portable FILE NAME (not absolute)",
+                  ref.get("$ref", "").startswith("graph-")
+                  and not os.path.isabs(ref.get("$ref", "")),
+                  ref.get("$ref", ""))
+            gp = gwf27.sessions.graph_path(sha_g)
+            check("v0.27 upsert: stable graph file exists on disk",
+                  os.path.exists(gp), gp)
+            # Ground truth: the graph the /apk job actually produced (richer
+            # than a bare build_graph — it carries artifact path + certs).
+            gtruth = gres.structural["graph"]
+            resolved = gwf27.sessions.load_graph(sess27)
+            check("v0.27 load_graph: $ref resolves to the full graph",
+                  resolved is not None
+                  and _j27.dumps(resolved, sort_keys=True)
+                  == _j27.dumps(gtruth, sort_keys=True),
+                  "resolved differs from the job's own graph")
+            # integrity: a tampered graph file must NOT resolve (never trusted).
+            # Restore the original bytes afterward — later tests reuse this file.
+            _gp_bytes = open(gp, "rb").read()
+            with open(gp, "a", encoding="utf-8") as f:
+                f.write("x")  # corrupt the file (append garbage)
+            check("v0.27 load_graph: tampered $ref file is REJECTED",
+                  gwf27.sessions.load_graph(sess27) is None,
+                  "resolved a corrupted graph file")
+            open(gp, "wb").write(_gp_bytes)  # restore
+            check("v0.27 load_graph: restored $ref resolves again",
+                  gwf27.sessions.load_graph(sess27) == gtruth,
+                  "still rejected after restore")
+            # inline back-compat: a pre-v0.27 session stores the graph inline;
+            # load_graph must return it (no $ref).
+            inline = _j27.loads(_j27.dumps(sess27))  # deep copy
+            inline["structural"]["graph"] = gtruth
+            check("v0.27 load_graph: INLINE (pre-v0.27) graph still resolves",
+                  gwf27.sessions.load_graph(inline) == gtruth,
+                  "inline graph not returned")
+            check("v0.27 load_graph: no graph layer -> None (honest)",
+                  gwf27.sessions.load_graph({"structural": {}}) is None,
+                  "expected None for a session with no graph")
         else:
             print("== P3a graph: SKIP (androguard not installed) ==")
 
@@ -716,47 +772,51 @@ def main() -> int:
                 if sess_x is None:
                     check("P7: session persisted for xref tests", False)
                 else:
-                    gph = sess_x["structural"]["graph"]
-                    oncreate = next(m for m in gph["nodes"]["method"]
-                                    if m["name"] == "onCreate"
-                                    and "DemoApp" in m["class"])
-                    # /xref by M-id shows callees + strings
-                    r, _ = gwx2.handle(f"/xref {oncreate['id']} --sha {sha_x}")
-                    check("/xref by M-id lists callees + strings",
-                          "XREF " + oncreate["id"] in r and "callees (" in r
-                          and "strings referenced (" in r, r)
-                    check("/xref shows an in-APK callee",
-                          "MobileAds.initialize" in r, r)
-                    check("/xref shows a referenced string", "ad-unit" in r, r)
-                    # /callees by dotted name resolves to the same M-id
-                    r, _ = gwx2.handle(f"/callees {oncreate['class']}.onCreate "
-                                       f"--sha {sha_x}")
-                    check("/callees by dotted name resolves to M-id",
-                          "CALLEES " + oncreate["id"] in r, r)
-                    # /callers card renders
-                    r, _ = gwx2.handle(f"/callers {oncreate['class']}.onCreate "
-                                       f"--sha {sha_x}")
-                    check("/callers returns a CALLERS card", "CALLERS " in r, r)
-                    # external target is flagged honestly, not faked as in-graph
-                    r, _ = gwx2.handle("/xref android.os.Build.MODEL --sha "
-                                       + sha_x)
-                    check("/xref external is flagged EXTERNAL",
-                          "EXTERNAL" in r and "not an in-APK method" in r, r)
-                    # no-target / no-sha / bad-sha all honest
-                    r, _ = gwx2.handle("/xref --sha " + sha_x)
-                    check("/xref no-target shows usage", "/xref <M-id" in r, r)
-                    r, _ = gwx2.handle("/xref M1")
-                    check("/xref no-sha hints the last job sha",
-                          sha_x[:8] in r, r)
-                    r, _ = gwx2.handle("/xref M1 --sha ZZZZ")
-                    check("/xref bad-sha rejected", "hex sha" in r, r)
-                    # xrefs() is deterministic
-                    a = gu.xrefs(gph, oncreate["id"])
-                    b = gu.xrefs(gph, oncreate["id"])
-                    import json as _j7
-                    check("xrefs reproducible (2 calls identical)",
-                          _j7.dumps(a, sort_keys=True)
-                          == _j7.dumps(b, sort_keys=True))
+                    gph = gwx2.sessions.load_graph(sess_x)  # v0.27: $ref or inline
+                    if gph is None:
+                        check("P7: graph layer resolvable from session", False,
+                              "load_graph returned None")
+                    else:
+                        oncreate = next(m for m in gph["nodes"]["method"]
+                                        if m["name"] == "onCreate"
+                                        and "DemoApp" in m["class"])
+                        # /xref by M-id shows callees + strings
+                        r, _ = gwx2.handle(f"/xref {oncreate['id']} --sha {sha_x}")
+                        check("/xref by M-id lists callees + strings",
+                              "XREF " + oncreate["id"] in r and "callees (" in r
+                              and "strings referenced (" in r, r)
+                        check("/xref shows an in-APK callee",
+                              "MobileAds.initialize" in r, r)
+                        check("/xref shows a referenced string", "ad-unit" in r, r)
+                        # /callees by dotted name resolves to the same M-id
+                        r, _ = gwx2.handle(f"/callees {oncreate['class']}.onCreate "
+                                           f"--sha {sha_x}")
+                        check("/callees by dotted name resolves to M-id",
+                              "CALLEES " + oncreate["id"] in r, r)
+                        # /callers card renders
+                        r, _ = gwx2.handle(f"/callers {oncreate['class']}.onCreate "
+                                           f"--sha {sha_x}")
+                        check("/callers returns a CALLERS card", "CALLERS " in r, r)
+                        # external target is flagged honestly, not faked as in-graph
+                        r, _ = gwx2.handle("/xref android.os.Build.MODEL --sha "
+                                           + sha_x)
+                        check("/xref external is flagged EXTERNAL",
+                              "EXTERNAL" in r and "not an in-APK method" in r, r)
+                        # no-target / no-sha / bad-sha all honest
+                        r, _ = gwx2.handle("/xref --sha " + sha_x)
+                        check("/xref no-target shows usage", "/xref <M-id" in r, r)
+                        r, _ = gwx2.handle("/xref M1")
+                        check("/xref no-sha hints the last job sha",
+                              sha_x[:8] in r, r)
+                        r, _ = gwx2.handle("/xref M1 --sha ZZZZ")
+                        check("/xref bad-sha rejected", "hex sha" in r, r)
+                        # xrefs() is deterministic
+                        a = gu.xrefs(gph, oncreate["id"])
+                        b = gu.xrefs(gph, oncreate["id"])
+                        import json as _j7
+                        check("xrefs reproducible (2 calls identical)",
+                              _j7.dumps(a, sort_keys=True)
+                              == _j7.dumps(b, sort_keys=True))
 
         if HAVE_ANDROGUARD:
             print("== P10: /investigate — orchestrated 18-stage ==")
@@ -2602,6 +2662,209 @@ def main() -> int:
         check("boundary terminator present", body.rstrip().endswith(b"--"))
 
         # ------------------------------------------------------------------
+        print("== v0.28: URL ingestion — /apk <https://…> (bypasses Telegram's 20MB getFile cap) ==")
+        # The single choke point is Gateway._artifact(): every path-accepting
+        # command routes through it. URLs are downloaded into inbound/ (bounded,
+        # retries); local paths keep the EXACT prior behavior (regression below).
+        # Pure helpers first (no network):
+        check("_is_url: https URL is a url", gateway._is_url("https://example.com/a.apk"))
+        check("_is_url: http URL is a url", gateway._is_url("http://example.com/a.apk"))
+        check("_is_url: local path is NOT a url", not gateway._is_url("./a.apk"))
+        check("_is_url: file:// is NOT a url (local, normal branch)", not gateway._is_url("file:///a.apk"))
+        check("_is_url: ftp:// is NOT a url (unsupported source)", not gateway._is_url("ftp://example.com/a.apk"))
+        check("_url_basename: last path segment",
+              gateway._url_basename("https://h/p/Ultima_14.apk") == "Ultima_14.apk")
+        check("_url_basename: query+fragment stripped",
+              gateway._url_basename("https://h/p/a.apk?sig=x#f") == "a.apk")
+        check("_url_basename: Content-Disposition filename wins",
+              gateway._url_basename("https://h/p/dl",
+                                    'attachment; filename="real.apk"') == "real.apk")
+        check("_url_basename: RFC5987 filename* (UTF-8) parsed",
+              gateway._url_basename("https://h/p/dl",
+                                    "attachment; filename*=UTF-8''my%20app.apk") == "my_app.apk")
+        check("_url_basename: unsafe chars sanitized (no path escape)",
+              "/" not in gateway._url_basename("https://h/a/../../etc/passwd"))
+        check("_url_basename: no safe name -> upload.bin",
+              gateway._url_basename("https://h/???") == "upload.bin")
+        # SSRF guard: non-public IP literals must be refused WITHOUT a network call
+        check("SSRF: loopback 127.0.0.1 refused", gateway._url_host_rejected("127.0.0.1"))
+        check("SSRF: private 10.x refused", gateway._url_host_rejected("10.0.0.5"))
+        check("SSRF: private 192.168.x refused", gateway._url_host_rejected("192.168.1.1"))
+        check("SSRF: link-local 169.254 (metadata) refused", gateway._url_host_rejected("169.254.169.254"))
+        check("SSRF: ::1 (IPv6 loopback) refused", gateway._url_host_rejected("::1"))
+        check("SSRF: 0.0.0.0 (unspecified) refused", gateway._url_host_rejected("0.0.0.0"))
+        check("SSRF: public IP allowed", not gateway._url_host_rejected("93.184.216.34"))
+        check("SSRF: hostname allowed (not an IP literal)", not gateway._url_host_rejected("example.com"))
+        gu = gateway.Gateway(os.path.join(td, "wurl"))
+        _orig_urlopen = urllib.request.urlopen
+        # a download that ALWAYS fails (HTTP 404) -> _artifact reports it, no job
+        def _fail_404(*a, **k):
+            raise urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+        urllib.request.urlopen = _fail_404
+        try:
+            p, err = gu._artifact("https://example.com/missing.apk")
+            check("url 404 -> honest 'download failed', NOT not-found",
+                  err is not None and "download failed" in err and "not found" not in err, str(err))
+            check("url 404 -> no local file created",
+                  not os.path.exists(os.path.join(gu.work_dir, "inbound", "missing.apk")))
+            r, j = gu.handle("/apk https://example.com/missing.apk")
+            check("url 404 -> /apk returns the error, no job queued",
+                  j is None and "download failed" in r, r)
+        finally:
+            urllib.request.urlopen = _orig_urlopen
+        # private host -> refused BEFORE any network (SSRF guard)
+        r, j = gu.handle("/apk http://127.0.0.1:9/x.apk")
+        check("SSRF: loopback URL refused by /apk (no fetch)",
+              j is None and "refused" in r and "private/loopback" in r, r)
+        # successful download (mocked bytes) -> real local path, byte-identical
+        fixture_bytes = b"PK\x03\x04 fake apkgzip bytes " * 50
+        class _FakeResp:
+            def __init__(self):
+                self.pos = 0
+                self.headers = {}  # no Content-Length: bound checked as we stream
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def read(self, n=-1):
+                out = fixture_bytes[self.pos:self.pos + (n if n > 0 else len(fixture_bytes))]
+                self.pos += len(out)
+                return out
+        urllib.request.urlopen = lambda *a, **k: _FakeResp()
+        try:
+            p, err = gu._artifact("https://example.com/p/Good_Name.apk")
+            check("url ok -> local inbound path returned",
+                  err is None and p.startswith(gu.work_dir) and p.endswith("Good_Name.apk"), str((p, err)))
+            check("url ok -> bytes on disk identical",
+                  os.path.exists(p) and open(p, "rb").read() == fixture_bytes)
+            r, j = gu.handle("/hash " + p)
+            check("url-ingested file is hashable (real file, not a URL string)",
+                  "sha256" in r and j is None, r)
+        finally:
+            urllib.request.urlopen = _orig_urlopen
+        # size bound: declared Content-Length over MAX -> aborted, no file
+        # (bound is read at call time, so monkeypatch the module global safely)
+        _orig_bound = gateway.MAX_UPLOAD_BYTES
+        class _BigResp:
+            def __init__(self):
+                self.headers = {"Content-Length": str(1 << 30)}  # 1 GB declared
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def read(self, n=-1):
+                return b""
+        urllib.request.urlopen = lambda *a, **k: _BigResp()
+        try:
+            gateway.MAX_UPLOAD_BYTES = 1 << 20  # 1 MB for the test
+            p, err = gu._artifact("https://example.com/huge.apk")
+            check("url oversized (declared) -> refused, no job file",
+                  err is not None and "too large" in err
+                  and not os.path.exists(os.path.join(gu.work_dir, "inbound", "huge.apk")),
+                  str(err))
+        finally:
+            gateway.MAX_UPLOAD_BYTES = _orig_bound
+            urllib.request.urlopen = _orig_urlopen
+        # REGRESSION: a LOCAL path behaves EXACTLY as before (no download)
+        local = os.path.join(td, "local_ok.apk"); open(local, "wb").write(b"PK")
+        p, err = gu._artifact(local)
+        check("regression: local path unchanged (resolves, no download)",
+              err is None and os.path.realpath(p) == os.path.realpath(local), str((p, err)))
+        p, err = gu._artifact(os.path.join(td, "nope.apk"))
+        check("regression: missing local path -> not found (unchanged wording)",
+              err is not None and "not found" in err and "download" not in err, str(err))
+
+        # ===== v0.31: tmpfiles.org interstitial resolution (mocked, offline) =====
+        _SIGNED = ("https://tmpfiles.org/dl/1790000000.abc123def4567890/"
+                   "wXyzId123/My_File.apk")
+        _INTERSTITIAL = (b'<html><body><p><a class="download" href="'
+                         + _SIGNED.encode() + b'">Download (1.00 MB)</a></p>'
+                         b'</body></html>')
+        _REAL_BYTES = b"PK\x03\x04 real apk bytes " * 100
+        class _Inter2Real:
+            """urlopen mock: 1st call = interstitial page, 2nd = real file."""
+            n = 0
+            def __call__(self, req, *a, **k):
+                _Inter2Real.n += 1
+                url = req.full_url if hasattr(req, "full_url") else str(req)
+                class _R:
+                    def __init__(s, data, ctype): s.data, s.ct = data, ctype
+                    def __enter__(s): return s
+                    def __exit__(s, *x): return False
+                    def read(s, n=-1):
+                        out = s.data[s.pos:s.pos+(n if n>0 else len(s.data))]
+                        s.pos += len(out); return out
+                    headers = {}
+                _R.pos = 0
+                if _Inter2Real.n == 1:
+                    _R.headers = {"Content-Type": "text/html; charset=utf-8"}
+                    return _R(_INTERSTITIAL, "text/html")
+                _R.headers = {"Content-Type": "application/octet-stream"}
+                return _R(_REAL_BYTES, "application/octet-stream")
+        _inter_mock = _Inter2Real()
+        urllib.request.urlopen = _inter_mock
+        try:
+            # (a) resolver returns the signed link from an interstitial page
+            got = gu._url_interstitial_redirect("https://tmpfiles.org/wXyzId123/My_File.apk")
+            check("v0.31: interstitial page -> signed /dl/ link extracted",
+                  got == _SIGNED, got)
+            # (b) full download path: page URL -> real bytes land in inbound/
+            p2, err2 = gu._artifact("https://tmpfiles.org/wXyzId123/My_File.apk")
+            check("v0.31: /apk <tmpfiles page-url> downloads the REAL bytes",
+                  err2 is None and os.path.exists(p2)
+                  and open(p2, "rb").read() == _REAL_BYTES, str((p2, err2)))
+        finally:
+            urllib.request.urlopen = _orig_urlopen
+        # (c) non-HTML response: resolver passes the URL through unchanged
+        class _DirectResp:
+            headers = {"Content-Type": "application/vnd.android.package-archive"}
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self, n=-1): return b""
+        urllib.request.urlopen = lambda *a, **k: _DirectResp()
+        try:
+            got2 = gu._url_interstitial_redirect("https://tmpfiles.org/dl/x/y.apk")
+            check("v0.31: direct (non-HTML) URL passes through unchanged",
+                  got2 == "https://tmpfiles.org/dl/x/y.apk", got2)
+        finally:
+            urllib.request.urlopen = _orig_urlopen
+        # (d) interstitial with NO usable link -> honest RuntimeError
+        class _DeadResp:
+            headers = {"Content-Type": "text/html"}
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self, n=-1): return b"<html>no links here</html>"
+        urllib.request.urlopen = lambda *a, **k: _DeadResp()
+        try:
+            try:
+                gu._url_interstitial_redirect("https://tmpfiles.org/zzz/x.apk")
+                _raised = False
+            except RuntimeError as _e:
+                _raised = "no usable download link" in str(_e)
+            check("v0.31: page with no download link -> honest error", _raised, "")
+        finally:
+            urllib.request.urlopen = _orig_urlopen
+        # (e) SSRF re-check: an interstitial pointing at a private IP is refused
+        class _EvilResp:
+            headers = {"Content-Type": "text/html"}
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self, n=-1):
+                return (b'<a href="http://192.168.1.9/x.apk">go</a>').replace(
+                    b"http://192.168.1.9/x.apk",
+                    b"https://tmpfiles.org/dl/1.00/evil/x.apk")
+        urllib.request.urlopen = lambda *a, **k: _EvilResp()
+        try:
+            got3 = gu._url_interstitial_redirect("https://tmpfiles.org/evil/x.apk")
+            # resolver extracts the tmpfiles-shaped link; the SSRF re-check in
+            # download_url is what blocks private targets — assert the guard
+            # fires on a crafted private-IP link directly:
+            check("v0.31: SSRF re-guard refuses a private-IP redirect target",
+                  gateway._url_host_rejected("192.168.1.9"), "")
+        finally:
+            urllib.request.urlopen = _orig_urlopen
+
+        # ------------------------------------------------------------------
         print("== v0.17: hardening batch (lupoxyz #6/#7/#8/#10) ==")
         from vibebot import registry, deepdive
         import vibebot as vb
@@ -2699,7 +2962,7 @@ def main() -> int:
         ver = getattr(vb, "__version__", None)
         check("version: __init__.__version__ is X.Y.Z",
               isinstance(ver, str) and len(ver.split(".")) == 3, str(ver))
-        check("version: matches the current build", ver == "0.26.0", str(ver))
+        check("version: matches the current build", ver == "0.31.0", str(ver))
         r, j = gateway.Gateway(td).handle("/find zzz")
         check("session: /find without --sha is refused (no most-recent fallback)",
               "no --sha" in r and "run /apk" in r and j is None, r)
@@ -3165,6 +3428,126 @@ def main() -> int:
                 check("P19-e2e: popcount (r2 names the first fn entry0) "
                       "fires exactly once",
                       len(_pop) == 1 and _pop[0] == "entry0", str(_pop))
+
+    # ===== v0.29: usability batch (freeze fix + xmatch misroute + --session) =====
+        _td29 = tempfile.mkdtemp(prefix="vibebot-29-")
+        # -- xmatch.can_run: never auto-selected (the .apk.bak misroute) --
+        _bak = os.path.join(_td29, "MPatcher_5.3.apk.bak")
+        shutil.copy(FIXTURE, _bak)
+        _gw29 = gateway.Gateway(_td29)
+        _xm = _gw29.jobs.engines.get("xmatch")
+        check("v0.29: xmatch.can_run is never True (no auto-route)",
+              _xm is not None and _xm.can_run(_bak) is False
+              and _xm.can_run(FIXTURE) is False,
+              f"can_run(bak)={_xm.can_run(_bak) if _xm else 'no-xm'}")
+        # a .apk.bak falls back to apkmod (the general APK handler)
+        _r29, _j29 = _gw29.handle(f"/analyze {_bak}", user="t")
+        check("v0.29: .apk.bak auto-routes to apkmod (not xmatch)",
+              _j29 is not None and _j29.engine == "apkmod",
+              f"engine={getattr(_j29, 'engine', _r29)}")
+        for _j in _gw29.process_pending():
+            pass
+
+        # -- background worker: ack is instant, poller stays live mid-job --
+        _td29w = tempfile.mkdtemp(prefix="vibebot-29w-")
+        _gw29w = gateway.Gateway(_td29w)
+        _tr = gateway.TelegramTransport(_gw29w, token="0:fake", worker=True)
+        check("v0.29: worker defaults OFF (back-compat)",
+              gateway.TelegramTransport(_gw29w, "0:fake").worker is False)
+        _t0 = time.time()
+        _r29b, _j29b = _gw29w.handle(f"/apk {FIXTURE}", user="t")
+        _ack29 = time.time() - _t0
+        check("v0.29: ACK returned to poller immediately (<2s, not 51s)",
+              _ack29 < 2.0 and _j29b is not None, f"ack={_ack29:.2f}s")
+        check("v0.29: worker thread spawned in production mode",
+              _tr._wq_thread is not None and _tr._wq_thread.is_alive())
+        # the poll thread can still service a command while the job runs
+        _mid, _ = _gw29w.handle("/health", user="t")
+        check("v0.29: /health answered WHILE the graph job is running",
+              bool(_mid), "poller was blocked (the old freeze)")
+        # wait for the worker to drain (bounded)
+        _deadline = time.time() + 60
+        _done = False
+        while time.time() < _deadline:
+            for _j in _gw29w.jobs.all():
+                if _j["id"] == _j29b.id and _j["state"].upper() == "COMPLETED":
+                    _done = True
+            if _done:
+                break
+            time.sleep(0.2)
+        check("v0.29: worker drains the queue to COMPLETED (off the poll thread)",
+              _done, f"state={[j['state'] for j in _gw29w.jobs.all()]}")
+
+        # -- /find --session VIBE-XXXX (resolve by the short job id) --
+        _r29c, _j29c = _gw29.handle(f"/apk {FIXTURE}", user="t")
+        for _j in _gw29.process_pending():
+            pass
+        _sid = _j29c.id
+        _f1, _ = _gw29.handle(f"/find demo --session {_sid}", user="t")
+        check("v0.29: /find --session <job id> resolves to a real search",
+              "TARGETS for" in _f1 or "no match" in _f1, _f1[:80])
+        _f2, _ = _gw29.handle("/find demo --session VIBE-ZZZZ", user="t")
+        check("v0.29: /find --session unknown id -> honest 'no such job'",
+              "no such job" in _f2, _f2[:80])
+        _f3, _ = _gw29.handle("/find demo --session notaid", user="t")
+        check("v0.29: /find --session non-VIBE id -> usage hint",
+              "job id like VIBE-" in _f3, _f3[:80])
+        # --sha still works (back-compat)
+        _sha = _gw29.sessions.key(_j29c.result.intake["sha256"])
+        _f4, _ = _gw29.handle(f"/find demo --sha {_sha}", user="t")
+        check("v0.29: /find --sha still works (back-compat)",
+              "TARGETS for" in _f4 or "no match" in _f4, _f4[:80])
+
+        # -- v0.30: .apks bundle (ApkSet) support ---------------------------
+        import zipfile as _zip
+        # build a real .apks: base.apk = the fixture, + 1 split config
+        _apks = os.path.join(_td29, "test_bundle.apks")
+        with _zip.ZipFile(_apks, "w") as _z:
+            _z.write(FIXTURE, "base.apk")
+            _z.writestr("split_config.arm64_v8a.apk", b"FAKE-SPLIT-ABI")
+            _z.writestr("split_config.en.apk", b"FAKE-SPLIT-EN")
+        _r30, _j30 = _gw29.handle(f"/apk {_apks}", user="t")
+        check("v0.30: /apk <.apks> ACKs and discloses splits",
+              _j30 is not None and "splits NOT analyzed" in _r30
+              and "split_config.arm64_v8a.apk" in _r30, _r30[:160])
+        check("v0.30: bundle note cleared after the ACK (no double post)",
+              _gw29._bundle_note == "", _gw29._bundle_note)
+        for _j in _gw29.process_pending():
+            pass
+        check("v0.30: base.apk of the bundle graph-analyzes to COMPLETED",
+              _j30.state.upper() == "COMPLETED",
+              f"{_j30.state} err={_j30.error}")
+        # the analyzed artifact is the extracted base, NOT the .apks
+        check("v0.30: job ran on extracted base.apk (cache dir), not the bundle",
+              _j30.artifact.endswith("base.apk")
+              and "apks" in _j30.artifact, _j30.artifact)
+        # base.apk content == fixture content (round-trip integrity)
+        check("v0.30: extracted base.apk bytes == original fixture bytes",
+              open(_j30.artifact, "rb").read() == open(FIXTURE, "rb").read(),
+              f"{_j30.artifact}")
+        # bundle cached: a second /apk of the same bundle reuses the file
+        _before = _j30.artifact
+        _r30b, _j30b = _gw29.handle(f"/apk {_apks}", user="t")
+        for _j in _gw29.process_pending():
+            pass
+        check("v0.30: repeat /apk on same bundle reuses cached base.apk",
+              _j30b.state.upper() == "COMPLETED" and _j30b.artifact == _before,
+              f"{_j30b.state} {_j30b.artifact}")
+        # /find works on the bundle session
+        _f30, _ = _gw29.handle(f"/find demo --session {_j30.id}", user="t")
+        check("v0.30: /find --session works on a bundle session",
+              "TARGETS for" in _f30 or "no match" in _f30, _f30[:80])
+        # malformed bundle: no base.apk
+        _bad = os.path.join(_td29, "no_base.apks")
+        with _zip.ZipFile(_bad, "w") as _z:
+            _z.writestr("split_config.en.apk", b"only-splits")
+        _r30c, _ = _gw29.handle(f"/apk {_bad}", user="t")
+        check("v0.30: .apks without base.apk -> honest error",
+              "no base.apk" in _r30c, _r30c[:100])
+        # dexcheck/dexrepair refuse bundles (raw-DEX commands)
+        _r30d, _ = _gw29.handle(f"/dexcheck {_apks}", user="t")
+        check("v0.30: /dexcheck refuses a .apks bundle (raw-DEX command)",
+              "bundle" in _r30d, _r30d[:100])
 
     finally:
         shutil.rmtree(td, ignore_errors=True)

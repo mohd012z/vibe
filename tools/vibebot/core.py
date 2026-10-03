@@ -117,6 +117,7 @@ class Job:
         self.finished: float | None = None
         self._cancel = False
         self.budget: Any = None  # router.Budget, attached by JobManager._run
+        self._tg_chat: int | None = None  # transport: reply completions here
 
     # -- reporting ----------------------------------------------------------
     def progress(self, step: str, pct: int, note: str = "") -> None:
@@ -177,9 +178,14 @@ class JobManager:
         for name, eng in self.engines.items():
             if eng.can_run(artifact):
                 return name
-        # default: apkmod is the general APK handler
-        if "apkmod" in self.engines and artifact.lower().endswith((".apk", ".dex")):
-            return "apkmod"
+        # default: apkmod is the general APK handler. Recognize a backup
+        # suffix (.apk.bak / .dex.bak) so a renamed APK still routes to the
+        # right engine instead of a bare "no engine handles" (real, 2026-10-02).
+        if "apkmod" in self.engines:
+            a = artifact.lower()
+            base_ext = os.path.splitext(os.path.splitext(a)[0])[1]
+            if a.endswith((".apk", ".dex")) or base_ext in (".apk", ".dex"):
+                return "apkmod"
         raise KeyError(f"no engine handles {artifact!r}")
 
     def submit(self, command: str, artifact: str, user: str = "cli",
@@ -267,6 +273,15 @@ class SessionStore:
     def path(self, sha256: str) -> str:
         return os.path.join(self.root, f"session-{self.key(sha256)}.json")
 
+    def graph_path(self, sha256: str) -> str:
+        """Stable per-artifact graph file (v0.27). One file per SHA-256,
+        replaced on /apk re-runs — not the timestamped report duplicate."""
+        return os.path.join(self.root, f"graph-{self.key(sha256)}.json")
+
+    @staticmethod
+    def _fingerprint(data: bytes) -> str:
+        return hashlib.sha256(data).hexdigest()
+
     def upsert(self, sha256: str, engine: str, res: EngineResult) -> dict:
         """Persist an engine result under the artifact's fingerprint.
 
@@ -300,6 +315,31 @@ class SessionStore:
         if engine and engine not in engines:
             engines.append(engine)
 
+        # v0.27: the Vibe IR graph is the big payload (a real production APK
+        # = 163MB of nodes+calls). Storing it INLINE made the session 274MB:
+        # every /find//xref//deepdive loaded all of it and record_deepdive
+        # re-WROTE it on each append (measured: ~6s serialize / ~1.7s parse
+        # on the real F-Droid session). Now the graph lives in a stable
+        # per-artifact file (graph-<sha16>.json, replaced on /apk re-runs —
+        # not the timestamped report duplicate) and the session carries only
+        # a fingerprinted reference. Pre-v0.27 sessions (inline graph) keep
+        # working: load_graph falls back to the inline copy.
+        new_graph = (res.structural or {}).get("graph")
+        if isinstance(new_graph, dict) and new_graph.get("nodes") is not None:
+            gp = self.graph_path(sha256)
+            payload = json.dumps(new_graph, separators=(",", ":"))
+            tmp = gp + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(payload)
+            os.replace(tmp, gp)  # atomic on POSIX: readers never see partial
+            # Store the FILE NAME, not the absolute path — the graph file sits
+            # next to the session (both under <root>/sessions/), so a $ref
+            # stays valid if the whole work dir is moved/renamed.
+            merged_structural["graph"] = {
+                "$ref": os.path.basename(gp),
+                "$sha256": self._fingerprint(payload.encode("utf-8")),
+            }
+
         data = {
             "sha256": sha256,
             "engine": engine,
@@ -323,7 +363,47 @@ class SessionStore:
 
     def save(self, data: dict) -> None:
         p = self.path(data["sha256"])
-        json.dump(data, open(p, "w", encoding="utf-8"), indent=2)
+        tmp = p + ".tmp"
+        # compact + atomic: a real session's claims/overview/falsifications are
+        # ~11MB (indent=2 more than doubled it for no benefit on a
+        # machine-written file); the .tmp+replace keeps readers off a half-
+        # written session during the (now rare) ~11MB write.
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, separators=(",", ":"))
+        os.replace(tmp, p)
+
+    def load_graph(self, session: dict) -> dict | None:
+        """Resolve a session's Vibe IR graph to the dict consumers need.
+
+        v0.27+ sessions store ``structural.graph = {"$ref": path,
+        "$sha256": …}`` (the graph lives in a stable per-artifact file);
+        pre-v0.27 sessions store it INLINE (fallback). Integrity: if the
+        referenced file's bytes no longer hash to ``$sha256`` (torn write /
+        stale ref / tamper) it is NOT trusted silently — we return None and
+        let the caller report "no graph layer" honestly.
+        """
+        g = (session.get("structural") or {}).get("graph")
+        if not isinstance(g, dict):
+            return None
+        if "$ref" not in g:
+            return g if g.get("nodes") is not None else None
+        ref, want = g.get("$ref"), g.get("$sha256")
+        if not ref:
+            return None
+        # $ref is a file name next to the session (portable across work-dir
+        # moves); accept an absolute path too for any pre-existing session.
+        path = ref if os.path.isabs(ref) else os.path.join(self.root, ref)
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, "rb") as f:
+                payload = f.read()
+        except OSError:
+            return None
+        if want and self._fingerprint(payload) != want:
+            return None  # integrity mismatch — never trust silently
+        data = json.loads(payload)
+        return data if isinstance(data, dict) else None
 
     def list(self) -> list[str]:
         return sorted(f[8:-5] for f in os.listdir(self.root)
@@ -400,7 +480,8 @@ def _first_artifact(ev: list[dict]) -> str | None:
 
 # ------------------------------------------------------------------ deepdive
 
-def deepdive(session: dict, target: str) -> dict:
+def deepdive(session: dict, target: str,
+             resolved_graph: dict | None = None) -> dict:
     """Traverse an EXISTING session for `target` without rescanning.
 
     target forms (engine-agnostic; reads whatever the engine stored):
@@ -411,6 +492,11 @@ def deepdive(session: dict, target: str) -> dict:
       * "references"  — all evidence rows (class/method refs)
       * "calls"       — dexmapper: every recorded method invocation
     Returns {"target":..., "matches":[...], "traversed":N}.
+
+    v0.27: the graph-engine graph may live OUTSIDE the session (a
+    ``structural.graph = {"$ref": …, "$sha256": …}`` reference, resolved by
+    ``SessionStore.load_graph``). Pass the resolved dict via `resolved_graph`;
+    an INLINE graph (pre-v0.27 sessions, test fixtures) still works as before.
     """
     t = (target or "").strip().lower()
     matches: list[dict] = []
@@ -424,8 +510,12 @@ def deepdive(session: dict, target: str) -> dict:
     # (v0.26, found on the real F-Droid session: /deepdive returned 0 matches
     # for org.fdroid.MainActivity.onCreate although it was present as M-id in
     # the stored graph, because this function only read the dexmapper shape).
-    graph = (structural.get("graph") or {}) if isinstance(
-        structural.get("graph"), dict) else {}
+    # v0.27: resolved_graph (from a $ref) wins over the inline copy; a $ref
+    # placeholder has no "nodes", so it is skipped, never traversed as-is.
+    graph = resolved_graph
+    if graph is None:
+        sg = structural.get("graph")
+        graph = sg if isinstance(sg, dict) and sg.get("nodes") is not None else {}
     g_nodes = graph.get("nodes", {}) if isinstance(graph.get("nodes"), dict) else {}
     g_methods = g_nodes.get("method", []) or []
     g_native = g_nodes.get("native", []) or []
@@ -566,7 +656,10 @@ def record_deepdive(store: SessionStore, sha256: str, target: str) -> dict:
     session = store.load(sha256)
     if not session:
         return {"error": "no session for artifact — run /analyze first"}
-    result = deepdive(session, target)
+    # v0.27: resolve the graph if it lives in a $ref file (real production
+    # sessions) so deepdive can traverse it; inline graphs pass through None.
+    graph = store.load_graph(session)
+    result = deepdive(session, target, resolved_graph=graph)
     session.setdefault("deepdive", []).append(
         {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
          "target": target, "matchCount": result["matchCount"]})
