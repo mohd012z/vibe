@@ -253,6 +253,36 @@ class Gateway:
         os.makedirs(d, exist_ok=True)
         return d
 
+    def _url_interstitial_redirect(self, url: str) -> str:
+        """v0.31: some public hosts (tmpfiles.org) serve a tiny HTML
+        interstitial at the share URL whose real bytes live at a signed
+        /dl/<epoch>.<hash>/<id>/<name> link inside it. Fetch the page,
+        return the direct link (or the original URL if it is already a
+        direct file). Raises RuntimeError if no usable link is found."""
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (compatible; VibeBot/0.31)"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            ctype = (r.headers.get("Content-Type") or "").lower()
+            if "text/html" not in ctype:
+                return url  # already a direct file response
+            page = r.read(1 << 20)  # interstitials are small
+        # tmpfiles.org pattern: <a class="download" href="https://tmpfiles.org/dl/…">
+        m = re.search(rb'href="(https://tmpfiles\.org/dl/\d+\.[a-f0-9]+/[^"]+)"',
+                      page)
+        if m:
+            return m.group(1).decode()
+        # generic fallback: any same-origin absolute link to /dl/ or a file
+        m = re.search(rb'href="([^"]+/\d+\.[a-f0-9]+/[^"]+)"', page)
+        if m:
+            return m.group(1).decode()
+        m = re.search(rb'href="(https?://[^"]+\.(?:apk|apks|dex|jar|so|bin))"',
+                      page)
+        if m:
+            return m.group(1).decode()
+        raise RuntimeError(
+            "URL serves an HTML page with no usable download link "
+            "(give the bot the DIRECT file URL)")
+
     def download_url(self, url: str) -> str:
         """Fetch `url` into the work dir's inbound/ (bounded, retries).
 
@@ -263,6 +293,9 @@ class Gateway:
         under the final name). Network errors retry (4 attempts); a 4xx
         response is terminal (retries can't fix a 404). Returns the local
         path; raises RuntimeError on refusal/failure.
+        v0.31: share URLs that serve an HTML interstitial (tmpfiles.org)
+        are resolved to their signed direct-download link first, so the
+        bytes that land in inbound/ are the real file.
         """
         import urllib.parse as _up
         host = _up.urlparse(url).hostname or ""
@@ -278,12 +311,26 @@ class Gateway:
             # (A re-ingest of a CHANGED upstream file is a new URL/name in
             # practice; a byte-identical re-fetch is a no-op by design.)
             return final
+        # v0.31: resolve an interstitial share URL to the real file URL
+        direct_url = url
+        if "tmpfiles.org" in host:
+            try:
+                direct_url = self._url_interstitial_redirect(url)
+            except (RuntimeError, OSError, ValueError) as e:
+                raise RuntimeError(f"interstitial: {e}") from e
+        # the extracted link is attacker-controlled content — re-run the
+        # SSRF guard on it (interstitials may point anywhere)
+        redir_host = _up.urlparse(direct_url).hostname or ""
+        if redir_host and redir_host != host and _url_host_rejected(redir_host):
+            raise RuntimeError(
+                f"refused (interstitial redirects to private/loopback host: "
+                f"{redir_host})")
         tmp = os.path.join(self._inbound_dir(), f".dl-{digest}-{base}")
         last = None
         for attempt in range(4):
             try:
                 req = urllib.request.Request(
-                    url, headers={
+                    direct_url, headers={
                         "User-Agent": "Mozilla/5.0 (compatible; VibeBot/0.28)",
                     })
                 with urllib.request.urlopen(req, timeout=300) as r:

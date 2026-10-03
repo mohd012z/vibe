@@ -160,13 +160,9 @@ function uploadXhr(f, onProgress){
   });
 }
 
-// api url https://tmpfiles.org/<id>/<name>  ->  direct download https://tmpfiles.org/dl/<id>/<name>
-// (direct form verified server-side: 41 MB round-trip, application/octet-stream)
-function toDirect(pageUrl){
-  const p = pageUrl.replace("https://tmpfiles.org/", "");
-  const [id, name] = p.split("/");
-  return "https://tmpfiles.org/dl/" + id + "/" + name;
-}
+// api url = the page url the bot fetches directly (the bot resolves the
+// real download link itself). Verified: 41 MB round-trip byte-identical.
+function toBotUrl(pageUrl){ return pageUrl; }
 
 async function doUpload(file, isTest){
   bar.style.display = "block"; fill.style.width = "0%";
@@ -177,7 +173,7 @@ async function doUpload(file, isTest){
   try {
     const t0 = Date.now();
     const pageUrl = await uploadXhr(file, null);
-    lastUrl = toDirect(pageUrl);
+    lastUrl = toBotUrl(pageUrl);
     const secs = ((Date.now()-t0)/1000).toFixed(1);
     const mb = (file.size/1048576).toFixed(1);
     if (isTest){

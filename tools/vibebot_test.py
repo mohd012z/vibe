@@ -2774,6 +2774,96 @@ def main() -> int:
         check("regression: missing local path -> not found (unchanged wording)",
               err is not None and "not found" in err and "download" not in err, str(err))
 
+        # ===== v0.31: tmpfiles.org interstitial resolution (mocked, offline) =====
+        _SIGNED = ("https://tmpfiles.org/dl/1790000000.abc123def4567890/"
+                   "wXyzId123/My_File.apk")
+        _INTERSTITIAL = (b'<html><body><p><a class="download" href="'
+                         + _SIGNED.encode() + b'">Download (1.00 MB)</a></p>'
+                         b'</body></html>')
+        _REAL_BYTES = b"PK\x03\x04 real apk bytes " * 100
+        class _Inter2Real:
+            """urlopen mock: 1st call = interstitial page, 2nd = real file."""
+            n = 0
+            def __call__(self, req, *a, **k):
+                _Inter2Real.n += 1
+                url = req.full_url if hasattr(req, "full_url") else str(req)
+                class _R:
+                    def __init__(s, data, ctype): s.data, s.ct = data, ctype
+                    def __enter__(s): return s
+                    def __exit__(s, *x): return False
+                    def read(s, n=-1):
+                        out = s.data[s.pos:s.pos+(n if n>0 else len(s.data))]
+                        s.pos += len(out); return out
+                    headers = {}
+                _R.pos = 0
+                if _Inter2Real.n == 1:
+                    _R.headers = {"Content-Type": "text/html; charset=utf-8"}
+                    return _R(_INTERSTITIAL, "text/html")
+                _R.headers = {"Content-Type": "application/octet-stream"}
+                return _R(_REAL_BYTES, "application/octet-stream")
+        _inter_mock = _Inter2Real()
+        urllib.request.urlopen = _inter_mock
+        try:
+            # (a) resolver returns the signed link from an interstitial page
+            got = gu._url_interstitial_redirect("https://tmpfiles.org/wXyzId123/My_File.apk")
+            check("v0.31: interstitial page -> signed /dl/ link extracted",
+                  got == _SIGNED, got)
+            # (b) full download path: page URL -> real bytes land in inbound/
+            p2, err2 = gu._artifact("https://tmpfiles.org/wXyzId123/My_File.apk")
+            check("v0.31: /apk <tmpfiles page-url> downloads the REAL bytes",
+                  err2 is None and os.path.exists(p2)
+                  and open(p2, "rb").read() == _REAL_BYTES, str((p2, err2)))
+        finally:
+            urllib.request.urlopen = _orig_urlopen
+        # (c) non-HTML response: resolver passes the URL through unchanged
+        class _DirectResp:
+            headers = {"Content-Type": "application/vnd.android.package-archive"}
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self, n=-1): return b""
+        urllib.request.urlopen = lambda *a, **k: _DirectResp()
+        try:
+            got2 = gu._url_interstitial_redirect("https://tmpfiles.org/dl/x/y.apk")
+            check("v0.31: direct (non-HTML) URL passes through unchanged",
+                  got2 == "https://tmpfiles.org/dl/x/y.apk", got2)
+        finally:
+            urllib.request.urlopen = _orig_urlopen
+        # (d) interstitial with NO usable link -> honest RuntimeError
+        class _DeadResp:
+            headers = {"Content-Type": "text/html"}
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self, n=-1): return b"<html>no links here</html>"
+        urllib.request.urlopen = lambda *a, **k: _DeadResp()
+        try:
+            try:
+                gu._url_interstitial_redirect("https://tmpfiles.org/zzz/x.apk")
+                _raised = False
+            except RuntimeError as _e:
+                _raised = "no usable download link" in str(_e)
+            check("v0.31: page with no download link -> honest error", _raised, "")
+        finally:
+            urllib.request.urlopen = _orig_urlopen
+        # (e) SSRF re-check: an interstitial pointing at a private IP is refused
+        class _EvilResp:
+            headers = {"Content-Type": "text/html"}
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self, n=-1):
+                return (b'<a href="http://192.168.1.9/x.apk">go</a>').replace(
+                    b"http://192.168.1.9/x.apk",
+                    b"https://tmpfiles.org/dl/1.00/evil/x.apk")
+        urllib.request.urlopen = lambda *a, **k: _EvilResp()
+        try:
+            got3 = gu._url_interstitial_redirect("https://tmpfiles.org/evil/x.apk")
+            # resolver extracts the tmpfiles-shaped link; the SSRF re-check in
+            # download_url is what blocks private targets — assert the guard
+            # fires on a crafted private-IP link directly:
+            check("v0.31: SSRF re-guard refuses a private-IP redirect target",
+                  gateway._url_host_rejected("192.168.1.9"), "")
+        finally:
+            urllib.request.urlopen = _orig_urlopen
+
         # ------------------------------------------------------------------
         print("== v0.17: hardening batch (lupoxyz #6/#7/#8/#10) ==")
         from vibebot import registry, deepdive
@@ -2872,7 +2962,7 @@ def main() -> int:
         ver = getattr(vb, "__version__", None)
         check("version: __init__.__version__ is X.Y.Z",
               isinstance(ver, str) and len(ver.split(".")) == 3, str(ver))
-        check("version: matches the current build", ver == "0.30.0", str(ver))
+        check("version: matches the current build", ver == "0.31.0", str(ver))
         r, j = gateway.Gateway(td).handle("/find zzz")
         check("session: /find without --sha is refused (no most-recent fallback)",
               "no --sha" in r and "run /apk" in r and j is None, r)
