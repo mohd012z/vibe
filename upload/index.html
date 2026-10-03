@@ -64,8 +64,10 @@
 
   <div class="card">
     <div class="step">1 · Pick your file</div>
-    <input type="file" id="file" accept=".apk,.apks,.dex,.jar,application/zip,application/vnd.android.package-archive">
+    <input type="file" id="file">
     <div id="fname" class="hint"></div>
+    <div class="hint">If the picker doesn't show your APK: pick <b>“All files”</b>
+      / “Photos and files” / “Documents” and find it in <b>Downloads</b>.</div>
     <div id="warn" class="warn"></div>
   </div>
 
@@ -116,7 +118,7 @@ let lastUrl = "";
 
 fileEl.addEventListener("change", () => {
   const f = fileEl.files[0];
-  if (!f) { fname.textContent = ""; return; }
+  if (!f) { fname.textContent = ""; warn.style.display = "none"; return; }
   const mb = (f.size/1048576).toFixed(1);
   fname.textContent = `${f.name} · ${mb} MB`;
   if (f.size > MAX) {
