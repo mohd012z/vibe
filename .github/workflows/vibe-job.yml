@@ -34,11 +34,11 @@ jobs:
           python - <<'PY'
           import os
           from pathlib import Path
-          from tools.cloud.job_contract import JobContract
+          from tools.vibebot.cloud_job import JobContract
           raw = os.environ['VIBE_JOB_JSON']
           job = JobContract.from_json(raw)
           Path('.vibe-job/job.json').write_text(job.to_json(), encoding='utf-8')
-          print(f'validated {job.job_id}: {job.operation.value}')
+          print(f'validated {job.job_id}: {job.operation}')
           PY
 
       - name: Execute provider-neutral runner
