@@ -355,7 +355,12 @@ class XmatchEngine(core.Engine):
         self.report_dir = report_dir
 
     def can_run(self, artifact: str) -> bool:
-        return True  # dst comes in params; existence checked in run()
+        # NEVER auto-selected: xmatch needs TWO artifacts (src + --dst) and is
+        # only reached via an explicit `/xmatch` command (which forces
+        # engine="xmatch"). Returning True here (the old behavior) made it
+        # catch any file no other engine accepted — e.g. a `.apk.bak` upload
+        # mis-routed to xmatch and failed "no --dst" (real, 2026-10-02).
+        return False
 
     def run(self, job: core.Job) -> core.EngineResult:
         import json as _json

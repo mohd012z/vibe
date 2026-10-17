@@ -14,8 +14,8 @@ from .gateway import TelegramTransport
 
 
 class CategoryTelegramTransport(TelegramTransport):
-    def __init__(self, gateway, token: str, allowed_user_ids=None):
-        super().__init__(gateway, token, allowed_user_ids)
+    def __init__(self, gateway, token: str, allowed_user_ids=None, worker: bool = False):
+        super().__init__(gateway, token, allowed_user_ids, worker=worker)
         self.offset = 0
         self.started_at = time.time()
         self.last_rx = None
@@ -58,13 +58,14 @@ class CategoryTelegramTransport(TelegramTransport):
     def _command_for_callback(self, name: str, user_id: str) -> str | None:
         art = self._artifact_for(user_id)
         path = art.get("path") if art else None
-        if name in ("analyze", "apk", "dex", "native", "kmeta", "investigate", "map"):
+        if name in ("analyze", "apk", "dex", "native", "kmeta", "investigate",
+                    "map"):
             return f"/{name} {path}" if path else None
         if name in ("status", "jobs", "sessions", "capabilities", "help", "commands"):
             return f"/{name}"
         # These require a target/claim/session selection. Give usage through Gateway.
         if name in ("find", "xref", "callers", "callees", "why", "deepdive", "report",
-                    "claims", "falsify", "smali", "harness", "cancel"):
+                    "claims", "falsify", "smali", "harness", "cancel", "xmatch"):
             return f"/{name}"
         return None
 
