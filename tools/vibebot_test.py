@@ -434,12 +434,68 @@ def main() -> int:
                               "graph" in sess["engines"] and "dexmapper" in sess["engines"],
                               str(sess.get("engines")))
                         check("session merge: graph layer intact after /dex",
-                              (sess["structural"].get("graph") or {}).get("counts", {})
+                              (gwf.sessions.load_graph(sess) or {}).get("counts", {})
                               .get("class") == graph["counts"]["class"])
                         check("session merge: dexmapper jni layer present",
                               "jni" in sess["structural"])
                         check("session merge: intake package preserved",
                               sess["intake"].get("package") == "com.fixture.demo")
+
+        # --- v0.27: graph-split storage (session stays small; graph $ref) ---
+        # The graph engine stores a big Vibe IR (real APK = 163MB). Storing it
+        # inline made the session 274MB + re-rewritten on every /deepdive. Now
+        # upsert() writes the graph to a stable per-artifact file and keeps a
+        # fingerprinted $ref in the session. Verify: ref is written, session
+        # is small, load_graph resolves it (byte-identical to the engine's),
+        # the integrity check rejects a tampered file, and a pre-v0.27 INLINE
+        # graph still loads (back-compat).
+        if HAVE_ANDROGUARD:
+            import json as _j27
+            gwf27 = gwf  # same gateway (its work dir has the graph fixture)
+            sess27 = gwf27.sessions.load(sha_g)
+            ref = (sess27.get("structural") or {}).get("graph") or {}
+            check("v0.27 upsert: session carries a $ref, NOT the inline graph",
+                  "$ref" in ref and "$sha256" in ref
+                  and "nodes" not in ref,
+                  _j27.dumps(ref)[:120])
+            check("v0.27 upsert: $ref is a portable FILE NAME (not absolute)",
+                  ref.get("$ref", "").startswith("graph-")
+                  and not os.path.isabs(ref.get("$ref", "")),
+                  ref.get("$ref", ""))
+            gp = gwf27.sessions.graph_path(sha_g)
+            check("v0.27 upsert: stable graph file exists on disk",
+                  os.path.exists(gp), gp)
+            # Ground truth: the graph the /apk job actually produced (richer
+            # than a bare build_graph — it carries artifact path + certs).
+            gtruth = gres.structural["graph"]
+            resolved = gwf27.sessions.load_graph(sess27)
+            check("v0.27 load_graph: $ref resolves to the full graph",
+                  resolved is not None
+                  and _j27.dumps(resolved, sort_keys=True)
+                  == _j27.dumps(gtruth, sort_keys=True),
+                  "resolved differs from the job's own graph")
+            # integrity: a tampered graph file must NOT resolve (never trusted).
+            # Restore the original bytes afterward — later tests reuse this file.
+            _gp_bytes = open(gp, "rb").read()
+            with open(gp, "a", encoding="utf-8") as f:
+                f.write("x")  # corrupt the file (append garbage)
+            check("v0.27 load_graph: tampered $ref file is REJECTED",
+                  gwf27.sessions.load_graph(sess27) is None,
+                  "resolved a corrupted graph file")
+            open(gp, "wb").write(_gp_bytes)  # restore
+            check("v0.27 load_graph: restored $ref resolves again",
+                  gwf27.sessions.load_graph(sess27) == gtruth,
+                  "still rejected after restore")
+            # inline back-compat: a pre-v0.27 session stores the graph inline;
+            # load_graph must return it (no $ref).
+            inline = _j27.loads(_j27.dumps(sess27))  # deep copy
+            inline["structural"]["graph"] = gtruth
+            check("v0.27 load_graph: INLINE (pre-v0.27) graph still resolves",
+                  gwf27.sessions.load_graph(inline) == gtruth,
+                  "inline graph not returned")
+            check("v0.27 load_graph: no graph layer -> None (honest)",
+                  gwf27.sessions.load_graph({"structural": {}}) is None,
+                  "expected None for a session with no graph")
         else:
             print("== P3a graph: SKIP (androguard not installed) ==")
 
@@ -716,47 +772,51 @@ def main() -> int:
                 if sess_x is None:
                     check("P7: session persisted for xref tests", False)
                 else:
-                    gph = sess_x["structural"]["graph"]
-                    oncreate = next(m for m in gph["nodes"]["method"]
-                                    if m["name"] == "onCreate"
-                                    and "DemoApp" in m["class"])
-                    # /xref by M-id shows callees + strings
-                    r, _ = gwx2.handle(f"/xref {oncreate['id']} --sha {sha_x}")
-                    check("/xref by M-id lists callees + strings",
-                          "XREF " + oncreate["id"] in r and "callees (" in r
-                          and "strings referenced (" in r, r)
-                    check("/xref shows an in-APK callee",
-                          "MobileAds.initialize" in r, r)
-                    check("/xref shows a referenced string", "ad-unit" in r, r)
-                    # /callees by dotted name resolves to the same M-id
-                    r, _ = gwx2.handle(f"/callees {oncreate['class']}.onCreate "
-                                       f"--sha {sha_x}")
-                    check("/callees by dotted name resolves to M-id",
-                          "CALLEES " + oncreate["id"] in r, r)
-                    # /callers card renders
-                    r, _ = gwx2.handle(f"/callers {oncreate['class']}.onCreate "
-                                       f"--sha {sha_x}")
-                    check("/callers returns a CALLERS card", "CALLERS " in r, r)
-                    # external target is flagged honestly, not faked as in-graph
-                    r, _ = gwx2.handle("/xref android.os.Build.MODEL --sha "
-                                       + sha_x)
-                    check("/xref external is flagged EXTERNAL",
-                          "EXTERNAL" in r and "not an in-APK method" in r, r)
-                    # no-target / no-sha / bad-sha all honest
-                    r, _ = gwx2.handle("/xref --sha " + sha_x)
-                    check("/xref no-target shows usage", "/xref <M-id" in r, r)
-                    r, _ = gwx2.handle("/xref M1")
-                    check("/xref no-sha hints the last job sha",
-                          sha_x[:8] in r, r)
-                    r, _ = gwx2.handle("/xref M1 --sha ZZZZ")
-                    check("/xref bad-sha rejected", "hex sha" in r, r)
-                    # xrefs() is deterministic
-                    a = gu.xrefs(gph, oncreate["id"])
-                    b = gu.xrefs(gph, oncreate["id"])
-                    import json as _j7
-                    check("xrefs reproducible (2 calls identical)",
-                          _j7.dumps(a, sort_keys=True)
-                          == _j7.dumps(b, sort_keys=True))
+                    gph = gwx2.sessions.load_graph(sess_x)  # v0.27: $ref or inline
+                    if gph is None:
+                        check("P7: graph layer resolvable from session", False,
+                              "load_graph returned None")
+                    else:
+                        oncreate = next(m for m in gph["nodes"]["method"]
+                                        if m["name"] == "onCreate"
+                                        and "DemoApp" in m["class"])
+                        # /xref by M-id shows callees + strings
+                        r, _ = gwx2.handle(f"/xref {oncreate['id']} --sha {sha_x}")
+                        check("/xref by M-id lists callees + strings",
+                              "XREF " + oncreate["id"] in r and "callees (" in r
+                              and "strings referenced (" in r, r)
+                        check("/xref shows an in-APK callee",
+                              "MobileAds.initialize" in r, r)
+                        check("/xref shows a referenced string", "ad-unit" in r, r)
+                        # /callees by dotted name resolves to the same M-id
+                        r, _ = gwx2.handle(f"/callees {oncreate['class']}.onCreate "
+                                           f"--sha {sha_x}")
+                        check("/callees by dotted name resolves to M-id",
+                              "CALLEES " + oncreate["id"] in r, r)
+                        # /callers card renders
+                        r, _ = gwx2.handle(f"/callers {oncreate['class']}.onCreate "
+                                           f"--sha {sha_x}")
+                        check("/callers returns a CALLERS card", "CALLERS " in r, r)
+                        # external target is flagged honestly, not faked as in-graph
+                        r, _ = gwx2.handle("/xref android.os.Build.MODEL --sha "
+                                           + sha_x)
+                        check("/xref external is flagged EXTERNAL",
+                              "EXTERNAL" in r and "not an in-APK method" in r, r)
+                        # no-target / no-sha / bad-sha all honest
+                        r, _ = gwx2.handle("/xref --sha " + sha_x)
+                        check("/xref no-target shows usage", "/xref <M-id" in r, r)
+                        r, _ = gwx2.handle("/xref M1")
+                        check("/xref no-sha hints the last job sha",
+                              sha_x[:8] in r, r)
+                        r, _ = gwx2.handle("/xref M1 --sha ZZZZ")
+                        check("/xref bad-sha rejected", "hex sha" in r, r)
+                        # xrefs() is deterministic
+                        a = gu.xrefs(gph, oncreate["id"])
+                        b = gu.xrefs(gph, oncreate["id"])
+                        import json as _j7
+                        check("xrefs reproducible (2 calls identical)",
+                              _j7.dumps(a, sort_keys=True)
+                              == _j7.dumps(b, sort_keys=True))
 
         if HAVE_ANDROGUARD:
             print("== P10: /investigate — orchestrated 18-stage ==")
@@ -2699,7 +2759,7 @@ def main() -> int:
         ver = getattr(vb, "__version__", None)
         check("version: __init__.__version__ is X.Y.Z",
               isinstance(ver, str) and len(ver.split(".")) == 3, str(ver))
-        check("version: matches the current build", ver == "0.26.0", str(ver))
+        check("version: matches the current build", ver == "0.27.0", str(ver))
         r, j = gateway.Gateway(td).handle("/find zzz")
         check("session: /find without --sha is refused (no most-recent fallback)",
               "no --sha" in r and "run /apk" in r and j is None, r)
