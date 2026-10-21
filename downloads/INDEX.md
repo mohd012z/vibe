@@ -13,3 +13,6 @@
   - File: PulsePlayer-4.0.0-yt-download.apk (46 MB), com.pulseplayer.app, CI build from PR #27
   - Direct: https://mohd012z.github.io/vibe/downloads/PulsePlayer-4.0.0-yt-download.apk
 
+- Pulse Player 4.0.0 — YouTube download + no-ads (AI Pulse Studio base) → [PULSEPLAYER-ADFREE.md](PULSEPLAYER-ADFREE.md)
+  - File: PulsePlayer-4.0.0-yt-download-adfree.apk (60 MB, arm64), in-player Download fixed, PR #28
+  - Direct: https://mohd012z.github.io/vibe/downloads/PulsePlayer-4.0.0-yt-download-adfree.apk
