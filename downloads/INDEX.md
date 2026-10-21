@@ -6,3 +6,10 @@
 - Signed with the Layla recompile key (not the original CN=bin key)
 - SHA-256 below (first 20 hex chars)
 
+---
+
+# Also in this folder
+- Pulse Player 4.0.0 — YouTube / YT Music download (debug build) → [PULSEPLAYER.md](PULSEPLAYER.md)
+  - File: PulsePlayer-4.0.0-yt-download.apk (46 MB), com.pulseplayer.app, CI build from PR #27
+  - Direct: https://mohd012z.github.io/vibe/downloads/PulsePlayer-4.0.0-yt-download.apk
+
