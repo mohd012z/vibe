@@ -18,6 +18,6 @@
   - Direct: https://mohd012z.github.io/vibe/downloads/PulsePlayer-4.0.0-yt-download-adfree.apk
 
 - R2AI for Android — on-device radare2 6.2.4 + LLM decompiler (Minda built-in / ChatGPT via your OpenAI key / offline Raw pdc) → [R2AI-ANDROID.md](R2AI-ANDROID.md)
-  - File: r2ai-android-v1.7-aarch64.apk (70 MB, arm64, com.r2ai.app) — v1.7: +SSL-Pin scan (TDOHEX), +grep -E user regex, smali-aware AI patch plan
-  - Direct: https://mohd012z.github.io/vibe/downloads/r2ai-android-v1.7-aarch64.apk
-  - (v1.1–v1.6 superseded)
+  - File: r2ai-android-v1.8-aarch64.apk (70 MB, arm64, com.r2ai.app) — v1.8: +process/locations per hit, ALL-DEX + lib scan, XREF (string→function)
+  - Direct: https://mohd012z.github.io/vibe/downloads/r2ai-android-v1.8-aarch64.apk
+  - (v1.1–v1.7 superseded)
