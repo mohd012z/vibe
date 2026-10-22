@@ -1,11 +1,12 @@
-# R2AI for Android — on-device radare2 + LLM decompiler (v1.3)
+# R2AI for Android — on-device radare2 + LLM decompiler (v1.4)
 
-- File: `r2ai-android-v1.3-aarch64.apk` (70 MB, aarch64 arm64 only)
+- File: `r2ai-android-v1.4-aarch64.apk` (70 MB, aarch64 arm64 only)
 - Package: `com.r2ai.app`, signed with Android debug key (install: allow "Install unknown apps")
 - SHA-256: `916f782aff50b61d3d04f6252a90f2f5d6040f6e4d03ccb39c656060e155be2d`
 - Built: 2026-10-22 from pancake's R2AI (HackBCN'25) stack
+- v1.4 (versionCode 5): fixes EACCES 'Permission denied' running r2blob — executables now ship in lib/arm64-v8a/ (extracted to nativeLibraryDir, exec-allowed); share data stays in filesDir via R2_PREFIX. Also: setup-latch so early Open APK waits for extraction.
 - v1.3 (versionCode 4): fixes CalledFromWrongThreadException on load (dex button updated off main thread) — reported from device
-- SHA-256 (v1.3): `2fe135789c282157aee70c20e7c5cc18e09e7bb20d8d62556cca7452f5ed4a5f`
+- SHA-256 (v1.4): `2fe135789c282157aee70c20e7c5cc18e09e7bb20d8d62556cca7452f5ed4a5f`
 - v1.2 adds: **Raw (off)** — offline pdc pseudocode, zero network; **multi-DEX picker** (dex 1/5 button) for big multi-dex apps
 
 ## What it is
