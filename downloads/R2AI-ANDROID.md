@@ -1,9 +1,11 @@
-# R2AI for Android — on-device radare2 + LLM decompiler (v1.1)
+# R2AI for Android — on-device radare2 + LLM decompiler (v1.2)
 
-- File: `r2ai-android-v1.1-aarch64.apk` (70 MB, aarch64 arm64 only)
+- File: `r2ai-android-v1.2-aarch64.apk` (70 MB, aarch64 arm64 only)
 - Package: `com.r2ai.app`, signed with Android debug key (install: allow "Install unknown apps")
 - SHA-256: `916f782aff50b61d3d04f6252a90f2f5d6040f6e4d03ccb39c656060e155be2d`
 - Built: 2026-10-22 from pancake's R2AI (HackBCN'25) stack
+- SHA-256 (v1.2): `2fe135789c282157aee70c20e7c5cc18e09e7bb20d8d62556cca7452f5ed4a5f`
+- v1.2 adds: **Raw (off)** — offline pdc pseudocode, zero network; **multi-DEX picker** (dex 1/5 button) for big multi-dex apps
 
 ## What it is
 Real **radare2 6.2.4** (official Android build) running *on your phone*, wired to an LLM:
