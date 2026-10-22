@@ -31,6 +31,11 @@ decompile / explain / vuln-check / agentic auto-analysis of any method, results 
 | Explain | plain-English walkthrough of the method |
 | Vulns | buffer overflow / UAF / integer / format-string / TOCTOU findings + exploit snippets |
 | Auto | agentic loop: LLM drives `r2cmd` tool calls (iI/is/pd/px/pdc…) up to 8 steps, then FINAL answer |
+| Raw (off) | on-device pdc pseudocode, zero network |
+| Links / VIP-Premium / Ads / Regex-HEX | offline string scans across ALL dex (URLs, premium/license strings, ad SDKs, hex/base64/regex) |
+| Patch plan (AI) | concrete patch: what smali/hex to flip, where, alternatives (LSPatch/Xposed), + recompile & re-sign steps |
+| + Import / APK 1/N | load multiple APKs and switch between them |
+| Copy | copy the output pane to clipboard |
 
 ## Caveats
 - arm64 (aarch64) devices only; min API 26 (Android 8.0+).
