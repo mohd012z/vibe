@@ -1,0 +1,35 @@
+# R2AI for Android — on-device radare2 + LLM decompiler (v1.1)
+
+- File: `r2ai-android-v1.1-aarch64.apk` (70 MB, aarch64 arm64 only)
+- Package: `com.r2ai.app`, signed with Android debug key (install: allow "Install unknown apps")
+- SHA-256: `916f782aff50b61d3d04f6252a90f2f5d6040f6e4d03ccb39c656060e155be2d`
+- Built: 2026-10-22 from pancake's R2AI (HackBCN'25) stack
+
+## What it is
+Real **radare2 6.2.4** (official Android build) running *on your phone*, wired to an LLM:
+pick any APK (or raw `.dex`) with the Open APK button → full on-device analysis →
+decompile / explain / vuln-check / agentic auto-analysis of any method, results from the LLM.
+
+- Reversing (dex parse, `-A` analysis, `pdc` pseudocode) happens **locally** via native
+  `r2blob` + 23 r2 libs bundled in the APK (~68 MB assets, extracted on first launch).
+- The LLM gets the pseudocode and returns C code / explanations / findings.
+- **Providers:** Minda (team key preloaded — no setup) **or** ChatGPT/OpenAI (tap
+  `Key ⚙`, paste your `sk-...` key; stored on-device only).
+
+## Buttons
+| Button | Does |
+|---|---|
+| Open APK | SAF picker → extracts classes.dex → runs full `-A` (1–3 min on big apps) |
+| method list + ⟳ | every function found (address + name); ⟳ re-runs analysis |
+| Decompile | pdc → clean C via the LLM (decai-style) |
+| Explain | plain-English walkthrough of the method |
+| Vulns | buffer overflow / UAF / integer / format-string / TOCTOU findings + exploit snippets |
+| Auto | agentic loop: LLM drives `r2cmd` tool calls (iI/is/pd/px/pdc…) up to 8 steps, then FINAL answer |
+
+## Caveats
+- arm64 (aarch64) devices only; min API 26 (Android 8.0+).
+- First launch extracts the r2 runtime (~68 MB) — takes a few seconds.
+- Full analysis of a large multi-DEX app only covers the first `classes.dex` (the rest
+  is listed but not auto-picked).
+- Debug-signed; INTERNET permission only (plus normal read of the file you pick).
+- Not runtime-tested on a physical device yet — report any crash and I'll patch a v1.2.
