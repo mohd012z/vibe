@@ -1,9 +1,10 @@
-# R2AI for Android — on-device radare2 + LLM decompiler (v2.0)
+# R2AI for Android — on-device radare2 + LLM decompiler (v2.0.1)
 
-- File: `r2ai-android-v2.0-aarch64.apk` (70 MB, aarch64 arm64 only)
+- File: `r2ai-android-v2.0.1-aarch64.apk` (70 MB, aarch64 arm64 only)
 - Package: `com.r2ai.app`, signed with Android debug key (install: allow "Install unknown apps")
 - SHA-256: `916f782aff50b61d3d04f6252a90f2f5d6040f6e4d03ccb39c656060e155be2d`
 - Built: 2026-10-22 from pancake's R2AI (HackBCN'25) stack
+- v2.0.1 (versionCode 12): **fix** — the Minda key was not actually baked into the APK (sed delimiter broke on a `/` in the key, so the literal placeholder shipped → HTTP 401 'Invalid proxy server token'). Key injection is now Python + verified in the dex before build.
 - v2.0 (versionCode 11): **EXPIRY AUTO-DETECT** — finds expiry-related methods (by name + string-xref) and AUTO-CLASSIFIES what patch each needs by reading its code: BOOLEAN-GATE (flip return), TIMESTAMP-SET (patch stored expiry value to far-future — boolean flip won't work if app re-reads timestamp), DATE-COMPARE (patch the comparison branch, not the date), FORMAT/PARSE (patch parsed value), REMOTE (expiry from server — patch parser/check), STRING (patch date constant). Shows verdict per method + exact smali recipe. Classifier validated on 6 synthetic code shapes (100% correct).
 - v1.9 (versionCode 10): **SCAN ALL** one-shot (Ads-Regex style) across 7 categories — EXPIRY / VIP-Premium / ADS / ANALYTICS / SSL-PIN / SIGNATURE / LINKS — grouped output with process log + per-hit locations (dex @ vaddr / lib native). New **Expiry** (expired/notAfter/validUntil/deadline/timestamp…) + **Analytics** (firebase/sentry/posthog/tracking/metric…) + **Signature** (apksign/signingInfo/integrity/tamper/debuggable…) categories. **r2 CONSOLE**: FILE button opens any file (dex/lib/so/whatever) as r2 target, type any r2 command (iI / is ~ http / s 0xADDR; af; pdc / aaa; axt 0x…) → R2 runs it on-device and shows output.
 - v1.8 (versionCode 9): **process + locations** — every scan now logs the full process (which dex parsed, string counts, timing, libs scanned) and each hit shows its LOCATION (`classes2.dex @ 0x4ae71c` or `libfoo.so (native)`). **ALL DEX** toggle (on by default: scan all dex + all arm64 lib/*.so; off = current dex only). **XREF** toggle (on-demand, slow): r2 `aaa` + batched `axt` maps top strings -> the FUNCTIONS that reference them (verified: 'No license URL' -> const-string in license-check method).
@@ -12,7 +13,7 @@
 - v1.5 (versionCode 6): method list via `icj` (dex JSON, ~5s, no full -A) — fixes 'Analyzed in 53s: 0 functions' on multi-DEX apps. Decompile/Raw now work straight from icj method addresses.
 - v1.4 (versionCode 5): fixes EACCES 'Permission denied' running r2blob — executables now ship in lib/arm64-v8a/ (extracted to nativeLibraryDir, exec-allowed); share data stays in filesDir via R2_PREFIX. Also: setup-latch so early Open APK waits for extraction.
 - v1.3 (versionCode 4): fixes CalledFromWrongThreadException on load (dex button updated off main thread) — reported from device
-- SHA-256 (v2.0): `2fe135789c282157aee70c20e7c5cc18e09e7bb20d8d62556cca7452f5ed4a5f`
+- SHA-256 (v2.0.1): `2fe135789c282157aee70c20e7c5cc18e09e7bb20d8d62556cca7452f5ed4a5f`
 - v1.2 adds: **Raw (off)** — offline pdc pseudocode, zero network; **multi-DEX picker** (dex 1/5 button) for big multi-dex apps
 
 ## What it is
