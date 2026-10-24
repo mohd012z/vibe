@@ -1,5 +1,5 @@
 {
-  "note": "Reduced fingerprint DB — class/package prefixes and manifest meta-data keys for ad/analytics/consent SDKs. ORIGINAL reduced signals (short prefixes + well-known public manifest keys), not copied SDK code. Extend additively; keep entries short.",
+  "note": "Reduced fingerprint DB — class/package prefixes and manifest meta-data keys for ad/analytics/consent SDKs. ORIGINAL reduced signals (short prefixes + well-known public manifest keys), not copied SDK code. Extend additively; keep entries short. Buckets: *ClassPrefixes (E1 DEX class presence) + *MetaKeys (E2 manifest meta-data); the bucket suffix maps to the finding classification (see apkmod.EXTRA_SDK_BUCKETS).",
   "sdkClassPrefixes": {
     "ADMOB": ["com/google/android/gms/ads/", "com/google/android/ads/identifier/"],
     "APPLOVIN": ["com/applovin/"],
@@ -21,6 +21,64 @@
     "FLURRY": ["com/flurry/"],
     "MIXPANEL": ["com/mixpanel/"],
     "AMPLITUDE": ["com/amplitude/"]
+  },
+  "socialClassPrefixes": {
+    "FACEBOOK_LOGIN": ["com/facebook/login/", "com/facebook/auth/", "com/facebook/appevents/"],
+    "FACEBOOK_SDK": ["com/facebook/sdk/"],
+    "TWITTER": ["twitter/"],
+    "GOOGLE_SIGNIN": ["com/google/android/gms/auth/", "com/google/signin/"],
+    "LINE": ["com/line/"],
+    "INSTAGRAM": ["com/instagram/"],
+    "VK": ["ru/vk/"]
+  },
+  "socialMetaKeys": {
+    "GOOGLE_SIGNIN": ["com.google.android.gms.auth"],
+    "FACEBOOK_SDK": ["com.facebook.sdk.ApplicationId"]
+  },
+  "pushClassPrefixes": {
+    "FCM": ["com/google/firebase/messaging/"],
+    "ONE_SIGNAL": ["com/onesignal/"],
+    "JPUSH": ["cn/jpush/"]
+  },
+  "pushMetaKeys": {
+    "FCM": ["com.google.firebase.messaging", "com.google.android.gcm"]
+  },
+  "paymentClassPrefixes": {
+    "STRIPE": ["com/stripe/"],
+    "PAYPAL": ["com/paypal/"],
+    "GOOGLE_WALLET": ["com/google/android/gms/wallet/"]
+  },
+  "paymentMetaKeys": {
+    "GOOGLE_WALLET": ["com.google.android.gms.wallet"]
+  },
+  "mapsClassPrefixes": {
+    "GOOGLE_MAPS": ["com/google/android/gms/maps/"],
+    "MAPBOX": ["com/mapbox/"],
+    "HERE": ["com/here/"],
+    "OSMDROID": ["org/osmdroid/"]
+  },
+  "gameClassPrefixes": {
+    "UNITY_ENGINE": ["com/unity3d/player/"],
+    "UNREAL": ["com/epicgames/"],
+    "GODOT": ["godot/"],
+    "COCOS2D": ["org/cocos2dx/"]
+  },
+  "hybridClassPrefixes": {
+    "REACT_NATIVE": ["com/facebook/react/"],
+    "FLUTTER": ["io/flutter/", "dev/flutter/"],
+    "CORDOVA": ["org/apache/cordova/"],
+    "CAPACITOR": ["com/getcapacitor/"],
+    "UNIAPP": ["io/dcloud/"]
+  },
+  "netClassPrefixes": {
+    "OKHTTP": ["okhttp3/"],
+    "OKIO": ["okio/"],
+    "RETROFIT": ["retrofit2/"],
+    "VOLLEY": ["com/android/volley/"]
+  },
+  "storageClassPrefixes": {
+    "MMKV": ["com/tencent/MMKV/"],
+    "FILEBOX": ["com/getkeepsafe/filebox/"]
   },
   "consentKeys": [
     "com.google.android.ump",
