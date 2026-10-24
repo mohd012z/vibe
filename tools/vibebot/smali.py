@@ -187,6 +187,94 @@ def query(q: str) -> list[dict]:
     return [_row(k, v) for k, v in sorted(partial)]
 
 
+# PATCH_GUIDE — smali editing rules distilled from the classic references
+# (JesusFreke smali wiki: Registers + Types/Methods/Fields; Gabor Paller's
+# public-domain Dalvik opcodes note; the 2013 XDA SystemUI smali-coding guide;
+# Smali+ operational semantics, Information 2020). Mechanism-level writeups
+# only — the sources are public-domain / wiki / academic, but we restate the
+# rules in our own words rather than quoting them (see study note
+# 2026-10-24-smali-books-cheatsheets.md). This is the "what to check before a
+# smali patch lands" reference: the #1 causes of a broken hand-patch are
+# register-allocation mistakes and malformed type/method references, and
+# non-trivial logic hand-authored in smali.
+PATCH_GUIDE: dict[str, str] = {
+    "register-safety": (
+        "Register allocation — the #1 source of broken hand-patches.\n"
+        "  * `.locals` = number of NON-parameter registers; `.registers` = TOTAL.\n"
+        "    total = locals + parameters. Either directive is fine, but they mean\n"
+        "    different things — a patch that bumps one must know which it touched.\n"
+        "  * Parameters are stored in the LAST n registers. A non-static method's\n"
+        "    first parameter is the implicit `this` object, then the declared args.\n"
+        "  * 64-bit values (J long, D double) occupy TWO adjacent registers — a J/D\n"
+        "    argument consumes two parameter slots, and an invoke register list must\n"
+        "    name BOTH halves (low first). Forgetting the second half is a classic bug.\n"
+        "  * If you ADD registers (bump .locals/.registers), every parameter shifts to\n"
+        "    a new physical slot. Using `p0/p1/...` parameter references (baksmali's\n"
+        "    default) makes this safe — p-names track parameters, so bumping .locals\n"
+        "    does not require renumbering the params. Absolute v-names would.\n"
+        "  * Booleans (Z) are 32-bit stored as 0/1; boolean ops compile to int ops."
+    ),
+    "emit-grammar": (
+        "Type / method / field reference grammar — the EXACT form patch codegen\n"
+        "must emit (verbose form is what lets the VM verify + the smali assembler\n"
+        "accept it):\n"
+        "  * primitives: single letter. V=void (return type ONLY), Z=boolean,\n"
+        "    B=byte, S=short, C=char, I=int, J=long, F=float, D=double.\n"
+        "  * object: Lpkg/name/Name;  (leading L, slash-separated, trailing ;).\n"
+        "    Ljava/lang/String; == java.lang.String.\n"
+        "  * array: one `[` per dimension, max 255. [I=int[], [[I=int[][],\n"
+        "    [Ljava/lang/String;=String[].\n"
+        "  * method ref: Lowner;->name(params)return  with ZERO separators.\n"
+        "    e.g. Lpkg/Name;->method(I[[IILjava/lang/String;)Ljava/lang/String;\n"
+        "    == String method(int, int[][], int, String).\n"
+        "  * field ref:  Lowner;->fieldName:Type   e.g. Lpkg/Name;->x:I\n"
+        "  * inner classes in the owner: Lpkg/Outer$Inner;"
+    ),
+    "insertion-workflow": (
+        "Inserting NON-TRIVIAL logic (loops, if/else, switch, a new method body):\n"
+        "do NOT hand-author it in smali — it is error-prone. The canonical workflow:\n"
+        "  1. Write the logic in Java in a dummy project (mirror the real package +\n"
+        "     class so refs match).\n"
+        "  2. Build, then baksmali the dummy APK and copy the generated method in.\n"
+        "  3. Re-baksmali the PATCHED apk to verify it assembles and reads back as\n"
+        "     intended (round-trip = the check).\n"
+        "Reserve hand-written smali for the small flips: const/4 v0,0x0 -> 0x1,\n"
+        "if-eq -> if-ne, return-void, move v0,0x1. Finding WHERE to put a call:\n"
+        "match on parameter types (an interceptor needs a MotionEvent, so look for\n"
+        "handlers that receive one) + logcat; a cross-file search maps all call sites."
+    ),
+    "literal-encoding": (
+        "Encoding a literal you don't know the smali form of (esp. floats/doubles,\n"
+        "IEEE-754): don't trust a guessed hex. Encode it the verified way —\n"
+        "  * put the value in a dummy Java build, baksmali, and read the emitted\n"
+        "    instruction (e.g. 107.0f shows up as `const/high16 vN, 0x435c`).\n"
+        "  * integers: /base helper (this tool) converts across bases 2..36.\n"
+        "  * far-future timestamp for expiry patches: 4102444800000 ms = 2100-01-01\n"
+        "    (const-wide/32 of a 32-bit slice, or const-wide, per the register form).\n"
+        "This is the same 'start from the opposite end' method the 2013 XDA guide\n"
+        "uses, applied to any literal the assembler would otherwise guess wrong."
+    ),
+}
+
+PATCH_GUIDE_SECTIONS: tuple[str, ...] = tuple(PATCH_GUIDE.keys())
+
+
+def patch_guide(section: str | None = None) -> str:
+    """Return the smali patching guide (all sections, or one by name).
+
+    `section` in PATCH_GUIDE_SECTIONS selects a single section; None/'' returns
+    the whole guide; unknown returns '' (caller reports it)."""
+    if not section:
+        return "\n\n".join(
+            f"### {s}\n{PATCH_GUIDE[s]}" for s in PATCH_GUIDE_SECTIONS
+        )
+    key = section.strip().lower()
+    for s in PATCH_GUIDE_SECTIONS:
+        if s == key or key in s:
+            return PATCH_GUIDE[s]
+    return ""
+
+
 def to_base(n: int, base: int) -> str:
     """Format integer n in the given base (2..36), lowercase."""
     if not (2 <= base <= 36):
