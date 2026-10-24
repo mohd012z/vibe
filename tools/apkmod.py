@@ -161,15 +161,54 @@ def _sdk_matches(cls_name: str, prefixes: dict) -> list[str]:
     return hits
 
 
+# Bucket -> finding classification. Any `<category>ClassPrefixes` /
+# `<category>MetaKeys` key in the DB (or an extra_fp overlay) is picked up
+# generically — adding a category to fingerprints.json is data-only.
+# ("sdk", …) is the legacy ad bucket; ("analytics", …) stays ANALYTICS.
+EXTRA_SDK_BUCKETS: dict[str, str] = {
+    "social": "SOCIAL",
+    "push": "PUSH",
+    "payment": "PAYMENT",
+    "maps": "MAPS",
+    "game": "GAME",
+    "hybrid": "HYBRID",
+    "net": "NETWORK",
+    "storage": "STORAGE",
+}
+
+
+def _class_buckets(fp: dict) -> list[tuple[str, dict]]:
+    """[(classification, prefixes)] for every E1 bucket, legacy first."""
+    out = [("ADVERTISING", fp.get("sdkClassPrefixes", {})),
+           ("ANALYTICS", fp.get("analyticsClassPrefixes", {}))]
+    for cat, cls in EXTRA_SDK_BUCKETS.items():
+        b = fp.get(cat + "ClassPrefixes")
+        if b:
+            out.append((cls, b))
+    return out
+
+
+def _meta_buckets(fp: dict) -> list[tuple[str, dict]]:
+    out = [("ADVERTISING", fp.get("manifestMetaKeys", {}))]
+    for cat, cls in EXTRA_SDK_BUCKETS.items():
+        b = fp.get(cat + "MetaKeys")
+        if b:
+            out.append((cls, b))
+    return out
+
+
 def detect(inv: dict, dexes: list, extra_fp: dict | None = None) -> list[dict]:
     fp = json.load(open(FP_DB, encoding="utf-8"))
     if extra_fp:
-        for bucket in ("sdkClassPrefixes", "analyticsClassPrefixes"):
+        _class_b = {"sdkClassPrefixes", "analyticsClassPrefixes"} | \
+                   {c + "ClassPrefixes" for c in EXTRA_SDK_BUCKETS}
+        for bucket in sorted(_class_b):
             for sdk, pref in (extra_fp.get(bucket) or {}).items():
-                fp[bucket].setdefault(sdk, []).extend(pref)
-        for k in ("manifestMetaKeys",):
+                fp.setdefault(bucket, {}).setdefault(sdk, []).extend(pref)
+        for k in {"manifestMetaKeys"} | \
+                 {c + "MetaKeys" for c in EXTRA_SDK_BUCKETS}:
             for sdk, keys in (extra_fp.get(k) or {}).items():
-                fp[k].setdefault(sdk, []).extend(keys)
+                fp.setdefault(k, {}).setdefault(sdk, []).extend(keys)
         for k in ("chokepointMethods", "adUiClassHints"):
             for x in (extra_fp.get(k) or []):
                 if x not in fp[k]:
@@ -185,23 +224,21 @@ def detect(inv: dict, dexes: list, extra_fp: dict | None = None) -> list[dict]:
             }
         return findings[key]
 
-    # E1: class-level presence
+    # E1: class-level presence (every bucket — ads, analytics, social, push,
+    # payment, maps, game, hybrid, net, storage)
     all_classes = {}
     for dex_name, d in dexes:
         for c in d.get_classes():
             cn = c.get_name()
             all_classes[cn] = (dex_name, c)
     for cn in all_classes:
-        for sdk in _sdk_matches(cn, fp["sdkClassPrefixes"]):
-            dex_name, _ = all_classes[cn]
-            f = ensure(f"{sdk}:{cn}", sdk, "ADVERTISING")
-            f["evidence"].append({"level": "E1", "artifact": dex_name,
-                                  "class": cn, "detail": "SDK class present in DEX"})
-        for sdk in _sdk_matches(cn, fp["analyticsClassPrefixes"]):
-            dex_name, _ = all_classes[cn]
-            f = ensure(f"{sdk}:{cn}", sdk, "ANALYTICS")
-            f["evidence"].append({"level": "E1", "artifact": dex_name,
-                                  "class": cn, "detail": "analytics class present in DEX"})
+        for cls_name_bucket, prefixes in _class_buckets(fp):
+            for sdk in _sdk_matches(cn, prefixes):
+                dex_name, _ = all_classes[cn]
+                f = ensure(f"{cls_name_bucket}:{sdk}:{cn}", sdk, cls_name_bucket)
+                f["evidence"].append({"level": "E1", "artifact": dex_name,
+                                      "class": cn,
+                                      "detail": f"{cls_name_bucket} class present in DEX"})
         # generic ad-UI hint: match the CLASS NAME (last segment), so
         # any package's .../InterstitialAd, .../BannerView etc. is caught
         cls_name = cn.rstrip(";").rsplit("/", 1)[-1]
@@ -211,15 +248,16 @@ def detect(inv: dict, dexes: list, extra_fp: dict | None = None) -> list[dict]:
             f["evidence"].append({"level": "E1", "artifact": all_classes[cn][0],
                                   "class": cn, "detail": "ad-UI class name hint (generic)"})
 
-    # E2: manifest meta-data correlation
+    # E2: manifest meta-data correlation (every bucket)
     for key, val in inv.get("metaData", {}).items():
-        for sdk, keys in fp["manifestMetaKeys"].items():
-            if any(key.startswith(k) or k in key for k in keys):
-                f = ensure(f"{sdk}:manifest", sdk, "ADVERTISING")
-                shown = val if len(str(val)) <= 12 else str(val)[:8] + "…"
-                f["evidence"].append({"level": "E2", "artifact": "AndroidManifest.xml",
-                                      "class": None,
-                                      "detail": f"meta-data {key} = {shown}"})
+        for bucket, metas in _meta_buckets(fp):
+            for sdk, keys in metas.items():
+                if any(key.startswith(k) or k in key for k in keys):
+                    f = ensure(f"{bucket}:{sdk}:manifest", sdk, bucket)
+                    shown = val if len(str(val)) <= 12 else str(val)[:8] + "…"
+                    f["evidence"].append({"level": "E2", "artifact": "AndroidManifest.xml",
+                                          "class": None,
+                                          "detail": f"meta-data {key} = {shown}"})
         if any(key.startswith(k) or k.lower() in key.lower() for k in fp.get("consentKeys", [])):
             f = ensure(f"CONSENT:{key}", "CONSENT", "CONSENT")
             f["evidence"].append({"level": "E2", "artifact": "AndroidManifest.xml",

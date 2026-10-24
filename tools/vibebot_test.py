@@ -278,6 +278,33 @@ def main() -> int:
         check("smali count is honest (100 < n <= 257)",
               smali.opcode_count() > 100, str(smali.opcode_count()))
 
+        # --- smali patching guide (2026-10-24 study of the smali reference books)
+        r, _ = gw.handle("/smali guide")
+        check("smali guide: returns all four sections",
+              all(s in r for s in ("register-safety", "emit-grammar",
+                                   "insertion-workflow", "literal-encoding")),
+              r[:120])
+        r, _ = gw.handle("/smali guide register")
+        check("smali guide register: selects the register-safety section only",
+              ".locals" in r and "two parameter slots" in r
+              and "emit-grammar" not in r, r[:120])
+        r, _ = gw.handle("/smali guide emit")
+        check("smali guide emit: the exact ref grammar (L…;->name(…)T)",
+              "Lowner;->name(params)return" in r and "ZERO separators" in r,
+              r[:120])
+        r, _ = gw.handle("/smali guide literal")
+        check("smali guide literal: IEEE-754 build-and-read + far-future ts",
+              "const/high16" in r and "4102444800000" in r, r[:120])
+        r, _ = gw.handle("/smali guide no-such-section")
+        check("smali guide: unknown section lists valid ones (no fake hit)",
+              "unknown guide section" in r and "register-safety" in r, r[:120])
+        r, _ = gw.handle("/smali guide")
+        check("smali guide: pure module function matches the command surface",
+              smali.patch_guide() in r, "module/cmd drift")
+        check("smali guide: single-section selector agrees with command output",
+              smali.patch_guide("register") in gw.handle("/smali guide register")[0],
+              "selector drift")
+
         print("== P2: /base + /hash ==")
         r, _ = gw.handle("/base ff 16 10")
         check("base ff 16 -> 255 10", "255" in r, r)
@@ -339,6 +366,47 @@ def main() -> int:
         # too-short input is refused honestly
         check("dexcheck too-short refused",
               dexutil.check_header(b"short")["valid"] is False)
+
+        # --- /dexdump: DEX discovery (stdlib, DexDumper-ported core) -------
+        print("== /dexdump: DEX discovery in packed artifacts (stdlib) ==")
+        from vibebot import dexdump
+        # the fixture's own classes.dex, bare: exactly one VALID hit
+        bare = os.path.join(td, "bare.dex")
+        open(bare, "wb").write(_dex)
+        res = dexdump.scan_artifact(bare)
+        check("dexdump bare dex: one VALID hit",
+              res["counts"]["valid"] == 1 and res["counts"]["signatures"] == 1,
+              str(res["counts"]))
+        # dex-shell layout: stub in the zip + a different real dex appended
+        # after the EOCD — both must surface (the classic packer pattern)
+        real2 = bytearray(_dex)
+        # make real2 a DIFFERENT valid dex (flip a non-header data byte and
+        # recompute sha1+adler so integrity stays VALID)
+        real2[0x70] ^= 0x55
+        real2_fixed, _ = dexutil.repair(bytes(real2))
+        packed = os.path.join(td, "packed.apk")
+        import zipfile as _z2
+        with _z2.ZipFile(packed, "w", _z2.ZIP_DEFLATED) as _zp:
+            _zp.writestr("AndroidManifest.xml", b"<manifest/>")
+            _zp.writestr("classes.dex", b"dex\n037\x00" + b"\x00" * 100)
+        with open(packed, "ab") as _fa:
+            _fa.write(real2_fixed)
+        res = dexdump.scan_artifact(packed)
+        check("dexdump packed: real dex found in tail region",
+              any(h["region"].startswith("raw tail") and h["state"] == "VALID DEX"
+                  for h in res["hits"]), str(res["counts"]))
+        check("dexdump packed: stub signature NOT promoted (structural fail)",
+              all(not (h["region"].startswith("zip:") and h["state"] == "VALID DEX")
+                  for h in res["hits"]), str([(h['region'], h['state']) for h in res['hits']]))
+        # gateway rendering
+        r, _ = gw.handle(f"/dexdump {bare}")
+        check("gateway /dexdump renders VALID DEX", "VALID DEX" in r, r)
+        r, _ = gw.handle("/dexdump")
+        check("gateway /dexdump no-arg shows usage", "DexDump" in r or "/dexdump <path>" in r, r)
+        # /scan usage + stdlib-free (androguard-gated job engine)
+        r, _ = gw.handle("/scan")
+        check("gateway /scan no-arg shows usage", "/scan <path>" in r, r)
+        # version invariant already updated to 0.28.0 above in the suite
 
         if HAVE_ANDROGUARD:
             print("== apkmod adapter (androguard present) ==")
@@ -2699,7 +2767,7 @@ def main() -> int:
         ver = getattr(vb, "__version__", None)
         check("version: __init__.__version__ is X.Y.Z",
               isinstance(ver, str) and len(ver.split(".")) == 3, str(ver))
-        check("version: matches the current build", ver == "0.26.0", str(ver))
+        check("version: matches the current build", ver == "0.28.0", str(ver))
         r, j = gateway.Gateway(td).handle("/find zzz")
         check("session: /find without --sha is refused (no most-recent fallback)",
               "no --sha" in r and "run /apk" in r and j is None, r)

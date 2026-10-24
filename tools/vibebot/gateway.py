@@ -55,13 +55,15 @@ HELP = """vibebot commands
   /native <path>         Radare native provider: ELF fns/imports/exports + JNI bridge
   /harness <srcdir>      native-harness validation: build + run C test under qemu (E5)
   /kmeta <dex|apk> [f]   recover original (pre-R8) Kotlin names from @Metadata (E2)
+  /scan <path>           security scan: manifest exported/deep-links/flags + secrets + TLS
   /commands [query]      searchable command registry (L0 always · L1 on demand)
   /oracle <target> [mode] Frida oracle GATE (dry-run — is a runtime call allowed? E5)
-  /smali <name|0x..|substr>   query the Dalvik opcode table
+  /smali <name|0x..|substr|guide>  Dalvik opcode table + smali patching guide
   /base <value> <from> <to>   convert between number bases (2..36)
   /hash <text>           sha256 of a text string
   /dexcheck <path>       validate DEX headers (sha1 + adler32 + version)
   /dexrepair <path>      report what /dexrepair would fix (dry-run, read-only)
+  /dexdump <path>        DEX discovery in packed APKs (appended tail / dex-shell, stdlib)
   /status [job-id]       job state + progress
   /jobs                  all jobs
   /sessions              stored analysis sessions
@@ -157,6 +159,9 @@ class Gateway:
                 from . import kotlinmeta
                 m["kotlinmeta"] = kotlinmeta.KotlinMetaEngine(
                     os.path.join(self.work_dir, "reports"))
+                from . import scansec
+                m["scansec"] = scansec.ScanSecEngine(
+                    os.path.join(self.work_dir, "reports"))
         except Exception:
             pass
         return m
@@ -171,7 +176,8 @@ class Gateway:
                 "/analyze", "/dex", "/xmatch",
                 "/native", "/harness",
                 "/kmeta",
-                "/smali", "/base", "/hash", "/dexcheck", "/dexrepair", "/status",
+                "/scan",
+                "/smali", "/base", "/hash", "/dexcheck", "/dexrepair", "/dexdump", "/status",
                 "/jobs", "/sessions", "/deepdive", "/investigate", "/report",
                 "/cancel", "/help", "/start", "/commands", "/oracle"):
             return HELP, None
@@ -242,6 +248,9 @@ class Gateway:
             return self._hash(parts[1:])
         if cmd == "/dexcheck":
             return self._dexcheck(parts[1:])
+
+        if cmd == "/dexdump":
+            return self._dexdump(parts[1:])
         if cmd == "/dexrepair":
             return self._dexrepair(parts[1:])
 
@@ -266,6 +275,8 @@ class Gateway:
         if cmd == "/apk":
             return self._apk(parts[1:], user)
 
+        if cmd == "/scan":
+            return self._scan(parts[1:], user)
         if cmd == "/dex":
             return self._dex(parts[1:], user)
 
@@ -361,6 +372,28 @@ class Gateway:
         except (FileNotFoundError, RuntimeError) as e:
             return f"error: {e}", None
         return (f"ACK {job.id}  engine={job.engine}\n"
+                f"  queued — /status {job.id}  /cancel {job.id}"), job
+
+    def _scan(self, parts: list[str], user: str) -> tuple[str, core.Job | None]:
+        """Security scan: manifest exported/intent-filters/deep-links, secrets
+        (entropy + public formats, masked), TLS/pinning surface."""
+        if not parts:
+            return ("/scan <path>   manifest security + secrets + TLS surface "
+                    "(job: exported components, deep links, allowBackup, "
+                    "cleartext, JS bridge, pinning, high-entropy strings)"), None
+        if "scansec" not in self.engines:
+            return ("error: /scan needs androguard "
+                    "(uv pip install androguard); stdlib /smali /base /hash "
+                    "/dexcheck /dexrepair still work"), None
+        path, err = self._artifact(parts[0])
+        if err:
+            return err, None
+        try:
+            job = self.jobs.submit("scan", path, user, "scansec",
+                                   self._budget_params(parts))
+        except (KeyError, FileNotFoundError, RuntimeError) as e:
+            return f"error: {e}", None
+        return (f"ACK {job.id}  engine=scansec\n"
                 f"  queued — /status {job.id}  /cancel {job.id}"), job
 
     def _dex(self, parts: list[str], user: str) -> tuple[str, core.Job | None]:
@@ -703,10 +736,29 @@ class Gateway:
     def _smali(self, parts: list[str]) -> tuple[str, None]:
         from . import smali
         if not parts:
-            return ("/smali <name|0x..|substr> — query the Dalvik opcode "
-                    f"table ({smali.opcode_count()} opcodes). "
-                    "Examples: /smali invoke-virtual  /smali const  /smali 0x1a  /smali invoke"), None
+            return (
+                "/smali <name|0x..|substr|guide> — query the Dalvik opcode table\n"
+                f"({smali.opcode_count()} opcodes) or the smali patching guide.\n"
+                "Examples:\n"
+                "  /smali invoke-virtual   /smali const  /smali 0x1a  /smali invoke\n"
+                "  /smali guide            the full smali patching guide\n"
+                "  /smali guide register   one section (register/emit/insertion/literal)"
+            ), None
         q = parts[0]
+        # patching guide: /smali guide [section]
+        if q.lower() == "guide":
+            section = parts[1] if len(parts) > 1 else None
+            text = smali.patch_guide(section)
+            if not text:
+                valid = ", ".join(smali.PATCH_GUIDE_SECTIONS)
+                return (
+                    f"unknown guide section '{section}' — valid: {valid}\n"
+                    "  /smali guide            (all sections)\n"
+                    f"  /smali guide <section>"
+                ), None
+            title = (f"smali patching guide — {section}" if section
+                     else "smali patching guide")
+            return f"{title}\n\n{text}", None
         # exact name
         if q in smali.NAME_TO_OPCODE:
             code = smali.NAME_TO_OPCODE[q]
@@ -762,6 +814,28 @@ class Gateway:
         import hashlib
         text = " ".join(parts)
         return f"sha256(\"{text}\") = {hashlib.sha256(text.encode()).hexdigest()}", None
+
+    def _dexdump(self, parts: list[str]) -> tuple[str, None]:
+        """Static DEX discovery in packed artifacts (stdlib-only, sync).
+
+        DexDumper-ported: hunts dex\\n signatures in zip entries AND the
+        raw tail after the EOCD (dex-shell layout), validates the header
+        structurally (file_size/header_size/endian_tag/string-table bounds),
+        and runs the repo's dexutil sha1+adler integrity on complete hits.
+        """
+        from . import dexdump
+        if not parts:
+            return ("/dexdump <path>  — DEX discovery: signatures in zip entries "
+                    "+ appended tail (dex-shell), structural header validation, "
+                    "sha1/adler integrity (stdlib; packed-at-runtime DEX is "
+                    "NOT OBSERVED — needs a memory dump)"), None
+        path, err = self._artifact(parts[0])
+        if err:
+            return err, None
+        try:
+            return dexdump.render(dexdump.scan_artifact(path)), None
+        except Exception as e:
+            return f"error: {e}", None
 
     def _dexcheck(self, parts: list[str]) -> tuple[str, None]:
         from . import dexmapper
