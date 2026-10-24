@@ -57,7 +57,7 @@ HELP = """vibebot commands
   /kmeta <dex|apk> [f]   recover original (pre-R8) Kotlin names from @Metadata (E2)
   /commands [query]      searchable command registry (L0 always · L1 on demand)
   /oracle <target> [mode] Frida oracle GATE (dry-run — is a runtime call allowed? E5)
-  /smali <name|0x..|substr>   query the Dalvik opcode table
+  /smali <name|0x..|substr|guide>  Dalvik opcode table + smali patching guide
   /base <value> <from> <to>   convert between number bases (2..36)
   /hash <text>           sha256 of a text string
   /dexcheck <path>       validate DEX headers (sha1 + adler32 + version)
@@ -703,10 +703,29 @@ class Gateway:
     def _smali(self, parts: list[str]) -> tuple[str, None]:
         from . import smali
         if not parts:
-            return ("/smali <name|0x..|substr> — query the Dalvik opcode "
-                    f"table ({smali.opcode_count()} opcodes). "
-                    "Examples: /smali invoke-virtual  /smali const  /smali 0x1a  /smali invoke"), None
+            return (
+                "/smali <name|0x..|substr|guide> — query the Dalvik opcode table\n"
+                f"({smali.opcode_count()} opcodes) or the smali patching guide.\n"
+                "Examples:\n"
+                "  /smali invoke-virtual   /smali const  /smali 0x1a  /smali invoke\n"
+                "  /smali guide            the full smali patching guide\n"
+                "  /smali guide register   one section (register/emit/insertion/literal)"
+            ), None
         q = parts[0]
+        # patching guide: /smali guide [section]
+        if q.lower() == "guide":
+            section = parts[1] if len(parts) > 1 else None
+            text = smali.patch_guide(section)
+            if not text:
+                valid = ", ".join(smali.PATCH_GUIDE_SECTIONS)
+                return (
+                    f"unknown guide section '{section}' — valid: {valid}\n"
+                    "  /smali guide            (all sections)\n"
+                    f"  /smali guide <section>"
+                ), None
+            title = (f"smali patching guide — {section}" if section
+                     else "smali patching guide")
+            return f"{title}\n\n{text}", None
         # exact name
         if q in smali.NAME_TO_OPCODE:
             code = smali.NAME_TO_OPCODE[q]
