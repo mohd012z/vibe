@@ -1,5 +1,14 @@
 # R2AI for Android — on-device radare2 + LLM decompiler (v3.8)
 
+## v3.9 — ENOENT fix + patch-list framework filter + selectable/copyable output + per-candidate r2 commands (76,552,962 bytes, versionCode 24, sha256 9a044f264ac21509…)
+
+- Fixed `load file failed: FileNotFoundException (ENOENT)` — staged r2 file path now sanitized (no `/` in name) + self-heal `pickR2Target()` falls back to the extracted dex if the staged file vanished
+- PATCH LIST: framework/library noise filter (protobuf, fastjson, gson, glide, okhttp, kotlin, google, baidu, bytedance, …) + cap 60→200 so app-logic candidates actually reach the LLM
+- Output pane is now **selectable + copyable**; COPY-ALL copies the whole pane
+- PATCH LIST now appends a **ready-to-copy r2 command per candidate** (`r2 -qc "s 0xADDR; af; pdc" <dex>`) + a 4-step HOW-TO (grep → pdc → smali const/4 → date 4102444800000)
+
+**[Download v3.9 (aarch64)](r2ai-android-v3.9-aarch64.apk)**
+
 - File: `r2ai-android-v3.8-aarch64.apk` (73 MB, aarch64 arm64 only)
 - Package: `com.r2ai.app`, signed with Android debug key (install: allow "Install unknown apps")
 - SHA-256: `c5c07f34f92d8a9ab7cc8e94b64e46d9647b38116477abfc91c35607bf67cc60`
