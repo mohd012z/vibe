@@ -1,5 +1,13 @@
 # R2AI for Android — on-device radare2 + LLM decompiler (v3.8)
 
+## v4.0 — ONE-TAP presets (detect→patch→recompile) + ADVANCED collapse (76,552,962 bytes, versionCode 25, sha256 df87c92506a5969f…)
+
+- 5 one-tap buttons (MAKE VIP · PREMIUM/PRO · REMOVE ADS · REMOVE EXPIRY · REMOVE SIG-CHECK): auto-detect the gate method (name filter + framework drop, ALL-DEX aware) → flip the feeding const / void the method / move the const-wide expiry timestamp to 2100-01-01 → **repack the APK + apksigner v2 re-sign + verify** → save to `filesDir/patches/<name>_<preset>_<ts>.apk` (INSTALL it to test)
+- All expert sections (FIND/VIEW/PATCH/SCAN) now collapsed behind **ADVANCED ▾** — the default screen is OPEN APK + the 5 presets + hints
+- dateFuture uses **const-wide (0x18, 64-bit)** not const-wide/32 — ms timestamps (~1.7e12) don't fit in 32 bits (verified host-side: flipTrue 1-byte delta / voidMethod 2-byte delta / dateFuture 9-byte delta, dex stays structurally valid)
+
+**[Download v4.0 (aarch64)](r2ai-android-v4.0-aarch64.apk)**
+
 ## v3.9 — ENOENT fix + patch-list framework filter + selectable/copyable output + per-candidate r2 commands (76,552,962 bytes, versionCode 24, sha256 9a044f264ac21509…)
 
 - Fixed `load file failed: FileNotFoundException (ENOENT)` — staged r2 file path now sanitized (no `/` in name) + self-heal `pickR2Target()` falls back to the extracted dex if the staged file vanished
