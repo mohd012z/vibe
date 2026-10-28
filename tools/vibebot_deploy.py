@@ -32,6 +32,7 @@ TOKEN_FILE = "/opt/data/vibebot/token.env"
 # commands, oracle) stay reachable via /commands and the console's Help.
 COMMANDS = [
     ("analyze", "analysis job: /analyze <path|bundle.apks|url> [--engine apkmod|dexmapper]"),
+    ("get", "download a file by link (MediaFire share links ok): /get <url>"),
     ("apk", "APK overview + Vibe IR entity graph: /apk <path|bundle.apks|url>"),
     ("dex", "DEX Mapper: /dex <path|bundle.apks|url> (class->method->call + JNI + integrity)"),
     ("native", "Radare native provider: /native <path|url>"),

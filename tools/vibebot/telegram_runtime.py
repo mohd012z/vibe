@@ -100,6 +100,14 @@ class CategoryTelegramTransport(TelegramTransport):
             self._edit(chat_id, message_id, self._health_text(),
                        telegram_ui.category_keyboard("runtime", has_artifact))
             return
+        if data == "action:getlink":
+            self._edit(chat_id, message_id,
+                       "📥 Send me the file link (MediaFire / direct URL "
+                       "works) — I'll download it and report name/size/sha256.\n"
+                       "Then /apk <link> to analyze it (bypasses the 20 MB "
+                       "upload cap).",
+                       telegram_ui.home_keyboard(has_artifact))
+            return
         if data.startswith("cmd:"):
             name = data.split(":", 1)[1]
             command = self._command_for_callback(name, user_id)
@@ -170,6 +178,12 @@ class CategoryTelegramTransport(TelegramTransport):
                 self._reply(chat_id, self._health_text())
                 handled += 1
                 continue
+            # v0.33: a bare share link (MediaFire etc.) auto-routes to the
+            # URL path — the user pastes the link, the bot downloads and
+            # analyzes (bypasses the 20 MB document cap).
+            from .gateway import _is_url
+            if _is_url(text) and not text.startswith("/"):
+                text = f"/apk {text}"
             try:
                 reply, job = self.gw.handle(text, user=f"tg:{user_id[:6]}")
                 self._reply(chat_id, reply)

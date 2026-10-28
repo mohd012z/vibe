@@ -69,6 +69,7 @@ HELP = """vibebot commands
   /hash <text>           sha256 of a text string
   /dexcheck <path>       validate DEX headers (sha1 + adler32 + version)
   /dexrepair <path>      report what /dexrepair would fix (dry-run, read-only)
+  /get <url>             download a file by link (MediaFire share links ok) + evidence
   /status [job-id]       job state + progress
   /jobs                  all jobs
   /sessions              stored analysis sessions
@@ -253,6 +254,42 @@ class Gateway:
         os.makedirs(d, exist_ok=True)
         return d
 
+    # v0.33: MediaFire share links (…/file/<key>/<name>/file) serve an HTML
+    # page; the real bytes live at a CDN link (download*.mediafire.com/<token>/
+    # <key>/<name>) embedded in the page's Download anchor. The CDN link is
+    # session-free: a plain GET returns the real file bytes (verified
+    # 2026-10-28: Content-Type application/vnd.android.package-archive,
+    # 200/206 responses).
+    _MF_CDN = re.compile(
+        rb'href="(https://download\d+\.mediafire\.com/[^"]+)"')
+
+    def _url_mediafire_direct(self, url: str) -> str:
+        """v0.33: resolve a MediaFire share page to its direct CDN file link.
+
+        Already-direct (download*.mediafire.com) URLs pass through. Non-HTML
+        responses pass through (the URL is the file). Raises RuntimeError
+        when the page has no download link (deleted/moved file, or an
+        album/folder page — those are not single-file share links)."""
+        if re.match(r"^https?://download\d+\.mediafire\.com/", url):
+            return url
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (compatible; VibeBot/0.33)"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            ctype = (r.headers.get("Content-Type") or "").lower()
+            if "text/html" not in ctype:
+                return url  # already a direct file response
+            page = r.read(2 << 20)  # share pages are a few hundred KB
+        m = re.search(
+            rb'aria-label="Download file"[^>]*href="(https://download\d+'
+            rb'\.mediafire\.com/[^"]+)"', page)
+        if not m:
+            m = self._MF_CDN.search(page)
+        if m:
+            return m.group(1).decode()
+        raise RuntimeError(
+            "MediaFire page has no download link (deleted/moved file, or not "
+            "a single-file share link — give the bot the DIRECT file URL)")
+
     def _url_interstitial_redirect(self, url: str) -> str:
         """v0.31: some public hosts (tmpfiles.org) serve a tiny HTML
         interstitial at the share URL whose real bytes live at a signed
@@ -303,7 +340,29 @@ class Gateway:
             raise RuntimeError(
                 f"refused (private/loopback host: {host}) — URL ingestion "
                 f"only fetches public addresses (SSRF guard)")
+        # v0.31: resolve an interstitial share URL to the real file URL
+        # (before the on-disk name is derived, so the file lands under the
+        # real name — MediaFire share URLs end in "/file", not the name)
+        direct_url = url
+        if "tmpfiles.org" in host:
+            try:
+                direct_url = self._url_interstitial_redirect(url)
+            except (RuntimeError, OSError, ValueError) as e:
+                raise RuntimeError(f"interstitial: {e}") from e
+        # v0.33: MediaFire share pages -> direct CDN file link
+        if host.endswith("mediafire.com") and direct_url == url:
+            try:
+                direct_url = self._url_mediafire_direct(url)
+            except (RuntimeError, OSError, ValueError) as e:
+                raise RuntimeError(f"mediafire: {e}") from e
+        # v0.33: a share URL may end in a non-name segment (MediaFire's
+        # "/file"): prefer the resolved link's filename when the original
+        # carried no extension and the resolved one does.
         base = _url_basename(url)
+        if direct_url != url:
+            alt = _url_basename(direct_url)
+            if (os.path.splitext(alt)[1] and not os.path.splitext(base)[1]):
+                base = alt
         digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:8]
         final = os.path.join(self._inbound_dir(), base)
         if os.path.exists(final) and os.path.getsize(final) > 0:
@@ -311,13 +370,6 @@ class Gateway:
             # (A re-ingest of a CHANGED upstream file is a new URL/name in
             # practice; a byte-identical re-fetch is a no-op by design.)
             return final
-        # v0.31: resolve an interstitial share URL to the real file URL
-        direct_url = url
-        if "tmpfiles.org" in host:
-            try:
-                direct_url = self._url_interstitial_redirect(url)
-            except (RuntimeError, OSError, ValueError) as e:
-                raise RuntimeError(f"interstitial: {e}") from e
         # the extracted link is attacker-controlled content — re-run the
         # SSRF guard on it (interstitials may point anywhere)
         redir_host = _up.urlparse(direct_url).hostname or ""
@@ -451,6 +503,7 @@ class Gateway:
                 "/analyze", "/dex", "/xmatch",
                 "/native", "/harness",
                 "/kmeta",
+                "/get",
                 "/smali", "/base", "/hash", "/dexcheck", "/dexrepair", "/status",
                 "/jobs", "/sessions", "/deepdive", "/investigate", "/report",
                 "/cancel", "/help", "/start", "/commands", "/oracle"):
@@ -524,6 +577,8 @@ class Gateway:
             return self._dexcheck(parts[1:])
         if cmd == "/dexrepair":
             return self._dexrepair(parts[1:])
+        if cmd == "/get":
+            return self._get(parts[1:])
 
         if cmd == "/jobs":
             lines = [f"{j['id']}  {j['state']:<10} {j['command']:<12} "
@@ -1090,7 +1145,53 @@ class Gateway:
             return "/hash <text>  — sha256 of the text", None
         import hashlib
         text = " ".join(parts)
-        return f"sha256(\"{text}\") = {hashlib.sha256(text.encode()).hexdigest()}", None
+        return f'sha256("{text}") = {hashlib.sha256(text.encode()).hexdigest()}', None
+
+    def _get(self, parts: list[str]) -> tuple[str, None]:
+        """v0.33: /get <url> — download a file by link and report evidence.
+
+        Synchronous (bounded by MAX_UPLOAD_BYTES + the download_url retry
+        loop) so the result card is the reply itself: local name, size,
+        sha256, and the ready-to-run follow-up commands. This is the
+        evidence-first path for "download this and check it" — no job,
+        no ACK delay. For direct analysis, /apk <url> does the same
+        download and keeps going into the engine."""
+        if not parts or not _is_url(parts[0]):
+            return ("/get <https://…>  — download a file by link (MediaFire "
+                    "share links included) and report name/size/sha256"), None
+        url = parts[0].strip()
+        try:
+            path = self.download_url(url)
+        except (RuntimeError, OSError, ValueError) as e:
+            return f"error: download failed ({e})", None
+        import hashlib
+        size = os.path.getsize(path)
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        sha = h.hexdigest()
+        ext = os.path.splitext(os.path.basename(path))[1].lower()
+        kind = ("APK (Android)" if ext == ".apk"
+                else "APK bundle (.apks)" if ext == ".apks"
+                else "DEX" if ext == ".dex"
+                else "shared lib (.so)" if ext == ".so"
+                else "archive" if ext in (".zip", ".7z", ".rar")
+                else "file")
+        lines = [
+            "📥 DOWNLOADED",
+            f"  url:    {url}",
+            f"  name:   {os.path.basename(path)}  ({kind})",
+            f"  size:   {size:,} bytes ({size / (1 << 20):.2f} MB)",
+            f"  sha256: {sha[:32]}…",
+            f"  saved:  {path}",
+            "",
+            "next:",
+            f"  /apk <url>      analyze it (overview + Vibe IR graph)",
+            f"  /analyze <url>  full pipeline job",
+            f"  /dexcheck <url> DEX header validation",
+        ]
+        return "\n".join(lines), None
 
     def _dexcheck(self, parts: list[str]) -> tuple[str, None]:
         from . import dexmapper

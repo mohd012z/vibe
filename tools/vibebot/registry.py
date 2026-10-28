@@ -32,6 +32,8 @@ COMMANDS: list[dict] = [
      "kw": ["header", "magic", "adler", "sha-1", "integrity", "checksum"]},
     {"name": "dexrepair", "tier": 0, "summary": "dry-run DEX repair report",
      "kw": ["fix", "repair", "checksum", "sig", "restore"]},
+    {"name": "get", "tier": 0, "summary": "download a file by link (MediaFire share links ok) + name/size/sha256 evidence",
+     "kw": ["download", "url", "link", "mediafire", "fetch", "ingest", "big file", "20MB"]},
     {"name": "capabilities", "tier": 0, "summary": "what's installed here",
      "kw": ["providers", "tools", "available", "installed", "environment"]},
     {"name": "plan", "tier": 0, "summary": "cheapest-capable method plan for a goal",

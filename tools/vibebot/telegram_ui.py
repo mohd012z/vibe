@@ -29,10 +29,18 @@ class Button:
     label: str
     callback: str
     requires_artifact: bool = False
+    # v0.33: when set, render as a native URL button (client opens it in the
+    # browser — no callback fires, no runtime mapping needed).
+    url: str | None = None
 
 
 CATEGORIES: dict[str, tuple[str, tuple[Button, ...]]] = {
     # ---- flat-home sections (order = HOME_SECTIONS) -----------------------
+    "links": ("🔗 Links", (
+        Button("📥 Get Link", "action:getlink"),
+        Button("🔗 Upload Page", "",
+               url="https://mohd012z.github.io/vibe/upload/"),
+    )),
     "analyze": ("🔍 Analyze", (
         Button("🚀 Analyze", "cmd:analyze", True),
         Button("📱 APK", "cmd:apk", True),
@@ -104,11 +112,14 @@ CATEGORIES: dict[str, tuple[str, tuple[Button, ...]]] = {
 # ("Action not implemented yet"); it stays reachable via the back-compat
 # nav:ask page, and rejoining the home needs a real handler first.
 HOME_SECTIONS: tuple[str, ...] = (
-    "analyze", "investigate", "explore", "evidence", "runtime", "help",
+    "links", "analyze", "investigate", "explore", "evidence", "runtime", "help",
 )
 
 
-def _button_key(label: str, callback: str, locked: bool) -> dict:
+def _button_key(label: str, callback: str, locked: bool,
+                url: str | None = None) -> dict:
+    if url:
+        return {"text": label, "url": url}
     return {
         "text": (f"🔒 {label}" if locked else label),
         "callback_data": "need:artifact" if locked else callback,
@@ -121,7 +132,8 @@ def home_keyboard(has_artifact: bool = False) -> dict:
     One screen, zero hunting: each HOME_SECTIONS entry renders a section
     header row (callback nav:<section>) then its action buttons in
     BUTTONS_PER_ROW-per-row groups. Artifact-dependent buttons lock with
-    🔒 when no artifact is selected.
+    🔒 when no artifact is selected. URL buttons (b.url set) render as
+    native browser buttons — no callback, no lock.
     """
     rows = []
     for section in HOME_SECTIONS:
@@ -131,7 +143,7 @@ def home_keyboard(has_artifact: bool = False) -> dict:
             row = []
             for b in buttons[i:i + BUTTONS_PER_ROW]:
                 locked = b.requires_artifact and not has_artifact
-                row.append(_button_key(b.label, b.callback, locked))
+                row.append(_button_key(b.label, b.callback, locked, b.url))
             rows.append(row)
     return {"inline_keyboard": rows}
 
@@ -150,7 +162,7 @@ def category_keyboard(category: str, has_artifact: bool = False) -> dict:
         row = []
         for b in buttons[i:i + BUTTONS_PER_ROW]:
             locked = b.requires_artifact and not has_artifact
-            row.append(_button_key(b.label, b.callback, locked))
+            row.append(_button_key(b.label, b.callback, locked, b.url))
         rows.append(row)
     rows.append([
         {"text": "⬅ Back", "callback_data": "nav:home"},

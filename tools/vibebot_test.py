@@ -2864,6 +2864,91 @@ def main() -> int:
         finally:
             urllib.request.urlopen = _orig_urlopen
 
+        # ===== v0.33: MediaFire share-page resolution (mocked, offline) =====
+        _MF_PAGE_URL = ("https://www.mediafire.com/file/3bcui905kytic7g/"
+                        "Pulse+Player_4.0.0.apk/file")
+        _MF_CDN_URL = ("https://download1583.mediafire.com/"
+                       "wi5z4zj75osgLQabcDEF/3bcui905kytic7g/"
+                       "Pulse+Player_4.0.0.apk")
+        _MF_PAGE = (
+            b'<!DOCTYPE html><html><head><title>Pulse Player - MediaFire</title>'
+            b'</head><body><div class="download">'
+            b'<a class="input popsok" aria-label="Download file" href="'
+            b'' + _MF_CDN_URL.encode() + b'">Download file</a>'
+            b'</div></body></html>')
+        class _MfPageThenFile:
+            """urlopen mock: share page (HTML) then the real file bytes."""
+            n = 0
+            def __call__(self, req, *a, **k):
+                _MfPageThenFile.n += 1
+                url = req.full_url if hasattr(req, "full_url") else str(req)
+                class _R:
+                    def __init__(s, data, ctype):
+                        s.data, s.pos = data, 0
+                    def __enter__(s): return s
+                    def __exit__(s, *x): return False
+                    def read(s, n=-1):
+                        out = s.data[s.pos:s.pos + (n if n > 0 else len(s.data))]
+                        s.pos += len(out)
+                        return out
+                if _MfPageThenFile.n == 1:
+                    assert url == _MF_PAGE_URL, url
+                    _R.headers = {"Content-Type": "text/html; charset=UTF-8"}
+                    return _R(_MF_PAGE, "text/html")
+                assert url == _MF_CDN_URL, url
+                _R.headers = {"Content-Type":
+                              "application/vnd.android.package-archive"}
+                return _R(_REAL_BYTES, "application/vnd.android.package-archive")
+        _mf_mock = _MfPageThenFile()
+        urllib.request.urlopen = _mf_mock
+        try:
+            # (a) resolver extracts the CDN link from the share page
+            got = gu._url_mediafire_direct(_MF_PAGE_URL)
+            check("v0.33: MediaFire share page -> CDN direct link",
+                  got == _MF_CDN_URL, got)
+            # (b) CDN-shaped URL passes through (no fetch)
+            _MfPageThenFile.n = 99
+            got = gu._url_mediafire_direct(_MF_CDN_URL)
+            check("v0.33: already-direct CDN URL passes through",
+                  got == _MF_CDN_URL and _MfPageThenFile.n == 99, str(got))
+            # (c) full path: /get on the share page downloads the REAL bytes
+            _MfPageThenFile.n = 0
+            gu2 = gateway.Gateway(os.path.join(td, "wmf"))
+            r, j = gu2.handle("/get " + _MF_PAGE_URL)
+            check("v0.33: /get <mediafire share link> -> DOWNLOADED card",
+                  j is None and "📥 DOWNLOADED" in r
+                  and "Pulse_Player_4.0.0.apk" in r
+                  and "APK (Android)" in r
+                  and "sha256:" in r, r)
+            ingested = os.path.join(gu2.work_dir, "inbound",
+                                    "Pulse_Player_4.0.0.apk")
+            check("v0.33: MediaFire bytes on disk are the REAL file",
+                  os.path.exists(ingested)
+                  and open(ingested, "rb").read() == _REAL_BYTES, ingested)
+        finally:
+            urllib.request.urlopen = _orig_urlopen
+        # (d) page with no download link -> honest error (deleted file)
+        class _MfDead:
+            headers = {"Content-Type": "text/html"}
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self, n=-1): return b"<html>File not found</html>"
+        urllib.request.urlopen = lambda *a, **k: _MfDead()
+        try:
+            try:
+                gu._url_mediafire_direct("https://www.mediafire.com/file/x/y.apk/file")
+                _raised = False
+            except RuntimeError as _e:
+                _raised = "no download link" in str(_e)
+            check("v0.33: MediaFire page without link -> honest error",
+                  _raised, "")
+        finally:
+            urllib.request.urlopen = _orig_urlopen
+        # (e) _get usage line (no URL)
+        r, j = gu._get([])
+        check("v0.33: /get with no args -> usage (no job)",
+              j is None and r.startswith("/get"), r)
+
         # ------------------------------------------------------------------
         print("== v0.17: hardening batch (lupoxyz #6/#7/#8/#10) ==")
         from vibebot import registry, deepdive
@@ -2962,7 +3047,7 @@ def main() -> int:
         ver = getattr(vb, "__version__", None)
         check("version: __init__.__version__ is X.Y.Z",
               isinstance(ver, str) and len(ver.split(".")) == 3, str(ver))
-        check("version: matches the current build", ver == "0.32.0", str(ver))
+        check("version: matches the current build", ver == "0.33.0", str(ver))
         r, j = gateway.Gateway(td).handle("/find zzz")
         check("session: /find without --sha is refused (no most-recent fallback)",
               "no --sha" in r and "run /apk" in r and j is None, r)

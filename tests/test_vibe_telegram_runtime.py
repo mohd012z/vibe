@@ -54,6 +54,71 @@ def test_health_callback_returns_runtime_health():
         assert "Gateway" in edits[-1]["text"]
 
 
+def test_getlink_callback_prompts_for_link():
+    # v0.33: the Links section's Get Link button explains the link flow.
+    with tempfile.TemporaryDirectory() as td:
+        t = FakeTelegram(_gateway(td), [{
+            "update_id": 3, "callback_query": {
+                "id": "cb4", "from": {"id": 7},
+                "message": {"chat": {"id": 9}, "message_id": 4},
+                "data": "action:getlink"}}])
+        t.poll_once(0)
+        edits = [p for m, p in t.calls if m == "editMessageText"]
+        assert edits
+        assert "Send me the file link" in edits[-1]["text"]
+        assert "MediaFire" in edits[-1]["text"]
+        assert "20 MB" in edits[-1]["text"]
+
+
+def test_home_keyboard_has_links_section_with_getlink_and_upload_url():
+    # v0.33: Links is the first home section; Get Link is a callback, the
+    # Upload Page is a native URL button (no callback_data).
+    from vibebot import telegram_ui
+    kb = telegram_ui.home_keyboard()
+    rows = kb["inline_keyboard"]
+    headers = [b["callback_data"] for row in rows for b in row
+               if b.get("callback_data", "").startswith("nav:")]
+    assert headers[0] == "nav:links", headers
+    flat = [b for row in rows for b in row]
+    assert any(b.get("callback_data") == "action:getlink" for b in flat)
+    assert any(b.get("url") == "https://mohd012z.github.io/vibe/upload/"
+               and "callback_data" not in b for b in flat)
+
+
+def test_bare_mediafire_link_auto_routes_to_apk():
+    # v0.33: pasting a raw share link (no / command) becomes /apk <url>.
+    with tempfile.TemporaryDirectory() as td:
+        handled_cmds = []
+        t = FakeTelegram(_gateway(td), [{
+            "update_id": 4, "message": {
+                "from": {"id": 7}, "chat": {"id": 9},
+                "text": ("https://www.mediafire.com/file/3bcui905kytic7g/"
+                         "Pulse+Player_4.0.0.apk/file")}}])
+        orig_handle = t.gw.handle
+
+        def spy(text, **kw):
+            handled_cmds.append(text)
+            return ("stub", None)  # no network in this unit test
+        t.gw.handle = spy
+        t.poll_once(0)
+        assert handled_cmds, "message was not routed to the gateway"
+        assert handled_cmds[0].startswith("/apk https://www.mediafire.com/"), \
+            handled_cmds[0]
+
+
+def test_non_url_text_not_rewritten():
+    # v0.33: plain words / unknown commands pass through untouched.
+    with tempfile.TemporaryDirectory() as td:
+        t = FakeTelegram(_gateway(td), [{
+            "update_id": 5, "message": {
+                "from": {"id": 7}, "chat": {"id": 9},
+                "text": "/status"}}])
+        t.poll_once(0)
+        # no crash, gateway saw the command verbatim
+        sends = [p for m, p in t.calls if m == "sendMessage"]
+        assert sends, t.calls
+
+
 def test_locked_artifact_callback_explains_upload_requirement():
     with tempfile.TemporaryDirectory() as td:
         t = FakeTelegram(_gateway(td), [{"update_id": 2, "callback_query": {

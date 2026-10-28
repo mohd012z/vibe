@@ -9,11 +9,15 @@ if TOOLS not in sys.path:
 from vibebot import telegram_ui
 
 # v0.32 compact home: flat sections in display order.
-HOME_ORDER = ("analyze", "investigate", "explore", "evidence", "runtime", "help")
+HOME_ORDER = ("links", "analyze", "investigate", "explore", "evidence",
+              "runtime", "help")
 
 
 def _all_callbacks(kb):
-    return [b["callback_data"] for row in kb["inline_keyboard"] for b in row]
+    # v0.33: URL buttons carry no callback_data (native browser button) —
+    # skip them here; they are asserted on their own.
+    return [b["callback_data"] for row in kb["inline_keyboard"] for b in row
+            if "callback_data" in b]
 
 
 def test_home_is_flat_sections_in_order():
@@ -21,7 +25,7 @@ def test_home_is_flat_sections_in_order():
     rows = kb["inline_keyboard"]
     # Section header rows carry callback nav:<section>, in HOME_ORDER.
     headers = [b["callback_data"] for row in rows for b in row
-               if b["callback_data"].startswith("nav:")]
+               if b.get("callback_data", "").startswith("nav:")]
     assert headers == [f"nav:{s}" for s in HOME_ORDER], headers
 
 
@@ -53,7 +57,8 @@ def test_home_rows_are_compact():
     for row in kb["inline_keyboard"]:
         assert 1 <= len(row) <= 4, row
     # Bounded total row count (the flat home is one screen, not a wall).
-    assert len(kb["inline_keyboard"]) <= 17
+    # v0.33: +1 section row (🔗 Links: Get Link + Upload Page, 2 rows) -> 19.
+    assert len(kb["inline_keyboard"]) <= 19
 
 
 def test_artifact_actions_lock_on_home_without_artifact():
