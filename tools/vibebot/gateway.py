@@ -78,6 +78,8 @@ HELP = """vibebot commands
   /deepdive <target> --sha <sha>   stateful traverse (callers|native|references|<name>|jni|calls)
   /investigate <path> [target]     orchestrated 18-stage investigation (job)
   /report --sha <sha>    stored report card
+  /ask <q> [--sha <…>] [--model <id>]  LLM assistant (free-LLM router; --sha grounds it in a session)
+  /models                LLM router state: candidates + keys (masked) + penalties/cooldowns
   /cancel <job-id>       cancel queued/running job
   /help                  this text
 
@@ -506,7 +508,8 @@ class Gateway:
                 "/get",
                 "/smali", "/base", "/hash", "/dexcheck", "/dexrepair", "/status",
                 "/jobs", "/sessions", "/deepdive", "/investigate", "/report",
-                "/cancel", "/help", "/start", "/commands", "/oracle"):
+                "/cancel", "/help", "/start", "/commands", "/oracle",
+                "/ask", "/models"):
             return HELP, None
         cmd = parts[0]
 
@@ -517,6 +520,81 @@ class Gateway:
             from . import registry
             query = " ".join(parts[1:]).strip()
             return registry.render(query), None
+
+        if cmd in ("/ask", "/models"):
+            from . import llm as vllm
+            if cmd == "/models":
+                st = vllm.ROUTER.status()
+                lines = ["LLM ROUTER  (Path B, in-process; OpenAI-compatible shape)"]
+                lines.append(f"  keys: {st['keys_source']}   "
+                             f"chain budget {st['budget_s']}s")
+                for c in st["candidates"]:
+                    lines.append(
+                        f"  {c['name']:<10} p={c['priority']:<3} "
+                        f"pen={c['penalty']:<3} cd={c['cooldown']:<3} "
+                        f"inflight={c['inflight']}  key={c['key']}")
+                    lines.append(f"           {c['api_base']}  model={c['model']}")
+                if not st["candidates"]:
+                    lines.append("  (no candidate has a key — set "
+                                 "VIBE_LLM_MINDA_API_KEY or VIBE_LLM_<NAME>_API_KEY, "
+                                 "or VIBE_LLM_BASE_URL for any OpenAI-compatible box)")
+                return "\n".join(lines), None
+            # ---- /ask -----------------------------------------------------
+            rest = parts[1:]
+            model = None
+            sha = None
+            q_parts: list[str] = []
+            i = 0
+            while i < len(rest):
+                p = rest[i]
+                if p == "--model" and i + 1 < len(rest):
+                    model = rest[i + 1]; i += 2; continue
+                if p == "--sha" and i + 1 < len(rest):
+                    sha = rest[i + 1]; i += 2; continue
+                q_parts.append(p)
+                i += 1
+            question = " ".join(q_parts).strip()
+            if not question:
+                return ("/ask <question> [--sha <sha256[:16]>] [--model <id>]\n"
+                        "  LLM assistant (free-LLM router). With --sha it is "
+                        "grounded in that session's\n"
+                        "  findings (claims/overview/falsifications); without it "
+                        "it is a plain chat question.\n"
+                        "  /models shows the router state (keys masked)"), None
+            context = ""
+            grounding = None
+            if sha:
+                try:
+                    sha_full = core._sha256_from_hex(sha) if hasattr(core, "_sha256_from_hex") else sha.lower()
+                except Exception:
+                    sha_full = sha.lower()
+                sess = self.sessions.load(sha_full) if len(sha_full) >= 8 else None
+                if not sess:
+                    keys = [k for k in self.sessions.list()
+                            if k.startswith(sha_full[:min(len(sha_full), 16)])]
+                    if len(keys) == 1:
+                        sess = self.sessions.load(keys[0])
+                if not sess:
+                    return (f"/ask: no stored session for --sha {sha_full[:16]} "
+                            f"(/sessions lists known ones) — nothing to ground in"), None
+                grounding = sha_full[:16]
+                context = vllm.session_context(sess)
+            res = vllm.ROUTER.ask(question, context=context or None, model=model)
+            head = f"ASK  ({'grounded sha ' + grounding if grounding else 'chat'})"
+            if res["ok"]:
+                hop = res["hops"][-1]
+                head += (f"  via {res['candidate']} / {res['model']} "
+                         f"({hop.get('ms', 0)} ms)")
+                if len(res["hops"]) > 1:
+                    failed = [h["name"] for h in res["hops"] if h["status"] != "ok"]
+                    head += f"  (fell over: {', '.join(failed)})"
+                return head + "\n\n" + res["text"], None
+            lines = [head, "", "error: " + (res["error"] or "router failed")]
+            for h in res["hops"]:
+                lines.append(f"  hop {h['name']:<10} {h['status']:<6} "
+                             f"{h.get('ms', 0)} ms  {h.get('reason') or ''}".rstrip())
+            lines.append("  /models shows key availability (masked)")
+            return "\n".join(lines), None
 
         if cmd == "/oracle":
             from . import oracle

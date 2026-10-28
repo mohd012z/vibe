@@ -3047,7 +3047,7 @@ def main() -> int:
         ver = getattr(vb, "__version__", None)
         check("version: __init__.__version__ is X.Y.Z",
               isinstance(ver, str) and len(ver.split(".")) == 3, str(ver))
-        check("version: matches the current build", ver == "0.33.0", str(ver))
+        check("version: matches the current build", ver == "0.34.0", str(ver))
         r, j = gateway.Gateway(td).handle("/find zzz")
         check("session: /find without --sha is refused (no most-recent fallback)",
               "no --sha" in r and "run /apk" in r and j is None, r)
@@ -3633,6 +3633,216 @@ def main() -> int:
         _r30d, _ = _gw29.handle(f"/dexcheck {_apks}", user="t")
         check("v0.30: /dexcheck refuses a .apks bundle (raw-DEX command)",
               "bundle" in _r30d, _r30d[:100])
+
+
+        # ------------------------------------------------------------------ v0.34
+        # LLM router (Path B): unit tests against an in-process mock OpenAI
+        # server (no external network) + /ask and /models gateway surface.
+        import http.server as _hs
+        import json as _json
+        import socketserver as _ss
+        import threading as _th
+
+        from vibebot import llm as _vllm
+
+        # hermetic: the persistent shell may carry a real Minda key (from a
+        # sourced .env) which would win priority-0 and hit the network. Save,
+        # clear, and restore so these assertions are mock-only + deterministic.
+        _llm_env_keys = [k for k in list(os.environ)
+                         if k.startswith("VIBE_LLM_") or k ==
+                         "HERMES_CUSTOM_MINDA_CYBERAMAN_MY_API_KEY"]
+        _llm_env_saved = {k: os.environ.pop(k) for k in _llm_env_keys}
+
+        _hits: list[dict] = []
+
+        class _LLMHandler(_hs.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length", 0))
+                body = _json.loads(self.rfile.read(n) or b"{}")
+                _hits.append({"path": self.path, "body": body,
+                              "auth": self.headers.get("Authorization", "")})
+                if self.path == "/v1/chat/completions":
+                    if "failfirst" in _json.dumps(body) and body.get("model") == "m1":
+                        self.send_response(429)
+                        self.end_headers()
+                        self.wfile.write(b'{"error":{"message":"rate"}}')
+                        return
+                    if self.headers.get("Accept") == "text/event-stream":
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/event-stream")
+                        self.end_headers()
+                        piece = _json.dumps({"choices": [{"delta": {"content": "hello "}}]})
+                        done = _json.dumps({"choices": [{"delta": {"content": "sse"}}]})
+                        self.wfile.write(f"data: {piece}\n\ndata: {done}\n\ndata: [DONE]\n\n".encode())
+                    else:
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.end_headers()
+                        self.wfile.write(_json.dumps(
+                            {"choices": [{"message": {"content": "mock answer"}}]}).encode())
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+                    self.wfile.write(b"{}")
+
+        _srv = _ss.TCPServer(("127.0.0.1", 0), _LLMHandler)
+        _port = _srv.server_address[1]
+        _th.Thread(target=_srv.serve_forever, daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{_port}/v1"
+            # 1. M1 env-redirect: VIBE_LLM_BASE_URL makes one override candidate
+            os.environ[_vllm.ENV_BASE_URL] = base
+            os.environ[_vllm.ENV_BASE_URL_KEY] = "sk-mock"
+            _cands, _src = _vllm.load_candidates()
+            check("v0.34: BASE_URL override -> single 'override' candidate",
+                  [c["name"] for c in _cands] == ["override"] and "override" in _src,
+                  _src)
+            _r = _vllm.ROUTER.ask("hi there", candidates=_cands)
+            check("v0.34: /ask (mock) routes + returns text",
+                  _r["ok"] and _r["text"] == "mock answer"
+                  and _r["candidate"] == "override", _r)
+            check("v0.34: request was OpenAI-shaped (model+messages)",
+                  _hits and _hits[-1]["path"] == "/v1/chat/completions"
+                  and "messages" in _hits[-1]["body"] and "model" in _hits[-1]["body"],
+                  _hits[-1]["path"] if _hits else "no hit")
+            check("v0.34: bearer auth carried",
+                  _hits and _hits[-1]["auth"] == "Bearer sk-mock")
+            # 2. key masking — never echo the key
+            check("v0.34: mask_key hides the middle",
+                  _vllm.mask_key("sk-abcdefghij1234567890") == "sk-abc...7890"
+                  and "abcdef" not in _vllm.mask_key("sk-abcdefghij1234567890"))
+            # 3. SSE parsing
+            _txt, _err = _vllm._parse_sse(
+                'data: {"choices":[{"delta":{"content":"a "}}]}\n'
+                'data: {"choices":[{"delta":{"content":"b"}}]}\n'
+                'data: [DONE]\n\n')
+            check("v0.34: SSE parse joins deltas + stops at [DONE]",
+                  _txt == "a b" and _err is None, (_txt, _err))
+            # 4. failover: m1 (429) -> m2 (200), penalty applied to m1
+            _two = [
+                {"name": "m1", "api_base": base, "model": "m1", "priority": 1,
+                 "rpm": 10, "tpm": 1000, "rpd": 10, "tpd": 1000, "key": "k1"},
+                {"name": "m2", "api_base": base, "model": "m2", "priority": 2,
+                 "rpm": 10, "tpm": 1000, "rpd": 10, "tpd": 1000, "key": "k2"},
+            ]
+            _r2 = _vllm.ROUTER.ask("failfirst probe", candidates=_two)
+            check("v0.34: 429 on first candidate -> failover to second",
+                  _r2["ok"] and _r2["candidate"] == "m2" and len(_r2["hops"]) == 2
+                  and _r2["hops"][0]["status"] == "429", _r2)
+            check("v0.34: 429 raised penalty + cooldown on the failing candidate",
+                  _vllm.ROUTER.state.penalty.get("m1", 0) >= _vllm.PENALTY_429
+                  and _vllm.ROUTER.state.cooled("m1"),
+                  _vllm.ROUTER.state.penalty)
+            # 5. quota guard: exhaust rpm -> quota status, no HTTP hit
+            _q = [{"name": "mq", "api_base": base, "model": "mq", "priority": 1,
+                   "rpm": 1, "tpm": 10000, "rpd": 100, "tpd": 100000, "key": "k"}]
+            _hits.clear()
+            _ra = _vllm.ROUTER.ask("one", candidates=_q)
+            check("v0.34: first request within quota passes", _ra["ok"], _ra)
+            _rb = _vllm.ROUTER.ask("two", candidates=_q)
+            check("v0.34: rpm exhausted -> 'quota' hop, no HTTP call, error out",
+                  not _rb["ok"] and _rb["hops"] and _rb["hops"][-1]["status"] == "quota"
+                  and len(_hits) == 1, (_rb["hops"], len(_hits)))
+            # 6. session_context: structured findings, no raw bytes, bounded
+            _sess = {
+                "artifact": {"name": "demo.apk", "sha256": "ab" * 32},
+                "overview": {"package": "com.demo", "versionName": "1.0",
+                             "minSdk": 21, "targetSdk": 34},
+                "claims": [{"id": "C1", "statement": "app uses X", "confidence": "MEDIUM"}],
+                "falsifications": [{"id": "F1", "note": "no Y found"}],
+                "findings": [{"id": "E3", "evidence": "method m called",
+                              "location": {"symbol": "com.demo.A.m"}}],
+            }
+            _ctx = _vllm.session_context(_sess)
+            check("v0.34: session_context is grounded + bounded",
+                  "com.demo" in _ctx and "[C1]" in _ctx and "[E3]" in _ctx
+                  and "com.demo.A.m" in _ctx and len(_ctx) <= _vllm.MAX_CONTEXT_CHARS,
+                  _ctx[:120])
+            check("v0.34: empty session -> empty context",
+                  _vllm.session_context(None) == "" and _vllm.session_context({}) == "")
+            # 7. /models + /ask gateway surface (no key set -> honest error)
+            del os.environ[_vllm.ENV_BASE_URL]
+            del os.environ[_vllm.ENV_BASE_URL_KEY]
+            _rmod, _ = gw.handle("/models")
+            check("v0.34: /models renders router state without leaking keys",
+                  "LLM ROUTER" in _rmod and "sk-mock" not in _rmod and "keys:" in _rmod,
+                  _rmod[:120])
+            _rask, _ = gw.handle("/ask")
+            check("v0.34: bare /ask -> usage", "LLM assistant" in _rask, _rask[:80])
+            # /ask with a live key (mock server) end-to-end through the gateway
+            os.environ["VIBE_LLM_MOCK_API_KEY"] = "sk-mock"
+            os.environ[_vllm.ENV_CANDIDATES] = _json.dumps([
+                {"name": "mock", "api_base": base, "model": "mockmodel", "priority": 5}])
+            _rask2, _ = gw.handle("/ask what is a dex magic", user="t")
+            check("v0.34: /ask through gateway -> mock answer",
+                  "mock answer" in _rask2 and "via mock" in _rask2, _rask2[:160])
+            # no-key path: clear both -> honest 'no candidate has a key'
+            del os.environ["VIBE_LLM_MOCK_API_KEY"]
+            del os.environ[_vllm.ENV_CANDIDATES]
+            _rask3, _ = gw.handle("/ask what is a dex magic", user="t")
+            check("v0.34: /ask with no keys -> honest setup error",
+                  "no LLM candidate has a key" in _rask3, _rask3[:140])
+            # /ask --sha with unknown sha -> grounding error
+            _rask4, _ = gw.handle("/ask x --sha zzzzzzzzzzzzzzzz", user="t")
+            check("v0.34: /ask --sha unknown -> 'no stored session'",
+                  "no stored session" in _rask4, _rask4[:120])
+
+            # 8. Telegram UI wiring: action:ask callback + ask-mode surface
+            from vibebot import telegram_runtime as _tr
+            from vibebot import telegram_ui as _tgui
+
+            class _StubRT(_tr.CategoryTelegramTransport):
+                def __init__(self, gw_):
+                    super().__init__(gw_, "tok", allowed_user_ids={"999"})
+                    self.calls: list = []
+
+                def _call(self, method, payload):
+                    self.calls.append((method, payload))
+                    return {"result": []}
+
+            _rt = _StubRT(gw)
+            _sess_keys = list(gw.sessions.list())
+            assert _sess_keys, "expected a stored session from the mock analyze"
+            _rt.current_artifact["999"] = {"name": "fixture-demo.apk",
+                                           "path": FIXTURE, "state": "READY"}
+            _rt._handle_callback({"id": "cb1", "from": {"id": "999"},
+                                  "message": {"chat": {"id": 1}, "message_id": 1},
+                                  "data": "action:ask"})
+            check("v0.34: action:ask callback -> ask_pending + prompt edit",
+                  "999" in _rt.ask_pending
+                  and any(m == "editMessageText" and "Ask mode" in p.get("text", "")
+                          for m, p in _rt.calls),
+                  [m for m, _ in _rt.calls])
+            _rt._handle_callback({"id": "cb2", "from": {"id": "999"},
+                                  "message": {"chat": {"id": 1}, "message_id": 2},
+                                  "data": "cmd:models"})
+            _last = _rt.calls[-1]
+            check("v0.34: cmd:models callback -> /models router state",
+                  _last[0] == "editMessageText" and "LLM ROUTER" in _last[1]["text"],
+                  _last[1]["text"][:80])
+            _rt.ask_pending.discard("999")
+            _kb = _tgui.category_keyboard("ask", has_artifact=True)
+            _labels = [b["text"] for row in _kb["inline_keyboard"] for b in row]
+            check("v0.34: ask category renders Ask (unlocked) + Models",
+                  "💬 Ask" in _labels and "🧠 Models" in _labels
+                  and "🔒 💬 Ask" not in _labels, _labels)
+            _rreg, _ = gw.handle("/commands llm")
+            check("v0.34: /commands llm surfaces /ask + /models",
+                  "/ask" in _rreg and "/models" in _rreg, _rreg[:120])
+            _rhelp, _ = gw.handle("/help")
+            check("v0.34: /help lists /ask + /models",
+                  "/ask" in _rhelp and "/models" in _rhelp, _rhelp[:120])
+        finally:
+            _srv.shutdown()
+            for _k, _v in _llm_env_saved.items():
+                if _v is None:
+                    os.environ.pop(_k, None)
+                else:
+                    os.environ[_k] = _v
+
 
     finally:
         shutil.rmtree(td, ignore_errors=True)

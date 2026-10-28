@@ -53,6 +53,8 @@ COMMANDS = [
     ("status", "job state + progress"),
     ("jobs", "all jobs"),
     ("sessions", "stored analysis sessions"),
+    ("ask", "LLM assistant (free-LLM router): /ask <q> [--sha <sha>] [--model <id>]"),
+    ("models", "LLM router state (keys masked): /models"),
     ("cancel", "cancel a queued/running job"),
     ("help", "command list"),
 ]

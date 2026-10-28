@@ -46,6 +46,10 @@ COMMANDS: list[dict] = [
      "kw": ["stop", "abort", "kill job"]},
     {"name": "report", "tier": 0, "summary": "stored report card by sha",
      "kw": ["card", "output", "result"]},
+    {"name": "ask", "tier": 0, "summary": "LLM assistant (free-LLM router): /ask <q> [--sha <sha>] — grounded in session findings when --sha given",
+     "kw": ["ai", "llm", "chat", "ask", "explain", "assistant", "question", "gpt", "qwen"]},
+    {"name": "models", "tier": 0, "summary": "LLM router state: candidates, keys (masked), penalties, cooldowns",
+     "kw": ["router", "providers", "key", "model", "llm", "endpoints"]},
     # ---- L1: full surface (found via /commands <query>) --------------------
     {"name": "apk", "tier": 1, "summary": "APK overview + Vibe IR entity graph",
      "kw": ["overview", "ir", "entity", "graph", "package", "components"]},

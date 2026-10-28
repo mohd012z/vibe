@@ -102,7 +102,8 @@ CATEGORIES: dict[str, tuple[str, tuple[Button, ...]]] = {
         Button("⚔ Falsify", "cmd:falsify", True),
     )),
     "ask": ("💬 Ask Vibe", (
-        Button("💬 Ask", "action:ask", True),
+        Button("💬 Ask", "action:ask"),
+        Button("🧠 Models", "cmd:models"),
     )),
 }
 
