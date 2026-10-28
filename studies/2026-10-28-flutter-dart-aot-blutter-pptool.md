@@ -123,12 +123,45 @@ clean recent-Dart AOT fixture.
   `/opt/data/cache/scratch/bld/` (prefix `bld/usr`) — SCRATCH, pruned after
   72h. A durable install (e.g. `/opt/data/toolchain/`) is needed before the
   bot serves /flutter from this host.
+  - **Build recipes (verified)**: ICU = AUTOTOOLS, not cmake — source tarball
+    extracts to `icu/`, build from `icu/source`:
+    `./configure --prefix <prefix> --disable-samples --disable-tests
+    --disable-program-data && make -j && make install`.
+    Capstone 5.0.1 = `make -j && make prefix=<prefix> install`, but its
+    Makefile hardcodes `/usr/lib` for the `.so` (fails without root) →
+    copy `libcapstone.so.5` into the prefix manually.
+  - **Capstone gotcha (cost 3 build cycles)**: blutter does
+    `#include <capstone.h>` (flat) and CMake's `pkg_search_module` only
+    consumes the `.pc`'s `includedir` (NOT the Cflags line — my `-I
+    ${includedir}/capstone` addition in Cflags was ignored). Distro packages
+    use a FLAT include layout: replicate it — copy every header from
+    `include/capstone/*.h` into `include/` (20 headers, not just
+    capstone.h — it `#include`s m68k.h etc.).
+  - **Stale CMake cache gotcha**: `blutter/build/` caches the first
+    pkg-config result; after fixing the env, `rm -rf blutter/build` (the
+    dartvm lib in `packages/lib/` survives and is reused — only the 19
+    blutter files rebuild).
 - PPTool 2.0 wheel: installed in the durable bot venv
   (`/opt/data/vibebot/.venv`) — `uv pip install` (venv has no pip; the wheel
   must keep a versioned filename).
-- blutter + dartvm C++ build for Dart 3.9.2: NOT yet run on host (in flight
-  — ICU/capstone build, then SDK sparse-clone at v3.9.2, then the blutter
-  e2e). Status: PPTool half PROVEN; blutter half code-verified, e2e pending.
+
+## E2E — PROVEN (2026-10-28, this host, Trudido sample)
+
+Full chain executed end-to-end on F-Droid com.trudido.app (Dart 3.9.2):
+1. blutter built (user-space ICU+capstone, Dart SDK v3.9.2 sparse-clone,
+   dartvm C++ lib 271 files) → ran on `trudido_libs/libapp.so` →
+   `pp.txt` (132,767 lines; first line `pool heap offset: 0x1200080`,
+   entries `[pp+0xNN] String: "..."` / `Stub:` / `List(n) [...]`) +
+   `asm/` = Dart decompilation in 85 package directories + `objs.txt`
+   (1.4 MB object dump) + `blutter_frida.js` (bonus: blutter emits a
+   ready-to-use Frida hook script for every dumped object).
+2. Keyword → offset: `pp.txt` line `[pp+0x60] String: "` +
+   "`device_calendar_plus_android` threw an error: `"`.
+3. `pptool -s libapp.so 0x60` → `0xf8d418` (the single function site
+   loading that object).
+4. `r2 -q -c "aa; pd 5 @ 0xf8d418"` →
+   `0x00f8d418  ldr x16, [x27, 0x60]` — the exact load, confirmed.
+   Chain: **Dart source → pool offset → machine address → instruction**.
 
 ## VibeBot wiring (design, for the /flutter command)
 
