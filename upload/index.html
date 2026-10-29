@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vibe — Big APK Upload</title>
+<style>
+  :root{
+    --bg1:#1a1030; --bg2:#0d1f1a; --card:#221636ee; --edge:#4a3a6a;
+    --tx:#e8e2f5; --dim:#9a8fc0; --ok:#3ddc84; --err:#ff6b6b; --acc:#7c5cff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+       background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);color:var(--tx);
+       min-height:100vh;display:flex;justify-content:center;padding:20px 14px 60px}
+  .wrap{max-width:560px;width:100%}
+  h1{font-size:1.5rem;margin:8px 0 2px}
+  h1 .v{color:var(--acc)}
+  .sub{color:var(--dim);font-size:.92rem;margin-bottom:18px}
+  .card{background:var(--card);border:1px solid var(--edge);border-radius:16px;
+        padding:18px;margin-bottom:14px;backdrop-filter:blur(6px)}
+  .step{font-weight:700;color:var(--acc);font-size:.8rem;letter-spacing:.08em;
+        text-transform:uppercase;margin-bottom:8px}
+  .why{font-size:.88rem;line-height:1.5;color:var(--dim)}
+  .why b{color:var(--tx)}
+  input[type=file]{width:100%;margin:10px 0;color:var(--tx)}
+  button{background:linear-gradient(135deg,#7c5cff,#3ddc84);border:0;color:#12081f;
+         font-weight:700;font-size:1rem;padding:13px 18px;border-radius:12px;width:100%;
+         cursor:pointer}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  .small{background:none;border:1px solid var(--edge);color:var(--dim);font-weight:500;
+         font-size:.8rem;padding:8px;border-radius:10px;margin-top:8px;width:100%}
+  .bar{height:10px;background:#33244d;border-radius:6px;overflow:hidden;margin:12px 0 4px;display:none}
+  .bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,#7c5cff,#3ddc84);
+         transition:width .2s}
+  .status{font-size:.88rem;margin-top:8px;min-height:1.2em;white-space:pre-wrap;word-break:break-all}
+  .ok{color:var(--ok)} .err{color:var(--err)}
+  .linkbox{display:none;margin-top:12px;background:#160e26;border:1px dashed var(--acc);
+           border-radius:12px;padding:12px;word-break:break-all;font-size:.92rem}
+  .linkbox .lbl{color:var(--dim);font-size:.78rem;margin-bottom:4px}
+  .copy{width:auto;margin-top:10px;padding:9px 14px;font-size:.88rem}
+  .hint{font-size:.82rem;color:var(--dim);margin-top:10px;line-height:1.5}
+  .kbd{background:#160e26;border:1px solid var(--edge);border-radius:6px;padding:1px 7px;
+       font-family:ui-monospace,Menlo,monospace;font-size:.85rem;color:#c9b8ff}
+  code{font-family:ui-monospace,Menlo,monospace;color:#c9b8ff}
+  .foot{color:#5e5480;font-size:.75rem;text-align:center;margin-top:26px;line-height:1.6}
+  .warn{background:#3a2410;border-color:#a86a2a;color:#ffd9a0;font-size:.85rem;
+        padding:10px 12px;border-radius:10px;margin-top:10px;display:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1><span class="v">vibe</span> · Big APK Upload</h1>
+  <div class="sub">Upload an APK bigger than 20 MB, get a link, feed it to @mvibe_aibot.</div>
+
+  <div class="card">
+    <div class="step">Why this page</div>
+    <div class="why">Telegram caps bot downloads at <b>20 MB</b> — a platform limit, no
+    setting changes it. This page uploads your file <b>directly from your phone</b> to a
+    temporary file host (nothing touches Telegram), then hands the bot a
+    <b>direct link</b> it fetches over the internet — up to <b>200 MB</b>.
+    The link lasts <b>~60 days</b>.</div>
+  </div>
+
+  <div class="card">
+    <div class="step">1 · Pick your file</div>
+    <input type="file" id="file" accept=".apk,.apks,.dex,.jar,application/zip,application/vnd.android.package-archive">
+    <div id="fname" class="hint"></div>
+    <div id="warn" class="warn"></div>
+  </div>
+
+  <div class="card">
+    <div class="step">2 · Upload</div>
+    <button id="go" disabled>Choose a file first</button>
+    <div class="bar" id="bar"><i id="fill"></i></div>
+    <div id="prog" class="hint" style="display:none">Uploading… <span id="pct">0</span>%
+      (your phone → tmpfiles.org directly; the bot is not involved)</div>
+    <div id="status" class="status"></div>
+    <button class="small" id="test">Test connection with a 1 KB sample</button>
+  </div>
+
+  <div class="card" id="result" style="display:none">
+    <div class="step">3 · Send this to the bot</div>
+    <div class="hint">Open <b>@mvibe_aibot</b>, paste this, hit enter:</div>
+    <div class="linkbox" id="cmdbox" style="display:block">
+      <div class="lbl">Command for the bot (tap the link on the next screen to copy it):</div>
+      <div id="cmd"></div>
+    </div>
+    <button class="copy" id="copy">📋 Copy the command</button>
+    <div class="hint">The bot will reply <code>ACK VIBE-XXXX</code>, then the result.
+      Use <code>/find &lt;word&gt; --session VIBE-XXXX</code> afterwards.</div>
+  </div>
+
+  <div class="foot">Files are hosted by tmpfiles.org (expires ~60 days) · nothing is
+  stored on the Vibe server · direct downloads verified byte-identical up to 41 MB<br>
+  vibe repo · mohd012z/vibe · read-only analysis — this page only uploads, never modifies</div>
+</div>
+
+<script>
+"use strict";
+const MAX = 200 * 1024 * 1024;
+const fileEl = document.getElementById("file");
+const go = document.getElementById("go");
+const testBtn = document.getElementById("test");
+const statusEl = document.getElementById("status");
+const bar = document.getElementById("bar");
+const fill = document.getElementById("fill");
+const prog = document.getElementById("prog");
+const pct = document.getElementById("pct");
+const fname = document.getElementById("fname");
+const warn = document.getElementById("warn");
+const result = document.getElementById("result");
+const cmdEl = document.getElementById("cmd");
+const copyBtn = document.getElementById("copy");
+let lastUrl = "";
+
+fileEl.addEventListener("change", () => {
+  const f = fileEl.files[0];
+  if (!f) { fname.textContent = ""; return; }
+  const mb = (f.size/1048576).toFixed(1);
+  fname.textContent = `${f.name} · ${mb} MB`;
+  if (f.size > MAX) {
+    warn.style.display = "block";
+    warn.textContent = `⚠ ${mb} MB is over the bot's 200 MB bound. Pick a smaller file.`;
+    go.disabled = true; go.textContent = "File too big (max 200 MB)";
+  } else {
+    warn.style.display = "none";
+    go.disabled = false; go.textContent = "⬆ Upload to tmpfiles.org";
+  }
+});
+
+function setStatus(msg, cls){ statusEl.textContent = msg; statusEl.className = "status " + (cls||""); }
+
+// XMLHttpRequest so we get upload progress events (fetch doesn't)
+function uploadXhr(f, onProgress){
+  return new Promise((resolve, reject) => {
+    const fd = new FormData();
+    fd.append("file", f, f.name || "upload.bin");
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "https://tmpfiles.org/api/v1/upload");
+    xhr.upload.onprogress = e => {
+      if (e.lengthComputable){
+        const p = Math.round(e.loaded / e.total * 100);
+        pct.textContent = p;
+        fill.style.width = p + "%";
+        onProgress && onProgress(p);
+      }
+    };
+    xhr.onload = () => {
+      try {
+        const j = JSON.parse(xhr.responseText);
+        if (xhr.status >= 200 && xhr.status < 300 && j.data && j.data.url) resolve(j.data.url);
+        else reject(new Error("host said: " + (j.status || ("HTTP " + xhr.status))));
+      } catch(e){ reject(new Error("bad response (HTTP " + xhr.status + ")")); }
+    };
+    xhr.onerror = () => reject(new Error("network error — check connection"));
+    xhr.ontimeout = () => reject(new Error("timeout (400s)"));
+    xhr.timeout = 400000;
+    xhr.send(fd);
+  });
+}
+
+// api url = the page url the bot fetches directly (the bot resolves the
+// real download link itself). Verified: 41 MB round-trip byte-identical.
+function toBotUrl(pageUrl){ return pageUrl; }
+
+async function doUpload(file, isTest){
+  bar.style.display = "block"; fill.style.width = "0%";
+  prog.style.display = "block"; pct.textContent = "0";
+  setStatus(isTest ? "Testing…" : "Uploading…", "");
+  result.style.display = "none";
+  go.disabled = true; testBtn.disabled = true;
+  try {
+    const t0 = Date.now();
+    const pageUrl = await uploadXhr(file, null);
+    lastUrl = toBotUrl(pageUrl);
+    const secs = ((Date.now()-t0)/1000).toFixed(1);
+    const mb = (file.size/1048576).toFixed(1);
+    if (isTest){
+      setStatus(`✅ Connection OK — ${secs}s for 1 KB sample. Pick your APK and upload.`, "ok");
+    } else {
+      setStatus(`✅ Uploaded ${mb} MB in ${secs}s.`, "ok");
+      cmdEl.textContent = "/apk " + lastUrl;
+      result.style.display = "block";
+      result.scrollIntoView({behavior:"smooth", block:"center"});
+    }
+  } catch(e){
+    setStatus("❌ " + e.message +
+      "\n\nIf this keeps failing: your network may block tmpfiles.org.\n" +
+      "Fallback: host the file anywhere public (GitHub, your website) and\n" +
+      "send  /apk <direct-file-url>  to the bot.", "err");
+  } finally {
+    go.disabled = !fileEl.files.length;
+    go.textContent = fileEl.files.length ? "⬆ Re-upload" : "Choose a file first";
+    testBtn.disabled = false;
+  }
+}
+
+go.addEventListener("click", () => { if (fileEl.files[0]) doUpload(fileEl.files[0], false); });
+testBtn.addEventListener("click", () => {
+  const tiny = new Blob(["vibe-connection-test " + Date.now()], {type:"text/plain"});
+  tiny.name = "vibe_test.txt";
+  doUpload(tiny, true);
+});
+copyBtn.addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText(cmdEl.textContent);
+        copyBtn.textContent = "✅ Copied — paste it in the bot"; }
+  catch(e){ copyBtn.textContent = "Long-press the command to copy"; }
+  setTimeout(()=>copyBtn.textContent = "📋 Copy the command", 2500);
+});
+</script>
+</body>
+</html>

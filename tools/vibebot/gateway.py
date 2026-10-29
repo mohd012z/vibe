@@ -6,7 +6,7 @@ id, and the caller runs `process_pending()` to work the queue (Telegram does
 this in a worker thread; CLI just calls it directly).
 
 Command surface (v0.1):
-  /analyze <path> [--engine apkmod|mock]   run the pipeline as a job (ACK now)
+  /analyze <path-or-url> [--engine apkmod|mock]   run the pipeline as a job (ACK now)
   /status [job-id]                         job state + progress
   /jobs                                    all jobs
   /sessions                                stored analysis sessions
@@ -14,6 +14,8 @@ Command surface (v0.1):
   /report --sha <sha256[:16]>              stored markdown report card
   /cancel <job-id>                         cancel a queued/running job
   /help                                    this surface
+  (any <path-or-url> arg also accepts https:// — v0.28 URL ingestion for
+   artifacts >20MB that can't cross Telegram's getFile cap; public hosts only)
 
 Security boundary (v0.1):
   * paths must exist; basename is sanitized into the report (never echoed
@@ -26,8 +28,13 @@ from __future__ import annotations
 
 import os
 import re
+import hashlib
 import sys
 import time
+import shutil
+import hashlib
+import zipfile
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -38,7 +45,7 @@ from . import core
 from . import engines
 
 HELP = """vibebot commands
-  /apk <path>            APK overview + Vibe IR entity graph (stable IDs)
+  /apk <path|url>        APK overview + Vibe IR entity graph (stable IDs)
   /map <path>            entity graph tree + cross-layer paths (or --sha <…>)
   /find <text> --sha <…> TargetFinder: strings/resources/classes/methods/components
   /xref <M|Cls.m> --sha <…>  references: callers + callees + strings
@@ -49,10 +56,10 @@ HELP = """vibebot commands
   /why <C-id> [--sha <…>] CodeTransparent trace: claim -> evidence -> bytes
   /plan <goal>           cheapest-capable method plan (live providers)
   /capabilities          what's installed here (honest detection)
-  /analyze <path> [--engine apkmod|dexmapper] [--fingerprints <json>]
-  /dex <path>            DEX Mapper job: class->method->call map + JNI + integrity
-  /xmatch <src.apk> <dst.apk>  cross-version method match (job) — carry validated findings
-  /native <path>         Radare native provider: ELF fns/imports/exports + JNI bridge
+  /analyze <path|url> [--engine apkmod|dexmapper] [--fingerprints <json>]
+  /dex <path|url>        DEX Mapper job: class->method->call map + JNI + integrity
+  /xmatch <src.apk|url> <dst.apk|url>  cross-version method match (job) — carry validated findings
+  /native <path|url>     Radare native provider: ELF fns/imports/exports + JNI bridge
   /harness <srcdir>      native-harness validation: build + run C test under qemu (E5)
   /kmeta <dex|apk> [f]   recover original (pre-R8) Kotlin names from @Metadata (E2)
   /commands [query]      searchable command registry (L0 always · L1 on demand)
@@ -62,12 +69,17 @@ HELP = """vibebot commands
   /hash <text>           sha256 of a text string
   /dexcheck <path>       validate DEX headers (sha1 + adler32 + version)
   /dexrepair <path>      report what /dexrepair would fix (dry-run, read-only)
+  /get <url>             download a file by link (MediaFire share links ok) + evidence
   /status [job-id]       job state + progress
   /jobs                  all jobs
   /sessions              stored analysis sessions
+  (path-accepting commands above also accept https://<url> — v0.28 URL
+   ingestion for artifacts >20MB; public hosts only, 200MB bound)
   /deepdive <target> --sha <sha>   stateful traverse (callers|native|references|<name>|jni|calls)
   /investigate <path> [target]     orchestrated 18-stage investigation (job)
   /report --sha <sha>    stored report card
+  /ask <q> [--sha <…>] [--model <id>]  LLM assistant (free-LLM router; --sha grounds it in a session)
+  /models                LLM router state: candidates + keys (masked) + penalties/cooldowns
   /cancel <job-id>       cancel queued/running job
   /help                  this text
 
@@ -88,6 +100,71 @@ def sanitize_filename(name: str, max_len: int = 80) -> str:
     return base or "upload.bin"
 
 
+def _is_url(raw: str) -> bool:
+    """True if `raw` is an http(s) URL we should ingest by download.
+
+    Only http/https — not file:// (that is a local path, handled by the
+    normal branch) and not ftp/etc (not a supported ingest source)."""
+    if not isinstance(raw, str):
+        return False
+    return re.match(r"^https?://", raw.strip(), re.IGNORECASE) is not None
+
+
+def _url_host_rejected(host: str) -> bool:
+    """SSRF guard: is this URL host a non-public IP literal we must not fetch?
+
+    Blocks loopback (127/8), private (10/8, 172.16/12, 192.168/16),
+    link-local (169.254/16), reserved, and unspecified IPv4/IPv6 literals —
+    the classic SSRF targets (cloud metadata, local services). Host NAMES are
+    not IP-resolved (no DNS in this guard): a name that resolves to a private
+    address is out of scope for this layer and is an honest, disclosed limit.
+    """
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address((host or "").strip().strip("[]"))
+    except ValueError:
+        return False  # not an IP literal — it is a hostname (allowed)
+    return (ip.is_loopback or ip.is_private or ip.is_link_local
+            or ip.is_reserved or ip.is_unspecified or ip.is_multicast)
+
+
+def _url_basename(url: str, content_disposition: str | None = None) -> str:
+    """Derive a safe on-disk file name for a downloaded artifact.
+
+    Preference: Content-Disposition `filename=` (server's intent) → last
+    URL path segment → `upload.bin`. Always passed through sanitize_filename
+    so it can never be a path or carry metachars."""
+    if content_disposition:
+        # RFC 5987 extended form first (it takes precedence): filename*=UTF-8''name%20x
+        m = re.search(r"filename\*\s*=\s*([^;]+)", content_disposition,
+                      re.IGNORECASE)
+        if m:
+            cand = m.group(1).strip().strip("'\"")
+            # drop the `charset''` prefix, then URL-decode the name
+            cand = cand.split("''")[-1]
+            try:
+                cand = urllib.parse.unquote(cand)
+            except (ValueError, UnicodeDecodeError):
+                pass
+            if cand:
+                return sanitize_filename(cand)
+        # plain form: filename="name" or filename=name
+        m = re.search(r'filename\s*=\s*["\']?([^"\';]+)', content_disposition,
+                      re.IGNORECASE)
+        if m:
+            cand = m.group(1).strip().strip("'\"")
+            if cand:
+                return sanitize_filename(cand)
+    # fall back to the URL's PATH component (not the host, not query/fragment)
+    try:
+        path = urllib.parse.urlparse(url).path
+    except (ValueError, AttributeError):
+        path = ""
+    for seg in reversed([s for s in path.split("/") if s]):
+        return sanitize_filename(seg)
+    return "upload.bin"
+
+
 class Gateway:
     def __init__(self, work_dir: str, engines_map: dict[str, core.Engine] | None = None,
                  file_root: str | None = None):
@@ -99,6 +176,9 @@ class Gateway:
         self.sessions = core.SessionStore(work_dir)
         self.engines = engines_map or self._default_engines()
         self.jobs = core.JobManager(self.engines, self.sessions)
+        # v0.30: one-shot disclosure set by _artifact() when a .apks bundle was
+        # unpacked for this call; appended to the ACK/reply, then cleared.
+        self._bundle_note = ""
 
     def _containment_err(self, path: str) -> str | None:
         """Error string if `path` is outside the active file root, else None.
@@ -114,20 +194,280 @@ class Gateway:
                     f"containment-gated (NOT OBSERVED outside the root)")
         return None
 
-    def _artifact(self, raw: str, label: str = "artifact") -> tuple[str, str | None]:
-        """Resolve a user-supplied path: expand+abs, containment-gate, exist.
-        Returns (abs_path, error) — error is a ready-to-return message or None."""
-        path = os.path.abspath(os.path.expanduser(raw))
+    # v0.30: bound on unpacking an .apks bundle's base.apk (safety; the upload
+    # is already bounded by MAX_UPLOAD_BYTES, extraction is ~1:1 with zip size)
+    _BUNDLE_MAX_EXTRACT = 512 * 1024 * 1024
+
+    def _apks_base(self, apks_path: str) -> tuple[str, str, str | None]:
+        """v0.30: unpack an .apks bundle (Android App Bundle / ApkSet).
+
+        An .apks is a ZIP containing base.apk (all DEX + manifest) plus
+        split_config.*.apk (per-ABI / per-language / per-density resources and
+        native libs). We extract base.apk into a per-bundle cache dir and
+        analyze THAT; the splits are disclosed as NOT analyzed (honest).
+
+        Returns (base_apk_path, disclosure_note, error).
+        """
+        try:
+            with zipfile.ZipFile(apks_path) as z:
+                names = z.namelist()
+                if "base.apk" not in names:
+                    return "", "", "error: .apks has no base.apk (not a valid ApkSet)"
+                info = z.getinfo("base.apk")
+                if info.is_dir():
+                    return "", "", "error: .apks 'base.apk' is a directory (corrupt bundle)"
+                if info.file_size > self._BUNDLE_MAX_EXTRACT:
+                    return "", "", (f"error: base.apk too large to unpack "
+                                    f"({info.file_size} B > {self._BUNDLE_MAX_EXTRACT})")
+                # per-bundle cache key: sha256 of the bundle itself
+                sha = hashlib.sha256()
+                with open(apks_path, "rb") as f:
+                    while True:
+                        chunk = f.read(1 << 20)
+                        if not chunk:
+                            break
+                        sha.update(chunk)
+                base = os.path.join(self.work_dir, "apks", sha.hexdigest()[:16],
+                                    "base.apk")
+                if not os.path.exists(base):
+                    os.makedirs(os.path.dirname(base), exist_ok=True)
+                    # single KNOWN member ('base.apk', exact name) — no
+                    # arbitrary-name extraction, so no zip-slip surface
+                    with z.open("base.apk") as src, open(base + ".part", "wb") as out:
+                        shutil.copyfileobj(src, out, 1 << 20)
+                    os.replace(base + ".part", base)
+                splits = [n for n in names if n != "base.apk" and not n.endswith("/")]
+                parts = []
+                for n in sorted(splits):
+                    sz = z.getinfo(n).file_size
+                    parts.append(f"{n} ({sz / 1e6:.2f} MB)" if sz >= 1 << 20
+                                 else f"{n} ({sz / 1024:.0f} KB)")
+                note = (f"⚠ .apks bundle — analyzed base.apk "
+                        f"({info.file_size / 1e6:.2f} MB); splits NOT analyzed: "
+                        + ", ".join(parts)) if parts else \
+                       (f"⚠ .apks bundle — analyzed base.apk "
+                        f"({info.file_size / 1e6:.2f} MB)")
+                return base, note, None
+        except (zipfile.BadZipFile, OSError) as e:
+            return "", "", f"error: could not unpack .apks bundle ({type(e).__name__}: {e})"
+
+    def _inbound_dir(self) -> str:
+        d = os.path.join(self.work_dir, "inbound")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    # v0.33: MediaFire share links (…/file/<key>/<name>/file) serve an HTML
+    # page; the real bytes live at a CDN link (download*.mediafire.com/<token>/
+    # <key>/<name>) embedded in the page's Download anchor. The CDN link is
+    # session-free: a plain GET returns the real file bytes (verified
+    # 2026-10-28: Content-Type application/vnd.android.package-archive,
+    # 200/206 responses).
+    _MF_CDN = re.compile(
+        rb'href="(https://download\d+\.mediafire\.com/[^"]+)"')
+
+    def _url_mediafire_direct(self, url: str) -> str:
+        """v0.33: resolve a MediaFire share page to its direct CDN file link.
+
+        Already-direct (download*.mediafire.com) URLs pass through. Non-HTML
+        responses pass through (the URL is the file). Raises RuntimeError
+        when the page has no download link (deleted/moved file, or an
+        album/folder page — those are not single-file share links)."""
+        if re.match(r"^https?://download\d+\.mediafire\.com/", url):
+            return url
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (compatible; VibeBot/0.33)"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            ctype = (r.headers.get("Content-Type") or "").lower()
+            if "text/html" not in ctype:
+                return url  # already a direct file response
+            page = r.read(2 << 20)  # share pages are a few hundred KB
+        m = re.search(
+            rb'aria-label="Download file"[^>]*href="(https://download\d+'
+            rb'\.mediafire\.com/[^"]+)"', page)
+        if not m:
+            m = self._MF_CDN.search(page)
+        if m:
+            return m.group(1).decode()
+        raise RuntimeError(
+            "MediaFire page has no download link (deleted/moved file, or not "
+            "a single-file share link — give the bot the DIRECT file URL)")
+
+    def _url_interstitial_redirect(self, url: str) -> str:
+        """v0.31: some public hosts (tmpfiles.org) serve a tiny HTML
+        interstitial at the share URL whose real bytes live at a signed
+        /dl/<epoch>.<hash>/<id>/<name> link inside it. Fetch the page,
+        return the direct link (or the original URL if it is already a
+        direct file). Raises RuntimeError if no usable link is found."""
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (compatible; VibeBot/0.31)"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            ctype = (r.headers.get("Content-Type") or "").lower()
+            if "text/html" not in ctype:
+                return url  # already a direct file response
+            page = r.read(1 << 20)  # interstitials are small
+        # tmpfiles.org pattern: <a class="download" href="https://tmpfiles.org/dl/…">
+        m = re.search(rb'href="(https://tmpfiles\.org/dl/\d+\.[a-f0-9]+/[^"]+)"',
+                      page)
+        if m:
+            return m.group(1).decode()
+        # generic fallback: any same-origin absolute link to /dl/ or a file
+        m = re.search(rb'href="([^"]+/\d+\.[a-f0-9]+/[^"]+)"', page)
+        if m:
+            return m.group(1).decode()
+        m = re.search(rb'href="(https?://[^"]+\.(?:apk|apks|dex|jar|so|bin))"',
+                      page)
+        if m:
+            return m.group(1).decode()
+        raise RuntimeError(
+            "URL serves an HTML page with no usable download link "
+            "(give the bot the DIRECT file URL)")
+
+    def download_url(self, url: str) -> str:
+        """Fetch `url` into the work dir's inbound/ (bounded, retries).
+
+        The plain-HTTP path for large artifacts — Telegram's getFile is
+        capped at 20 MB by the Bot API, but a direct download is only
+        limited by our MAX_UPLOAD_BYTES bound. Streamed in 1 MB chunks; a
+        transfer that exceeds the bound is ABORTED (no partial file left
+        under the final name). Network errors retry (4 attempts); a 4xx
+        response is terminal (retries can't fix a 404). Returns the local
+        path; raises RuntimeError on refusal/failure.
+        v0.31: share URLs that serve an HTML interstitial (tmpfiles.org)
+        are resolved to their signed direct-download link first, so the
+        bytes that land in inbound/ are the real file.
+        """
+        import urllib.parse as _up
+        host = _up.urlparse(url).hostname or ""
+        if _url_host_rejected(host):
+            raise RuntimeError(
+                f"refused (private/loopback host: {host}) — URL ingestion "
+                f"only fetches public addresses (SSRF guard)")
+        # v0.31: resolve an interstitial share URL to the real file URL
+        # (before the on-disk name is derived, so the file lands under the
+        # real name — MediaFire share URLs end in "/file", not the name)
+        direct_url = url
+        if "tmpfiles.org" in host:
+            try:
+                direct_url = self._url_interstitial_redirect(url)
+            except (RuntimeError, OSError, ValueError) as e:
+                raise RuntimeError(f"interstitial: {e}") from e
+        # v0.33: MediaFire share pages -> direct CDN file link
+        if host.endswith("mediafire.com") and direct_url == url:
+            try:
+                direct_url = self._url_mediafire_direct(url)
+            except (RuntimeError, OSError, ValueError) as e:
+                raise RuntimeError(f"mediafire: {e}") from e
+        # v0.33: a share URL may end in a non-name segment (MediaFire's
+        # "/file"): prefer the resolved link's filename when the original
+        # carried no extension and the resolved one does.
+        base = _url_basename(url)
+        if direct_url != url:
+            alt = _url_basename(direct_url)
+            if (os.path.splitext(alt)[1] and not os.path.splitext(base)[1]):
+                base = alt
+        digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:8]
+        final = os.path.join(self._inbound_dir(), base)
+        if os.path.exists(final) and os.path.getsize(final) > 0:
+            # same URL + same filename already ingested this run — reuse it.
+            # (A re-ingest of a CHANGED upstream file is a new URL/name in
+            # practice; a byte-identical re-fetch is a no-op by design.)
+            return final
+        # the extracted link is attacker-controlled content — re-run the
+        # SSRF guard on it (interstitials may point anywhere)
+        redir_host = _up.urlparse(direct_url).hostname or ""
+        if redir_host and redir_host != host and _url_host_rejected(redir_host):
+            raise RuntimeError(
+                f"refused (interstitial redirects to private/loopback host: "
+                f"{redir_host})")
+        tmp = os.path.join(self._inbound_dir(), f".dl-{digest}-{base}")
+        last = None
+        for attempt in range(4):
+            try:
+                req = urllib.request.Request(
+                    direct_url, headers={
+                        "User-Agent": "Mozilla/5.0 (compatible; VibeBot/0.28)",
+                    })
+                with urllib.request.urlopen(req, timeout=300) as r:
+                    # honor a declared Content-Length up front when present
+                    cl = r.headers.get("Content-Length")
+                    if cl and cl.isdigit() and int(cl) > MAX_UPLOAD_BYTES:
+                        raise RuntimeError(
+                            f"file too large ({cl} B > {MAX_UPLOAD_BYTES} bound)")
+                    written = 0
+                    with open(tmp, "wb") as out:
+                        while True:
+                            chunk = r.read(1 << 20)
+                            if not chunk:
+                                break
+                            written += len(chunk)
+                            if written > MAX_UPLOAD_BYTES:
+                                raise RuntimeError(
+                                    f"file too large (>{MAX_UPLOAD_BYTES} B bound)")
+                            out.write(chunk)
+                os.replace(tmp, final)  # atomic: final name appears whole
+                return final
+            except RuntimeError as e:
+                # bound exceeded (or a real error) — drop the partial temp,
+                # re-raise so _artifact() reports it as a failed download
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+                raise e
+            except urllib.error.HTTPError as e:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+                if 400 <= e.code < 500:
+                    raise RuntimeError(f"HTTP {e.code} {e.reason}") from e
+                last = e
+                time.sleep(2 * (attempt + 1))
+            except (urllib.error.URLError, ConnectionResetError,
+                    TimeoutError) as e:
+                last = e
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+                time.sleep(2 * (attempt + 1))
+        raise RuntimeError(f"url download failed after retries: {last}")
+
+    def _artifact(self, raw: str, label: str = "artifact",
+                  allow_bundle: bool = True) -> tuple[str, str | None]:
+        """Resolve a user-supplied artifact: local path OR http(s) URL, and
+        optionally an .apks bundle.
+        Returns (abs_path, error) — error is a ready-to-return message or None.
+        v0.28: URLs download into inbound/ (bounded, retries) — bypasses the
+        20 MB Telegram getFile cap. v0.30: a .apks bundle is unpacked to its
+        base.apk (cached per bundle); splits disclosed, never silently dropped.
+        """
+        if _is_url(raw):
+            try:
+                path = self.download_url(raw.strip())
+            except (RuntimeError, OSError, ValueError) as e:
+                return raw, f"error: {label} download failed ({e})"
+        else:
+            path = os.path.abspath(os.path.expanduser(raw))
         ce = self._containment_err(path)
         if ce:
             return path, ce
         if not os.path.exists(path):
             return path, f"error: {label} not found (refused: {os.path.basename(path)})"
+        if path.lower().endswith(".apks"):
+            if not allow_bundle:
+                return path, (f"error: {label} is an .apks bundle — this command "
+                              f"needs a raw file/dir, not a bundle")
+            base, note, err = self._apks_base(path)
+            if err:
+                return path, err
+            self._bundle_note = note
+            return base, None
         return path, None
 
     def _default_engines(self) -> dict[str, core.Engine]:
         m = {"apkmod": engines.ApkModEngine(os.path.join(self.work_dir, "reports")),
              "mock": engines.MockEngine()}
+        # v0.37: APK workbench (extract/read/write/encrypt/decrypt are
+        # stdlib; patch/compile use the apktool/build-tools toolchain and
+        # degrade to an honest KitError when those are absent).
+        from . import kit as _kit
+        m["kit"] = engines.KitEngine(os.path.join(self.work_dir, "kit-out"),
+                                     toolchain=_kit.Toolchain())
         # stdlib-only engines (no androguard needed): native-harness validation
         try:
             from . import harness
@@ -171,9 +511,11 @@ class Gateway:
                 "/analyze", "/dex", "/xmatch",
                 "/native", "/harness",
                 "/kmeta",
+                "/get", "/kit",
                 "/smali", "/base", "/hash", "/dexcheck", "/dexrepair", "/status",
                 "/jobs", "/sessions", "/deepdive", "/investigate", "/report",
-                "/cancel", "/help", "/start", "/commands", "/oracle"):
+                "/cancel", "/help", "/start", "/commands", "/oracle",
+                "/ask", "/models"):
             return HELP, None
         cmd = parts[0]
 
@@ -184,6 +526,97 @@ class Gateway:
             from . import registry
             query = " ".join(parts[1:]).strip()
             return registry.render(query), None
+
+        if cmd in ("/ask", "/models"):
+            from . import llm as vllm
+            if cmd == "/models":
+                st = vllm.ROUTER.status()
+                lines = ["LLM ROUTER  (Path B, in-process; OpenAI-compatible shape)"]
+                lines.append(f"  keys: {st['keys_source']}   "
+                             f"chain budget {st['budget_s']}s")
+                for c in st["candidates"]:
+                    lines.append(
+                        f"  {c['name']:<10} p={c['priority']:<3} "
+                        f"pen={c['penalty']:<3} cd={c['cooldown']:<3} "
+                        f"inflight={c['inflight']}  key={c['key']}")
+                    lines.append(f"           {c['api_base']}  model={c['model']}")
+                if not st["candidates"]:
+                    lines.append("  (no candidate has a key — set "
+                                 "VIBE_LLM_MINDA_API_KEY or VIBE_LLM_<NAME>_API_KEY, "
+                                 "or VIBE_LLM_BASE_URL for any OpenAI-compatible box)")
+                return "\n".join(lines), None
+            # ---- /ask -----------------------------------------------------
+            rest = parts[1:]
+            model = None
+            sha = None
+            source = None
+            q_parts: list[str] = []
+            i = 0
+            while i < len(rest):
+                p = rest[i]
+                if p == "--model" and i + 1 < len(rest):
+                    model = rest[i + 1]; i += 2; continue
+                if p == "--sha" and i + 1 < len(rest):
+                    sha = rest[i + 1]; i += 2; continue
+                if p == "--source" and i + 1 < len(rest):
+                    source = rest[i + 1].lower(); i += 2; continue
+                q_parts.append(p)
+                i += 1
+            question = " ".join(q_parts).strip()
+            if not question:
+                return ("/ask <question> [--sha <sha256[:16]>] [--model <id>] "
+                        "[--source <name>]\n"
+                        "  LLM assistant (free-LLM router). --source forces ONE "
+                        "provider (independent, no fallback chain):\n"
+                        "  minda|openrouter|groq|cerebras|google|mistral|cfw\n"
+                        "  /models shows the router state (keys masked)"), None
+            context = ""
+            grounding = None
+            if sha:
+                try:
+                    sha_full = core._sha256_from_hex(sha) if hasattr(core, "_sha256_from_hex") else sha.lower()
+                except Exception:
+                    sha_full = sha.lower()
+                sess = self.sessions.load(sha_full) if len(sha_full) >= 8 else None
+                if not sess:
+                    keys = [k for k in self.sessions.list()
+                            if k.startswith(sha_full[:min(len(sha_full), 16)])]
+                    if len(keys) == 1:
+                        sess = self.sessions.load(keys[0])
+                if not sess:
+                    return (f"/ask: no stored session for --sha {sha_full[:16]} "
+                            f"(/sessions lists known ones) — nothing to ground in"), None
+                grounding = sha_full[:16]
+                context = vllm.session_context(sess)
+            # --source: restrict to ONE provider (independent, no fallback).
+            # --source not set = normal priority + 429-decay chain.
+            source_cands = None
+            if source:
+                all_cands, _warn = vllm.load_candidates()
+                source_cands = [c for c in all_cands if c["name"] == source]
+                if not source_cands:
+                    known = ", ".join(c["name"] for c in all_cands) or "(none)"
+                    return (f"/ask: unknown --source '{source}'. Available: "
+                            f"{known}\n  /models shows keys (masked)"), None
+            res = vllm.ROUTER.ask(question, context=context or None, model=model,
+                                  candidates=source_cands)
+            head = f"ASK  ({'grounded sha ' + grounding if grounding else 'chat'})"
+            if source:
+                head += f"  source={source} (independent, no fallback)"
+            if res["ok"]:
+                hop = res["hops"][-1]
+                head += (f"  via {res['candidate']} / {res['model']} "
+                         f"({hop.get('ms', 0)} ms)")
+                if len(res["hops"]) > 1:
+                    failed = [h["name"] for h in res["hops"] if h["status"] != "ok"]
+                    head += f"  (fell over: {', '.join(failed)})"
+                return head + "\n\n" + res["text"], None
+            lines = [head, "", "error: " + (res["error"] or "router failed")]
+            for h in res["hops"]:
+                lines.append(f"  hop {h['name']:<10} {h['status']:<6} "
+                             f"{h.get('ms', 0)} ms  {h.get('reason') or ''}".rstrip())
+            lines.append("  /models shows key availability (masked)")
+            return "\n".join(lines), None
 
         if cmd == "/oracle":
             from . import oracle
@@ -244,6 +677,11 @@ class Gateway:
             return self._dexcheck(parts[1:])
         if cmd == "/dexrepair":
             return self._dexrepair(parts[1:])
+        if cmd == "/get":
+            return self._get(parts[1:])
+
+        if cmd == "/kit":
+            return self._kit(parts[1:])
 
         if cmd == "/jobs":
             lines = [f"{j['id']}  {j['state']:<10} {j['command']:<12} "
@@ -340,6 +778,15 @@ class Gateway:
         return p
 
     # --------------------------------------------------------------- routes
+    def _bundle_ack(self, reply: str) -> str:
+        """v0.30: append the .apks split-disclosure to a reply, then clear it.
+        No-op if no bundle was unpacked this call (plain APKs/DEX unaffected)."""
+        if self._bundle_note:
+            note = self._bundle_note
+            self._bundle_note = ""
+            return f"{reply}\n  {note}"
+        return reply
+
     def _analyze(self, parts: list[str], user: str) -> tuple[str, core.Job | None]:
         if not parts:
             return "/analyze <path> [--engine apkmod|mock] [--fingerprints <json>]", None
@@ -360,9 +807,8 @@ class Gateway:
             return f"error: {e}", None
         except (FileNotFoundError, RuntimeError) as e:
             return f"error: {e}", None
-        return (f"ACK {job.id}  engine={job.engine}\n"
+        return self._bundle_ack(f"ACK {job.id}  engine={job.engine}\n"
                 f"  queued — /status {job.id}  /cancel {job.id}"), job
-
     def _dex(self, parts: list[str], user: str) -> tuple[str, core.Job | None]:
         if not parts:
             return "/dex <path>   (DEX Mapper: class->method->call + JNI + integrity)", None
@@ -378,9 +824,8 @@ class Gateway:
                                    self._budget_params(parts))
         except (KeyError, FileNotFoundError, RuntimeError) as e:
             return f"error: {e}", None
-        return (f"ACK {job.id}  engine=dexmapper\n"
+        return self._bundle_ack(f"ACK {job.id}  engine=dexmapper\n"
                 f"  queued — /status {job.id}  /cancel {job.id}"), job
-
     def _xmatch(self, parts: list[str], user: str) -> tuple[str, core.Job | None]:
         """Cross-version method match: /xmatch <src.apk> <dst.apk>."""
         if not parts:
@@ -407,10 +852,9 @@ class Gateway:
             job = self.jobs.submit("xmatch", src, user, "xmatch", params)
         except (KeyError, FileNotFoundError, RuntimeError) as e:
             return f"error: {e}", None
-        return (f"ACK {job.id}  engine=xmatch\n"
+        return self._bundle_ack(f"ACK {job.id}  engine=xmatch\n"
                 f"  src={os.path.basename(src)}  dst={os.path.basename(dst)}\n"
                 f"  queued — /status {job.id}  /report --sha <…>  /cancel {job.id}"), job
-
     def _native(self, parts: list[str], user: str) -> tuple[str, core.Job | None]:
         if not parts:
             return ("/native <path>   (Radare native provider: ELF functions/"
@@ -428,9 +872,8 @@ class Gateway:
                                    self._budget_params(parts))
         except (KeyError, FileNotFoundError, RuntimeError) as e:
             return f"error: {e}", None
-        return (f"ACK {job.id}  engine=native\n"
+        return self._bundle_ack(f"ACK {job.id}  engine=native\n"
                 f"  queued — /status {job.id}  /cancel {job.id}"), job
-
     def _harness(self, parts: list[str], user: str) -> tuple[str, core.Job | None]:
         if not parts:
             return ("/harness <srcdir>   (native-harness validation: build the "
@@ -439,7 +882,7 @@ class Gateway:
         if "harness" not in self.engines:
             return ("error: harness engine not registered (stdlib-only; "
                     "should always be available)"), None
-        path, err = self._artifact(parts[0], "source dir")
+        path, err = self._artifact(parts[0], "source dir", allow_bundle=False)
         if err:
             return err, None
         try:
@@ -447,10 +890,9 @@ class Gateway:
                                    self._budget_params(parts))
         except (KeyError, FileNotFoundError, RuntimeError) as e:
             return f"error: {e}", None
-        return (f"ACK {job.id}  engine=harness\n"
+        return self._bundle_ack(f"ACK {job.id}  engine=harness\n"
                 f"  queued (build + qemu run) — /status {job.id}  "
                 f"/cancel {job.id}"), job
-
     def _kmeta(self, parts: list[str], user: str) -> tuple[str, core.Job | None]:
         """Kotlin @Metadata name recovery: /kmeta <dex|apk> [class_filter]."""
         if not parts:
@@ -473,14 +915,13 @@ class Gateway:
             job = self.jobs.submit("kmeta", path, user, "kotlinmeta", params)
         except (KeyError, FileNotFoundError, RuntimeError) as e:
             return f"error: {e}", None
-        return (f"ACK {job.id}  engine=kotlinmeta\n"
+        return self._bundle_ack(f"ACK {job.id}  engine=kotlinmeta\n"
                 f"  {os.path.basename(path)}  filter={flt or '(all)'}\n"
                 f"  /report {job.id}   /status {job.id}"), job
-
     def _apk(self, parts: list[str], user: str) -> tuple[str, core.Job | None]:
         if not parts:
-            return ("/apk <path>   (APK overview + Vibe IR entity graph; "
-                    "then /map --sha <…>)"), None
+            return ("/apk <path|bundle.apks>   (APK overview + Vibe IR entity graph; "
+                    ".apks bundle = base.apk analyzed, splits disclosed) "), None
         if "graph" not in self.engines:
             return ("error: Vibe IR needs androguard "
                     "(uv pip install androguard); /smali /base /hash /dexcheck "
@@ -493,8 +934,23 @@ class Gateway:
                                    self._budget_params(parts))
         except (KeyError, FileNotFoundError, RuntimeError) as e:
             return f"error: {e}", None
-        return (f"ACK {job.id}  engine=graph\n"
+        return self._bundle_ack(f"ACK {job.id}  engine=graph\n"
                 f"  queued — /status {job.id}  /cancel {job.id}"), job
+    def _session_graph(self, sha: str):
+        """(session, resolved graph or None) for a stored session.
+
+        v0.27: the graph-engine graph may live OUTSIDE the session (a
+        ``structural.graph = {"$ref": …, "$sha256": …}`` reference → stable
+        per-artifact file, integrity-checked by the store). Returns the
+        resolved dict; a $ref that fails the integrity check / is missing
+        returns (session, None) so callers report "no graph layer" honestly
+        rather than trusting stale bytes.
+        """
+        sess = self.sessions.load(sha)
+        if not sess:
+            return None, None
+        g = self.sessions.load_graph(sess)
+        return sess, g
 
     def _map(self, parts: list[str]) -> tuple[str, None]:
         from . import graphutil
@@ -515,37 +971,68 @@ class Gateway:
         sess = self.sessions.load(sha)
         if not sess:
             return f"no session for {sha[:8]}… — run /apk <path> first", None
-        graph = (sess.get("structural") or {}).get("graph")
+        graph = self.sessions.load_graph(sess)  # v0.27: resolves $ref or inline
         if not graph:
             return (f"session {sha[:8]}… has no Vibe IR graph layer yet "
                     f"(engines: {', '.join(sess.get('engines', []) or ['?'])}) — run /apk <path>"), None
         return graphutil.render_map(graph, sha), None
 
+    def _session_ref(self, parts: list[str]):
+        """Resolve --session VIBE-XXXX / --sha <hex> to a sha. Returns
+        (sha, error, consumed_flag). Neither given -> (None, None, False)."""
+        jobref = self._arg(parts, "--session")
+        sha = self._arg(parts, "--sha")
+        if jobref:
+            ref = jobref.strip().upper()
+            if not ref.startswith("VIBE-"):
+                return None, "--session expects a job id like VIBE-EFCB", True
+            job = self.jobs.get(ref)
+            if job is None:
+                return None, f"no such job {ref} — check /jobs", True
+            if job.result is None:
+                # still queued/running (or failed) — tell the user honestly
+                if job.state in ("queued", "running"):
+                    return (None,
+                            f"{ref} is still {job.state} — wait for its "
+                            "COMPLETE message, then /find <text> --session "
+                            f"{ref}", True)
+                return (None, f"{ref} did not produce a session "
+                        f"(state={job.state})", True)
+            return job.result.intake.get("sha256"), None, True
+        if sha:
+            return sha, None, True
+        return None, None, False
+
     def _find(self, parts: list[str]) -> tuple[str, None]:
         from . import graphutil
-        sha = self._arg(parts, "--sha")
-        # query = every token that isn't a flag or the --sha value
+        # query = every token that isn't a flag or a flag's value
         skip = set()
         for i, p in enumerate(parts):
-            if p == "--sha":
+            if p in ("--sha", "--session"):
                 skip.update({i, i + 1})
             elif p.startswith("--"):
                 skip.add(i)
         query = " ".join(p for i, p in enumerate(parts) if i not in skip).strip()
         if not query:
-            return ("/find <text> --sha <sha256[:16]>   (TargetFinder over the Vibe IR: "
-                    "strings, resources, classes, methods, components — run /apk <path> first)"), None
-        if not sha:
+            return ("/find <text> [--session VIBE-XXXX | --sha <sha256[:16]>]   "
+                    "(TargetFinder over the Vibe IR: strings, resources, classes, "
+                    "methods, components — run /apk <path> first)"), None
+        sha, sess_err, have_ref = self._session_ref(parts)
+        if sess_err:
+            return sess_err, None
+        if have_ref and not sha:
+            return "that job has no session sha yet — run /apk <path> first", None
+        if not have_ref:
             last = self._last_job_sha()
             hint = last[:16] if last else "<sha from /apk>"
-            return ("no --sha: run /apk <path> first, then /find <text> --sha "
-                    f"{hint}"), None
+            return ("no --sha / --session: run /apk <path> first, then "
+                    f"/find <text> --session <VIBE-XXXX>  (or --sha {hint})"), None
         if not SHA_RE.match(sha.lower()):
-            return "/find <text> --sha <sha256[:16]> (hex, 8..64 chars)", None
+            return "/find <text> --session VIBE-XXXX | --sha <sha256[:16]>  (hex, 8..64)", None
         sess = self.sessions.load(sha)
         if not sess:
             return f"no session for {sha[:8]}… — run /apk <path> first", None
-        graph = (sess.get("structural") or {}).get("graph")
+        graph = self.sessions.load_graph(sess)  # v0.27: resolves $ref or inline
         if not graph:
             return (f"session {sha[:8]}… has no Vibe IR graph layer yet — run /apk <path>"), None
         targets = graphutil.find_targets(graph, query)
@@ -573,7 +1060,7 @@ class Gateway:
         sess = self.sessions.load(sha)
         if not sess:
             return f"no session for {sha[:8]}… — run /apk <path> first", None
-        graph = (sess.get("structural") or {}).get("graph")
+        graph = self.sessions.load_graph(sess)  # v0.27: resolves $ref or inline
         if not graph:
             return (f"session {sha[:8]}… has no Vibe IR graph layer yet — run /apk <path>"), None
         x = graphutil.xrefs(graph, target)
@@ -635,7 +1122,7 @@ class Gateway:
         finds = st.get("falsifications")
         if finds is None:
             # no stored findings (pre-P11 session) — run live over the graph
-            g = st.get("graph")
+            g = self.sessions.load_graph(sess)  # v0.27: resolves $ref or inline
             cl = st.get("claims")
             if not g or cl is None:
                 return (f"session {sha[:8]}… has no graph yet — run /apk <path>"), None
@@ -761,13 +1248,214 @@ class Gateway:
             return "/hash <text>  — sha256 of the text", None
         import hashlib
         text = " ".join(parts)
-        return f"sha256(\"{text}\") = {hashlib.sha256(text.encode()).hexdigest()}", None
+        return f'sha256("{text}") = {hashlib.sha256(text.encode()).hexdigest()}', None
+
+    def _get(self, parts: list[str]) -> tuple[str, None]:
+        """v0.33: /get <url> — download a file by link and report evidence.
+
+        Synchronous (bounded by MAX_UPLOAD_BYTES + the download_url retry
+        loop) so the result card is the reply itself: local name, size,
+        sha256, and the ready-to-run follow-up commands. This is the
+        evidence-first path for "download this and check it" — no job,
+        no ACK delay. For direct analysis, /apk <url> does the same
+        download and keeps going into the engine."""
+        if not parts or not _is_url(parts[0]):
+            return ("/get <https://…>  — download a file by link (MediaFire "
+                    "share links included) and report name/size/sha256"), None
+        url = parts[0].strip()
+        try:
+            path = self.download_url(url)
+        except (RuntimeError, OSError, ValueError) as e:
+            return f"error: download failed ({e})", None
+        import hashlib
+        size = os.path.getsize(path)
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        sha = h.hexdigest()
+        ext = os.path.splitext(os.path.basename(path))[1].lower()
+        kind = ("APK (Android)" if ext == ".apk"
+                else "APK bundle (.apks)" if ext == ".apks"
+                else "DEX" if ext == ".dex"
+                else "shared lib (.so)" if ext == ".so"
+                else "archive" if ext in (".zip", ".7z", ".rar")
+                else "file")
+        lines = [
+            "📥 DOWNLOADED",
+            f"  url:    {url}",
+            f"  name:   {os.path.basename(path)}  ({kind})",
+            f"  size:   {size:,} bytes ({size / (1 << 20):.2f} MB)",
+            f"  sha256: {sha[:32]}…",
+            f"  saved:  {path}",
+            "",
+            "next:",
+            f"  /apk <url>      analyze it (overview + Vibe IR graph)",
+            f"  /analyze <url>  full pipeline job",
+            f"  /dexcheck <url> DEX header validation",
+        ]
+        return "\n".join(lines), None
+
+    def _kit(self, parts: list[str]) -> tuple[str, core.Job | None]:
+        """v0.37 APK workbench: extract/read/write/encrypt/decrypt/patch/compile.
+
+        Cheap stdlib ops are synchronous (the result card is the reply). The
+        heavy apktool patch/compile ops are JOBS (KitEngine) so they ACK first
+        and the patched .apk is sent back on completion.
+        """
+        from . import kit
+        usage = ("KIT workbench (APK extract/read/write/encrypt/decrypt/patch/compile)\n"
+                 "  /kit extract <path>                          list entries\n"
+                 "  /kit read <path> <entry>                      first bytes (hex)\n"
+                 "  /kit write <path> <entry> <text>              set entry (-> new apk)\n"
+                 "  /kit delete <path> <entry>                    drop entry (-> new apk)\n"
+                 "  /kit encrypt <path> --key <k>                 XOR-encrypt apk\n"
+                 "  /kit decrypt <path> --key <k> [--enc base64|hex]\n"
+                 "  /kit patch <path> --preset <vip|ads|billing|license|trial|root|screenshot|analytics|premium|pro|all>   (JOB -> sends patched .apk)\n"
+                 "  /kit compile <decoded-dir>                    rebuild+sign (JOB)\n"
+                 "  /kit presets                                  available presets\n"
+                 "  /kit help\n"
+                 "  <path> may be a local path or an https url (downloaded first)")
+        if not parts or parts[0] in ("help", "?"):
+            return usage, None
+        if parts[0] == "presets":
+            import json as _json
+            cats = {c: [p["id"] for p in ps] for c, ps in kit.PATCH_PRESETS.items()}
+            lines = ["KIT presets (offline pattern DB — AdsRegex technique, bundled):"]
+            for preset, c in kit.PRESET_CATS.items():
+                lines.append(f"  {preset:<10} = {', '.join(c)}")
+            lines.append("\npattern ids by category:")
+            for c, ids in cats.items():
+                lines.append(f"  {c:<12} {', '.join(ids)}")
+            lines.append("\nexamples:\n"
+                         "  /kit patch moviebox.apk --preset vip\n"
+                         "  /kit patch moviebox.apk --preset all\n"
+                         "0 matches is a valid outcome (gate in native/server).")
+            return "\n".join(lines), None
+
+        sub = parts[0]
+        rest = parts[1:]
+        try:
+            if sub == "extract":
+                if len(rest) < 1:
+                    return "usage: /kit extract <path>", None
+                path = self._kit_resolve_path(rest[0])
+                inv = kit.zip_inventory(path)
+                lines = [f"📦 {os.path.basename(path)}  ({len(inv)} entries)"]
+                for e in inv[:60]:
+                    flag = "D" if e["dir"] else e["method"][0]
+                    lines.append(f"  [{flag}] {e['name']}  {e['size']:,}")
+                if len(inv) > 60:
+                    lines.append(f"  … {len(inv)-60} more")
+                lines.append("\n  /kit read <path> <entry>   to see bytes")
+                return "\n".join(lines), None
+
+            if sub == "read":
+                if len(rest) < 2:
+                    return "usage: /kit read <path> <entry>", None
+                path = self._kit_resolve_path(rest[0])
+                data = kit.zip_read(path, rest[1])
+                head = data[:256]
+                hx = head.hex()
+                asc = "".join(chr(b) if 32 <= b < 127 else "." for b in head[:64])
+                lines = [f"🔎 {rest[1]}  ({len(data):,} bytes)  sha256={hashlib.sha256(data).hexdigest()[:24]}…"]
+                lines.append(f"  head hex: {hx[:128]}{'…' if len(hx)>128 else ''}")
+                lines.append(f"  head asc: {asc}")
+                return "\n".join(lines), None
+
+            if sub in ("write", "add", "delete"):
+                if len(rest) < 3:
+                    return f"usage: /kit {sub} <path> <entry> <data>", None
+                path = self._kit_resolve_path(rest[0])
+                entry = rest[1]
+                base = os.path.basename(path)[:-4] if path.endswith(".apk") else os.path.basename(path)
+                out = os.path.join(os.path.dirname(path) or ".", f"{base}.{sub}.apk")
+                if sub == "delete":
+                    kit.zip_delete(path, out, entry)
+                else:
+                    data = " ".join(rest[2:]).encode()
+                    (kit.zip_add if sub == "add" else kit.zip_write)(path, out, entry, data)
+                return (f"{'➖' if sub=='delete' else '✏️'} {sub} {entry} -> {out}\n"
+                        f"  new size: {os.path.getsize(out):,} B\n"
+                        "  ⚠ text entry, NOT re-signed (zip-only). For a signed "
+                        "installable use /kit patch (smali) — see presets."), None
+
+            if sub in ("encrypt", "decrypt"):
+                if len(rest) < 2 or "--key" not in rest:
+                    return (f"usage: /kit {sub} <path> --key <k> "
+                            f"[--enc base64|hex]"), None
+                path = self._kit_resolve_path(rest[0])
+                key = self._arg(rest, "--key") or ""
+                if not key:
+                    return "error: --key required", None
+                enc = self._arg(rest, "--enc") or "auto"
+                base = os.path.basename(path)
+                out = os.path.join(os.path.dirname(path) or ".",
+                                   base + (".enc" if sub == "encrypt" else ".dec.apk"))
+                if sub == "encrypt":
+                    kit.encrypt_apk(path, out, key)
+                    lines = [f"🔐 encrypted -> {out}  ({os.path.getsize(out):,} B)"]
+                    lines.append(f"  key: {key[:3]}…{key[-2:]}  (XOR/SHA-256 keystream)")
+                    lines.append("  decrypt: /kit decrypt <path> --key " + key[:3] + "…" )
+                else:
+                    kit.decrypt_file(path, out, key, enc)
+                    lines = [f"🔓 decrypted -> {out}  ({os.path.getsize(out):,} B)"]
+                    lines.append(f"  magic: {open(out,'rb').read(4)!r}  "
+                                 f"(PK… = valid zip/apk)")
+                return "\n".join(lines), None
+
+            if sub == "patch":
+                if len(rest) < 1:
+                    return "usage: /kit patch <path> --preset <name>", None
+                path = self._kit_resolve_path(rest[0])
+                preset = self._arg(rest, "--preset") or "vip"
+                budget = self._budget_params(rest)
+                params = {"preset": preset, **budget}
+                if "kit" not in self.engines:
+                    return ("kit engine not available on this host — apktool/"
+                            "build-tools NOT OBSERVED (set VIBE_KIT_* env)"), None
+                job = self.jobs.submit("kit", path, "tg", "kit", params)
+                return (f"🔧 KIT patch {os.path.basename(path)} --preset {preset}\n"
+                        f"  ACK {job.id}  engine=kit  (decode→smali-regex→build→sign)\n"
+                        f"  /status {job.id}  ·  /cancel {job.id}\n"
+                        f"  patched .apk is sent back on completion."), job
+
+            if sub == "compile":
+                if len(rest) < 1:
+                    return "usage: /kit compile <decoded-apktool-dir>", None
+                proj = rest[0]
+                if not os.path.isdir(proj):
+                    return f"error: not a dir: {proj}", None
+                out = os.path.join(os.path.dirname(proj) or ".", "kit-compiled.apk")
+                budget = self._budget_params(rest)
+                params = {"preset": "compile", "out": out, **budget}
+                if "kit" not in self.engines:
+                    return ("kit engine not available on this host — apktool/"
+                            "build-tools NOT OBSERVED (set VIBE_KIT_* env)"), None
+                job = self.jobs.submit("kit", proj, "tg", "kit", params)
+                return (f"🔨 KIT compile {proj}\n  ACK {job.id}  "
+                        f"(build→align→sign)  /status {job.id}"), job
+
+            return f"unknown kit subcommand '{sub}' — /kit help", None
+        except kit.KitError as e:
+            return f"KIT: {e}", None
+        except Exception as e:  # noqa: BLE001
+            return f"KIT error [{type(e).__name__}]: {e}", None
+
+    def _kit_resolve_path(self, p: str) -> str:
+        """A local path, or an https URL to download first."""
+        from . import kit
+        if os.path.exists(p):
+            return p
+        if _is_url(p):
+            return self.download_url(p)
+        raise kit.KitError(f"no such path: {p} (local file or https url)")
 
     def _dexcheck(self, parts: list[str]) -> tuple[str, None]:
         from . import dexmapper
         if not parts:
             return "/dexcheck <path>  — validate DEX header(s)", None
-        path, err = self._artifact(parts[0])
+        path, err = self._artifact(parts[0], allow_bundle=False)
         if err:
             return err, None
         try:
@@ -785,7 +1473,7 @@ class Gateway:
         from . import dexmapper
         if not parts:
             return "/dexrepair <path>  — dry-run report (read-only; does not write)", None
-        path, err = self._artifact(parts[0])
+        path, err = self._artifact(parts[0], allow_bundle=False)
         if err:
             return err, None
         try:
@@ -856,10 +1544,9 @@ class Gateway:
             job = self.jobs.submit("investigate", path, "cli", "deepdive", params)
         except (KeyError, FileNotFoundError, RuntimeError) as e:
             return f"error: {e}", None
-        return (f"ACK {job.id}  engine=deepdive  target='{target}'\n"
+        return self._bundle_ack(f"ACK {job.id}  engine=deepdive  target='{target}'\n"
                 f"  18 stages running (bounded + cancellable) — "
                 f"/status {job.id}  /cancel {job.id}"), job
-
     def _report(self, parts: list[str]) -> tuple[str, None]:
         sha = self._arg(parts, "--sha")
         if not sha or not SHA_RE.match(sha.lower()):
@@ -887,12 +1574,56 @@ class TelegramTransport:
     """
 
     def __init__(self, gateway: Gateway, token: str,
-                 allowed_user_ids: set[str] | None = None):
+                 allowed_user_ids: set[str] | None = None,
+                 worker: bool = False):
         self.gw = gateway
         self.token = token
         self.allowed = allowed_user_ids
         self.api = f"https://api.telegram.org/bot{token}"
         self.inbound_dir = os.path.join(gateway.work_dir, "inbound")
+        # worker=True (production --serve): jobs run in a background thread so
+        # a heavy analysis (e.g. a 51s graph build) never blocks the poll loop.
+        # worker=False (CLI/tests, back-compat): the old synchronous behavior.
+        self.worker = worker
+        self._wq_thread: threading.Thread | None = None
+        if worker:
+            # production: start the worker immediately so it's ready to drain
+            # the moment a job is submitted (lazy start is a source of races)
+            self._ensure_worker()
+
+    def _ensure_worker(self) -> None:
+        """Start the single background job worker if not already running."""
+        if self._wq_thread is None or not self._wq_thread.is_alive():
+            t = threading.Thread(target=self._worker_loop,
+                                 name="vibe-job-worker", daemon=True)
+            t.start()
+            self._wq_thread = t
+
+    def _has_queued(self) -> bool:
+        return any(j.get("state") in (core.Job.QUEUED, core.Job.RUNNING)
+                   for j in self.gw.jobs.all())
+
+    def _worker_loop(self) -> None:
+        """Background worker: drain the job queue and send each completion.
+
+        Runs OFF the poll thread — this is the freeze fix. Only one worker
+        thread exists, so process_pending() (which drains the whole queue,
+        sequential) is never called concurrently. The poll thread only ever
+        SUBMITS jobs (GIL-atomic list append), so no lock is needed.
+        """
+        while True:
+            if self._has_queued():
+                ran = self.gw.process_pending()
+                for j in ran:
+                    chat = getattr(j, "_tg_chat", None)
+                    if chat is None:
+                        continue  # not a telegram-originated job
+                    try:
+                        self._finalize(chat, j)
+                    except Exception:  # noqa: BLE001 — never kill the worker
+                        pass
+            else:
+                time.sleep(0.3)
 
     def _call(self, method: str, payload: dict) -> dict:
         import json as _json
@@ -1019,12 +1750,59 @@ class TelegramTransport:
         return n
 
     def _work_and_finalize(self, chat_id: int, job: core.Job) -> None:
+        job._tg_chat = chat_id  # worker replies the completion to this chat
+        if self.worker:
+            # Background path (production): the poll loop returns immediately;
+            # the single worker thread drains the queue and sends each
+            # completion. A heavy job can no longer freeze the bot.
+            self._ensure_worker()
+            return
+        # Synchronous path (CLI/tests, back-compat): run here as before.
         for j in self.gw.process_pending():
             if j is job:
                 self._finalize(chat_id, j)
                 return
         # job still queued behind other work — pollers of later cycles pick it
         # up via /status; (v0.1: sequential queue, single operator expected)
+
+    def _send_document(self, chat_id: int, path: str) -> None:
+        """Send a local file (e.g. a patched .apk) to the chat.
+
+        Multipart form (the sendDocument contract) — stdlib only, bounded to
+        ~45 MB (Telegram's bot sendDocument limit; the 20 MB is for inbound
+        uploads, not outbound)."""
+        import urllib.parse as _up
+        limit = 45 * 1024 * 1024
+        size = os.path.getsize(path)
+        if size > limit:
+            self._reply(chat_id, f"⚠ output is {size/1e6:.1f} MB (> 45 MB "
+                                 "sendDocument cap) — saved at:\n  " + path)
+            return
+        boundary = "----vibebot" + str(int(time.time() * 1000))
+        fields = [("chat_id", str(chat_id)),
+                  ("caption", os.path.basename(path)[:1000])]
+        fname = os.path.basename(path)
+        body = bytearray()
+        for k, v in fields:
+            body += (f"--{boundary}\r\nContent-Disposition: form-data; "
+                     f"name=\"{k}\"\r\n\r\n{v}\r\n").encode()
+        body += (f"--{boundary}\r\nContent-Disposition: form-data; "
+                 f"name=\"document\"; filename=\"{_up.quote(fname)}\"\r\n"
+                 f"Content-Type: application/vnd.android.package-archive\r\n"
+                 f"\r\n").encode()
+        with open(path, "rb") as f:
+            body += f.read()
+        body += f"\r\n--{boundary}--\r\n".encode()
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{self.token}/sendDocument",
+            data=bytes(body),
+            headers={"Content-Type":
+                     f"multipart/form-data; boundary={boundary}"})
+        try:
+            with urllib.request.urlopen(req, timeout=180) as r:
+                r.read()
+        except urllib.error.URLError as e:
+            self._reply(chat_id, f"could not send document: {e}")
 
     def _finalize(self, chat_id: int, job: core.Job) -> None:
         if job.state == core.Job.FAILED:
@@ -1048,4 +1826,10 @@ class TelegramTransport:
                  + "  ".join(f"{k}={v}" for k, v in sorted(by_class.items())),
                  f"  /deepdive <target> --sha {sha16}",
                  f"  /report --sha {sha16}"]
+        # v0.37: kit workbench jobs produce a patched/compiled .apk — send it.
+        out_apk = (res.outputs or {}).get("apk")
+        if out_apk and os.path.exists(out_apk) and job.engine == "kit":
+            lines.append(f"  📤 sending patched APK ({os.path.getsize(out_apk):,} B)…")
         self._reply(chat_id, "\n".join(lines))
+        if out_apk and os.path.exists(out_apk) and job.engine == "kit":
+            self._send_document(chat_id, out_apk)
