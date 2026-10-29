@@ -229,6 +229,13 @@ def main() -> int:
         assert job is not None and job.result is not None
         reply, _ = gw.handle(f"/status {job.id}")
         check("status shows COMPLETED", "COMPLETED" in reply, reply)
+        # v0.36: an unknown/expired job id (e.g. after a bot restart) must
+        # report UNKNOWN, not raise KeyError('progress') (real TG-1793274060).
+        reply, _ = gw.handle("/status VIBE-DEADBEEF")
+        check("status unknown job id -> UNKNOWN (no KeyError)",
+              "UNKNOWN" in reply, reply)
+        reply, _ = gw.handle("/jobs")
+        check("jobs lists all without KeyError", "COMPLETED" in reply, reply)
         reply, _ = gw.handle("/sessions")
         check("sessions lists stored session", job.result.intake["sha256"][:16]
               in reply, reply)
@@ -3047,7 +3054,7 @@ def main() -> int:
         ver = getattr(vb, "__version__", None)
         check("version: __init__.__version__ is X.Y.Z",
               isinstance(ver, str) and len(ver.split(".")) == 3, str(ver))
-        check("version: matches the current build", ver == "0.35.0", str(ver))
+        check("version: matches the current build", ver == "0.36.0", str(ver))
         r, j = gateway.Gateway(td).handle("/find zzz")
         check("session: /find without --sha is refused (no most-recent fallback)",
               "no --sha" in r and "run /apk" in r and j is None, r)

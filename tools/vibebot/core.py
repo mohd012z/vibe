@@ -244,7 +244,15 @@ class JobManager:
 
     def status(self, job_id: str) -> dict:
         j = self._jobs.get(job_id)
-        return j.status() if j else {"id": job_id, "state": "UNKNOWN"}
+        # Always return the FULL status shape (v0.35.1): an unknown/expired
+        # id used to return {"id","state"} and the /status + /jobs handlers
+        # crashed with KeyError('progress') — e.g. after a bot restart, when
+        # every job id is stale.
+        return (j.status() if j else
+                {"id": job_id, "command": "?", "engine": "?", "user": "?",
+                 "artifact": "?", "state": "UNKNOWN",
+                 "progress": "unknown / expired job id (bot restart clears "
+                             "jobs — see /jobs)", "events": 0, "error": None})
 
     def cancel(self, job_id: str) -> bool:
         j = self._jobs.get(job_id)
