@@ -462,6 +462,12 @@ class Gateway:
     def _default_engines(self) -> dict[str, core.Engine]:
         m = {"apkmod": engines.ApkModEngine(os.path.join(self.work_dir, "reports")),
              "mock": engines.MockEngine()}
+        # v0.37: APK workbench (extract/read/write/encrypt/decrypt are
+        # stdlib; patch/compile use the apktool/build-tools toolchain and
+        # degrade to an honest KitError when those are absent).
+        from . import kit as _kit
+        m["kit"] = engines.KitEngine(os.path.join(self.work_dir, "kit-out"),
+                                     toolchain=_kit.Toolchain())
         # stdlib-only engines (no androguard needed): native-harness validation
         try:
             from . import harness
@@ -505,7 +511,7 @@ class Gateway:
                 "/analyze", "/dex", "/xmatch",
                 "/native", "/harness",
                 "/kmeta",
-                "/get",
+                "/get", "/kit",
                 "/smali", "/base", "/hash", "/dexcheck", "/dexrepair", "/status",
                 "/jobs", "/sessions", "/deepdive", "/investigate", "/report",
                 "/cancel", "/help", "/start", "/commands", "/oracle",
@@ -543,6 +549,7 @@ class Gateway:
             rest = parts[1:]
             model = None
             sha = None
+            source = None
             q_parts: list[str] = []
             i = 0
             while i < len(rest):
@@ -551,15 +558,17 @@ class Gateway:
                     model = rest[i + 1]; i += 2; continue
                 if p == "--sha" and i + 1 < len(rest):
                     sha = rest[i + 1]; i += 2; continue
+                if p == "--source" and i + 1 < len(rest):
+                    source = rest[i + 1].lower(); i += 2; continue
                 q_parts.append(p)
                 i += 1
             question = " ".join(q_parts).strip()
             if not question:
-                return ("/ask <question> [--sha <sha256[:16]>] [--model <id>]\n"
-                        "  LLM assistant (free-LLM router). With --sha it is "
-                        "grounded in that session's\n"
-                        "  findings (claims/overview/falsifications); without it "
-                        "it is a plain chat question.\n"
+                return ("/ask <question> [--sha <sha256[:16]>] [--model <id>] "
+                        "[--source <name>]\n"
+                        "  LLM assistant (free-LLM router). --source forces ONE "
+                        "provider (independent, no fallback chain):\n"
+                        "  minda|openrouter|groq|cerebras|google|mistral|cfw\n"
                         "  /models shows the router state (keys masked)"), None
             context = ""
             grounding = None
@@ -579,8 +588,21 @@ class Gateway:
                             f"(/sessions lists known ones) — nothing to ground in"), None
                 grounding = sha_full[:16]
                 context = vllm.session_context(sess)
-            res = vllm.ROUTER.ask(question, context=context or None, model=model)
+            # --source: restrict to ONE provider (independent, no fallback).
+            # --source not set = normal priority + 429-decay chain.
+            source_cands = None
+            if source:
+                all_cands, _warn = vllm.load_candidates()
+                source_cands = [c for c in all_cands if c["name"] == source]
+                if not source_cands:
+                    known = ", ".join(c["name"] for c in all_cands) or "(none)"
+                    return (f"/ask: unknown --source '{source}'. Available: "
+                            f"{known}\n  /models shows keys (masked)"), None
+            res = vllm.ROUTER.ask(question, context=context or None, model=model,
+                                  candidates=source_cands)
             head = f"ASK  ({'grounded sha ' + grounding if grounding else 'chat'})"
+            if source:
+                head += f"  source={source} (independent, no fallback)"
             if res["ok"]:
                 hop = res["hops"][-1]
                 head += (f"  via {res['candidate']} / {res['model']} "
@@ -657,6 +679,9 @@ class Gateway:
             return self._dexrepair(parts[1:])
         if cmd == "/get":
             return self._get(parts[1:])
+
+        if cmd == "/kit":
+            return self._kit(parts[1:])
 
         if cmd == "/jobs":
             lines = [f"{j['id']}  {j['state']:<10} {j['command']:<12} "
@@ -1271,6 +1296,161 @@ class Gateway:
         ]
         return "\n".join(lines), None
 
+    def _kit(self, parts: list[str]) -> tuple[str, core.Job | None]:
+        """v0.37 APK workbench: extract/read/write/encrypt/decrypt/patch/compile.
+
+        Cheap stdlib ops are synchronous (the result card is the reply). The
+        heavy apktool patch/compile ops are JOBS (KitEngine) so they ACK first
+        and the patched .apk is sent back on completion.
+        """
+        from . import kit
+        usage = ("KIT workbench (APK extract/read/write/encrypt/decrypt/patch/compile)\n"
+                 "  /kit extract <path>                          list entries\n"
+                 "  /kit read <path> <entry>                      first bytes (hex)\n"
+                 "  /kit write <path> <entry> <text>              set entry (-> new apk)\n"
+                 "  /kit delete <path> <entry>                    drop entry (-> new apk)\n"
+                 "  /kit encrypt <path> --key <k>                 XOR-encrypt apk\n"
+                 "  /kit decrypt <path> --key <k> [--enc base64|hex]\n"
+                 "  /kit patch <path> --preset <vip|ads|billing|license|trial|root|screenshot|analytics|premium|pro|all>   (JOB -> sends patched .apk)\n"
+                 "  /kit compile <decoded-dir>                    rebuild+sign (JOB)\n"
+                 "  /kit presets                                  available presets\n"
+                 "  /kit help\n"
+                 "  <path> may be a local path or an https url (downloaded first)")
+        if not parts or parts[0] in ("help", "?"):
+            return usage, None
+        if parts[0] == "presets":
+            import json as _json
+            cats = {c: [p["id"] for p in ps] for c, ps in kit.PATCH_PRESETS.items()}
+            lines = ["KIT presets (offline pattern DB — AdsRegex technique, bundled):"]
+            for preset, c in kit.PRESET_CATS.items():
+                lines.append(f"  {preset:<10} = {', '.join(c)}")
+            lines.append("\npattern ids by category:")
+            for c, ids in cats.items():
+                lines.append(f"  {c:<12} {', '.join(ids)}")
+            lines.append("\nexamples:\n"
+                         "  /kit patch moviebox.apk --preset vip\n"
+                         "  /kit patch moviebox.apk --preset all\n"
+                         "0 matches is a valid outcome (gate in native/server).")
+            return "\n".join(lines), None
+
+        sub = parts[0]
+        rest = parts[1:]
+        try:
+            if sub == "extract":
+                if len(rest) < 1:
+                    return "usage: /kit extract <path>", None
+                path = self._kit_resolve_path(rest[0])
+                inv = kit.zip_inventory(path)
+                lines = [f"📦 {os.path.basename(path)}  ({len(inv)} entries)"]
+                for e in inv[:60]:
+                    flag = "D" if e["dir"] else e["method"][0]
+                    lines.append(f"  [{flag}] {e['name']}  {e['size']:,}")
+                if len(inv) > 60:
+                    lines.append(f"  … {len(inv)-60} more")
+                lines.append("\n  /kit read <path> <entry>   to see bytes")
+                return "\n".join(lines), None
+
+            if sub == "read":
+                if len(rest) < 2:
+                    return "usage: /kit read <path> <entry>", None
+                path = self._kit_resolve_path(rest[0])
+                data = kit.zip_read(path, rest[1])
+                head = data[:256]
+                hx = head.hex()
+                asc = "".join(chr(b) if 32 <= b < 127 else "." for b in head[:64])
+                lines = [f"🔎 {rest[1]}  ({len(data):,} bytes)  sha256={hashlib.sha256(data).hexdigest()[:24]}…"]
+                lines.append(f"  head hex: {hx[:128]}{'…' if len(hx)>128 else ''}")
+                lines.append(f"  head asc: {asc}")
+                return "\n".join(lines), None
+
+            if sub in ("write", "add", "delete"):
+                if len(rest) < 3:
+                    return f"usage: /kit {sub} <path> <entry> <data>", None
+                path = self._kit_resolve_path(rest[0])
+                entry = rest[1]
+                base = os.path.basename(path)[:-4] if path.endswith(".apk") else os.path.basename(path)
+                out = os.path.join(os.path.dirname(path) or ".", f"{base}.{sub}.apk")
+                if sub == "delete":
+                    kit.zip_delete(path, out, entry)
+                else:
+                    data = " ".join(rest[2:]).encode()
+                    (kit.zip_add if sub == "add" else kit.zip_write)(path, out, entry, data)
+                return (f"{'➖' if sub=='delete' else '✏️'} {sub} {entry} -> {out}\n"
+                        f"  new size: {os.path.getsize(out):,} B\n"
+                        "  ⚠ text entry, NOT re-signed (zip-only). For a signed "
+                        "installable use /kit patch (smali) — see presets."), None
+
+            if sub in ("encrypt", "decrypt"):
+                if len(rest) < 2 or "--key" not in rest:
+                    return (f"usage: /kit {sub} <path> --key <k> "
+                            f"[--enc base64|hex]"), None
+                path = self._kit_resolve_path(rest[0])
+                key = self._arg(rest, "--key") or ""
+                if not key:
+                    return "error: --key required", None
+                enc = self._arg(rest, "--enc") or "auto"
+                base = os.path.basename(path)
+                out = os.path.join(os.path.dirname(path) or ".",
+                                   base + (".enc" if sub == "encrypt" else ".dec.apk"))
+                if sub == "encrypt":
+                    kit.encrypt_apk(path, out, key)
+                    lines = [f"🔐 encrypted -> {out}  ({os.path.getsize(out):,} B)"]
+                    lines.append(f"  key: {key[:3]}…{key[-2:]}  (XOR/SHA-256 keystream)")
+                    lines.append("  decrypt: /kit decrypt <path> --key " + key[:3] + "…" )
+                else:
+                    kit.decrypt_file(path, out, key, enc)
+                    lines = [f"🔓 decrypted -> {out}  ({os.path.getsize(out):,} B)"]
+                    lines.append(f"  magic: {open(out,'rb').read(4)!r}  "
+                                 f"(PK… = valid zip/apk)")
+                return "\n".join(lines), None
+
+            if sub == "patch":
+                if len(rest) < 1:
+                    return "usage: /kit patch <path> --preset <name>", None
+                path = self._kit_resolve_path(rest[0])
+                preset = self._arg(rest, "--preset") or "vip"
+                budget = self._budget_params(rest)
+                params = {"preset": preset, **budget}
+                if "kit" not in self.engines:
+                    return ("kit engine not available on this host — apktool/"
+                            "build-tools NOT OBSERVED (set VIBE_KIT_* env)"), None
+                job = self.jobs.submit("kit", path, "tg", "kit", params)
+                return (f"🔧 KIT patch {os.path.basename(path)} --preset {preset}\n"
+                        f"  ACK {job.id}  engine=kit  (decode→smali-regex→build→sign)\n"
+                        f"  /status {job.id}  ·  /cancel {job.id}\n"
+                        f"  patched .apk is sent back on completion."), job
+
+            if sub == "compile":
+                if len(rest) < 1:
+                    return "usage: /kit compile <decoded-apktool-dir>", None
+                proj = rest[0]
+                if not os.path.isdir(proj):
+                    return f"error: not a dir: {proj}", None
+                out = os.path.join(os.path.dirname(proj) or ".", "kit-compiled.apk")
+                budget = self._budget_params(rest)
+                params = {"preset": "compile", "out": out, **budget}
+                if "kit" not in self.engines:
+                    return ("kit engine not available on this host — apktool/"
+                            "build-tools NOT OBSERVED (set VIBE_KIT_* env)"), None
+                job = self.jobs.submit("kit", proj, "tg", "kit", params)
+                return (f"🔨 KIT compile {proj}\n  ACK {job.id}  "
+                        f"(build→align→sign)  /status {job.id}"), job
+
+            return f"unknown kit subcommand '{sub}' — /kit help", None
+        except kit.KitError as e:
+            return f"KIT: {e}", None
+        except Exception as e:  # noqa: BLE001
+            return f"KIT error [{type(e).__name__}]: {e}", None
+
+    def _kit_resolve_path(self, p: str) -> str:
+        """A local path, or an https URL to download first."""
+        from . import kit
+        if os.path.exists(p):
+            return p
+        if _is_url(p):
+            return self.download_url(p)
+        raise kit.KitError(f"no such path: {p} (local file or https url)")
+
     def _dexcheck(self, parts: list[str]) -> tuple[str, None]:
         from . import dexmapper
         if not parts:
@@ -1585,6 +1765,45 @@ class TelegramTransport:
         # job still queued behind other work — pollers of later cycles pick it
         # up via /status; (v0.1: sequential queue, single operator expected)
 
+    def _send_document(self, chat_id: int, path: str) -> None:
+        """Send a local file (e.g. a patched .apk) to the chat.
+
+        Multipart form (the sendDocument contract) — stdlib only, bounded to
+        ~45 MB (Telegram's bot sendDocument limit; the 20 MB is for inbound
+        uploads, not outbound)."""
+        import urllib.parse as _up
+        limit = 45 * 1024 * 1024
+        size = os.path.getsize(path)
+        if size > limit:
+            self._reply(chat_id, f"⚠ output is {size/1e6:.1f} MB (> 45 MB "
+                                 "sendDocument cap) — saved at:\n  " + path)
+            return
+        boundary = "----vibebot" + str(int(time.time() * 1000))
+        fields = [("chat_id", str(chat_id)),
+                  ("caption", os.path.basename(path)[:1000])]
+        fname = os.path.basename(path)
+        body = bytearray()
+        for k, v in fields:
+            body += (f"--{boundary}\r\nContent-Disposition: form-data; "
+                     f"name=\"{k}\"\r\n\r\n{v}\r\n").encode()
+        body += (f"--{boundary}\r\nContent-Disposition: form-data; "
+                 f"name=\"document\"; filename=\"{_up.quote(fname)}\"\r\n"
+                 f"Content-Type: application/vnd.android.package-archive\r\n"
+                 f"\r\n").encode()
+        with open(path, "rb") as f:
+            body += f.read()
+        body += f"\r\n--{boundary}--\r\n".encode()
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{self.token}/sendDocument",
+            data=bytes(body),
+            headers={"Content-Type":
+                     f"multipart/form-data; boundary={boundary}"})
+        try:
+            with urllib.request.urlopen(req, timeout=180) as r:
+                r.read()
+        except urllib.error.URLError as e:
+            self._reply(chat_id, f"could not send document: {e}")
+
     def _finalize(self, chat_id: int, job: core.Job) -> None:
         if job.state == core.Job.FAILED:
             self._reply(chat_id, f"{job.id} FAILED\n  {job.error}")
@@ -1607,4 +1826,10 @@ class TelegramTransport:
                  + "  ".join(f"{k}={v}" for k, v in sorted(by_class.items())),
                  f"  /deepdive <target> --sha {sha16}",
                  f"  /report --sha {sha16}"]
+        # v0.37: kit workbench jobs produce a patched/compiled .apk — send it.
+        out_apk = (res.outputs or {}).get("apk")
+        if out_apk and os.path.exists(out_apk) and job.engine == "kit":
+            lines.append(f"  📤 sending patched APK ({os.path.getsize(out_apk):,} B)…")
         self._reply(chat_id, "\n".join(lines))
+        if out_apk and os.path.exists(out_apk) and job.engine == "kit":
+            self._send_document(chat_id, out_apk)

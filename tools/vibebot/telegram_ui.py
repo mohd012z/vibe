@@ -80,10 +80,6 @@ CATEGORIES: dict[str, tuple[str, tuple[Button, ...]]] = {
         Button("📋 Jobs", "cmd:jobs"),
         Button("💾 Sessions", "cmd:sessions"),
     )),
-    "ai": ("🤖 AI", (
-        Button("💬 Ask", "action:ask"),
-        Button("🧠 Models", "cmd:models"),
-    )),
     "tools": ("🛠 Tools", (
         Button("📐 Base", "cmd:base"),
         Button("#️⃣ Hash", "cmd:hash"),
@@ -95,6 +91,17 @@ CATEGORIES: dict[str, tuple[str, tuple[Button, ...]]] = {
         Button("🧪 Harness", "cmd:harness"),
         Button("📖 Help", "cmd:help"),
         Button("⌨ Commands", "cmd:commands"),
+    )),
+    # v0.37: one-tap APK workbench (AdsRegex technique, offline pattern DB).
+    # Each button submits a kit JOB on the current artifact and sends back the
+    # patched .apk. Locked (🔒) until an artifact is on file. 2-wide footer.
+    "kit": ("🔧 Kit", (
+        Button("👑 Make VIP", "kit:vip", True),
+        Button("🧹 Remove Ads", "kit:ads", True),
+    )),
+    "ai": ("🤖 AI", (
+        Button("💬 Ask", "action:ask"),
+        Button("🧠 Models", "cmd:models"),
     )),
     # ---- back-compat categories (not on the flat home) --------------------
     # Old home tiles pointed at these via nav:<key>; a stale tap from an
@@ -137,12 +144,13 @@ CATEGORIES: dict[str, tuple[str, tuple[Button, ...]]] = {
 
 # The flat home, in display order. HOME is the only two-level surface:
 # header row (section landmark, tappable to drill down) + action buttons.
-# v0.35: every section tiles to a full 4-wide row EXCEPT the final AI section,
-# which is a deliberate 2-wide landmark (Ask + Models) pinned at the bottom —
-# the only intentionally-short row, so it reads as a footer, not misalignment.
+# v0.35: every section tiles to a full 4-wide row; v0.37 adds a 🔧 Kit
+# section (Make VIP / Remove Ads) before AI — kit+ai are the two 2-wide
+# footer landmarks (the only intentionally-short rows, reading as actions,
+# not misalignment).
 HOME_SECTIONS: tuple[str, ...] = (
     "links", "analyze", "investigate", "evidence", "runtime", "tools",
-    "system", "ai",
+    "system", "kit", "ai",
 )
 
 

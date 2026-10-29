@@ -12,7 +12,7 @@ from vibebot import telegram_ui
 # every action row fills a clean 4-wide line (Anam 2026-10-29 "add UI with
 # button, rearrange + realign ALL buttons").
 HOME_ORDER = ("links", "analyze", "investigate", "evidence", "runtime",
-              "tools", "system", "ai")
+              "tools", "system", "kit", "ai")
 
 
 def _all_callbacks(kb):
@@ -59,8 +59,8 @@ def test_home_rows_are_compact():
     for row in kb["inline_keyboard"]:
         assert 1 <= len(row) <= 4, row
     # Bounded total row count (the flat home is one screen, not a wall).
-    # v0.33: +1 section row (🔗 Links: Get Link + Upload Page, 2 rows) -> 19.
-    assert len(kb["inline_keyboard"]) <= 19
+    # v0.37: +2 rows (🔧 Kit: Make VIP + Remove Ads) -> 21.
+    assert len(kb["inline_keyboard"]) <= 21
 
 
 def test_artifact_actions_lock_on_home_without_artifact():

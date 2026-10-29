@@ -127,6 +127,29 @@ class CategoryTelegramTransport(TelegramTransport):
                        "upload cap).",
                        telegram_ui.home_keyboard(has_artifact))
             return
+        if data.startswith("kit:"):
+            # v0.37: one-tap Make VIP / Remove Ads — patch the CURRENT artifact
+            # with the offline pattern DB and send back the rebuilt .apk.
+            preset = data.split(":", 1)[1]
+            art = self._artifact_for(user_id)
+            if not art or not art.get("path"):
+                self._edit(chat_id, message_id,
+                           "📦 Upload an APK/DEX first, then tap "
+                           "Make VIP / Remove Ads.\n"
+                           "(or /kit patch <path-or-url> --preset "
+                           + preset + ")",
+                           telegram_ui.home_keyboard(False))
+                return
+            preset = "vip" if preset == "vip" else "ads"
+            reply, job = self.gw.handle(
+                f"/kit patch {art['path']} --preset {preset}",
+                user=f"tg:{user_id[:6]}")
+            self._edit(chat_id, message_id,
+                       f"🔧 KIT {preset.upper()} on {art['name']}\n" + reply,
+                       telegram_ui.home_keyboard(has_artifact))
+            if job is not None:
+                self._work_and_finalize(chat_id, job)
+            return
         if data.startswith("cmd:"):
             name = data.split(":", 1)[1]
             command = self._command_for_callback(name, user_id)
