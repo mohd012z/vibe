@@ -8,9 +8,11 @@ if TOOLS not in sys.path:
 
 from vibebot import telegram_ui
 
-# v0.32 compact home: flat sections in display order.
-HOME_ORDER = ("links", "analyze", "investigate", "explore", "evidence",
-              "runtime", "help")
+# v0.35 aligned home: full surface on one grid, sections sized to 4/8 so
+# every action row fills a clean 4-wide line (Anam 2026-10-29 "add UI with
+# button, rearrange + realign ALL buttons").
+HOME_ORDER = ("links", "analyze", "investigate", "evidence", "runtime",
+              "tools", "system", "ai")
 
 
 def _all_callbacks(kb):
@@ -87,7 +89,13 @@ def test_category_keyboard_locks_and_back_nav():
     kb = telegram_ui.category_keyboard("analyze", has_artifact=False)
     buttons = [b for row in kb["inline_keyboard"] for b in row]
     assert any(b["callback_data"] == "need:artifact" for b in buttons)
-    assert any(b["callback_data"] == "cmd:status" for b in buttons)
+    # v0.35: Status moved to the Links section, so the (fully artifact-locked)
+    # Analyze drill-down no longer carries it; the Runtime drill-down is the
+    # reference page that still has an unlocked (non-artifact) button.
+    assert "cmd:status" not in [b["callback_data"] for b in buttons]
+    kb2 = telegram_ui.category_keyboard("runtime", has_artifact=False)
+    assert any(b["callback_data"] == "cmd:sessions"
+               for row in kb2["inline_keyboard"] for b in row)
     # Drill-down page always ends with Back/Home.
     last = kb["inline_keyboard"][-1]
     assert all(b["callback_data"] == "nav:home" for b in last)

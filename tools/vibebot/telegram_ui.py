@@ -36,17 +36,23 @@ class Button:
 
 CATEGORIES: dict[str, tuple[str, tuple[Button, ...]]] = {
     # ---- flat-home sections (order = HOME_SECTIONS) -----------------------
+    # v0.35 (Anam 2026-10-29 "add UI + rearrange/realign ALL buttons"):
+    # the FULL command surface sits on one aligned grid. Every section sizes
+    # to a clean multiple of 4 (4 or 8) so action rows tile edge-to-edge —
+    # the old ragged trailing singletons (a lone [Report] / [Cancel] row)
+    # are gone, and the v0.34 AI buttons (Ask/Models) finally have a home.
     "links": ("🔗 Links", (
         Button("📥 Get Link", "action:getlink"),
         Button("🔗 Upload Page", "",
                url="https://mohd012z.github.io/vibe/upload/"),
+        Button("🧲 Get URL", "cmd:get"),
+        Button("📊 Status", "cmd:status"),
     )),
-    "analyze": ("🔍 Analyze", (
+    "analyze": ("🚀 Analyze", (
         Button("🚀 Analyze", "cmd:analyze", True),
         Button("📱 APK", "cmd:apk", True),
         Button("🧬 DEX", "cmd:dex", True),
         Button("⚙ Native", "cmd:native", True),
-        Button("📊 Status", "cmd:status"),
     )),
     "investigate": ("🧠 Investigate", (
         Button("🧠 Investigate", "cmd:investigate", True),
@@ -55,12 +61,8 @@ CATEGORIES: dict[str, tuple[str, tuple[Button, ...]]] = {
         Button("⬆ Callers", "cmd:callers", True),
         Button("⬇ Callees", "cmd:callees", True),
         Button("🔄 XMatch", "cmd:xmatch", True),
-    )),
-    "explore": ("🗺 Explore", (
         Button("🌳 Map", "cmd:map", True),
         Button("☕ Kotlin", "cmd:kmeta", True),
-        Button("🧪 Harness", "cmd:harness"),
-        Button("📜 Smali", "cmd:smali"),
     )),
     "evidence": ("🔬 Evidence", (
         Button("📋 Claims", "cmd:claims", True),
@@ -68,21 +70,41 @@ CATEGORIES: dict[str, tuple[str, tuple[Button, ...]]] = {
         Button("⚔ Falsify", "cmd:falsify", True),
         Button("🧠 Deep Dive", "cmd:deepdive", True),
         Button("📄 Report", "cmd:report", True),
+        Button("🗺 Plan", "cmd:plan"),
+        Button("🔮 Oracle", "cmd:oracle"),
+        Button("📜 Smali", "cmd:smali"),
     )),
     "runtime": ("⚙ Runtime", (
         Button("❤️ Health", "cmd:health"),
         Button("🧰 Capabilities", "cmd:capabilities"),
         Button("📋 Jobs", "cmd:jobs"),
         Button("💾 Sessions", "cmd:sessions"),
-        Button("❌ Cancel", "cmd:cancel"),
     )),
-    "help": ("❓ Help", (
+    "ai": ("🤖 AI", (
+        Button("💬 Ask", "action:ask"),
+        Button("🧠 Models", "cmd:models"),
+    )),
+    "tools": ("🛠 Tools", (
+        Button("📐 Base", "cmd:base"),
+        Button("#️⃣ Hash", "cmd:hash"),
+        Button("🧾 DexCheck", "cmd:dexcheck"),
+        Button("🩹 DexRepair", "cmd:dexrepair"),
+    )),
+    "system": ("🧭 System", (
+        Button("❌ Cancel", "cmd:cancel"),
+        Button("🧪 Harness", "cmd:harness"),
         Button("📖 Help", "cmd:help"),
         Button("⌨ Commands", "cmd:commands"),
     )),
     # ---- back-compat categories (not on the flat home) --------------------
     # Old home tiles pointed at these via nav:<key>; a stale tap from an
     # earlier message must still land on a useful page, never on Help.
+    "explore": ("🗺 Explore", (
+        Button("🌳 Map", "cmd:map", True),
+        Button("☕ Kotlin", "cmd:kmeta", True),
+        Button("🧪 Harness", "cmd:harness"),
+        Button("📜 Smali", "cmd:smali"),
+    )),
     "artifact": ("📦 Artifact", (
         Button("📱 APK", "cmd:apk", True),
         Button("🚀 Analyze", "cmd:analyze", True),
@@ -105,15 +127,22 @@ CATEGORIES: dict[str, tuple[str, tuple[Button, ...]]] = {
         Button("💬 Ask", "action:ask"),
         Button("🧠 Models", "cmd:models"),
     )),
+    # Fallback target for unknown/stale nav:<key> (category_keyboard) — must
+    # stay resolvable so a mystery tap lands on Help, never a KeyError.
+    "help": ("❓ Help", (
+        Button("📖 Help", "cmd:help"),
+        Button("⌨ Commands", "cmd:commands"),
+    )),
 }
 
 # The flat home, in display order. HOME is the only two-level surface:
 # header row (section landmark, tappable to drill down) + action buttons.
-# "ask" is intentionally NOT on the home — action:ask is a placeholder
-# ("Action not implemented yet"); it stays reachable via the back-compat
-# nav:ask page, and rejoining the home needs a real handler first.
+# v0.35: every section tiles to a full 4-wide row EXCEPT the final AI section,
+# which is a deliberate 2-wide landmark (Ask + Models) pinned at the bottom —
+# the only intentionally-short row, so it reads as a footer, not misalignment.
 HOME_SECTIONS: tuple[str, ...] = (
-    "links", "analyze", "investigate", "explore", "evidence", "runtime", "help",
+    "links", "analyze", "investigate", "evidence", "runtime", "tools",
+    "system", "ai",
 )
 
 

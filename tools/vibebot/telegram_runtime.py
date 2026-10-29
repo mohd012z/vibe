@@ -67,6 +67,10 @@ class CategoryTelegramTransport(TelegramTransport):
         if name in ("status", "jobs", "sessions", "capabilities", "help", "commands",
                     "models"):
             return f"/{name}"
+        # These take usage/target args; with no args the gateway returns honest
+        # usage. Surfaced as real (non-artifact) home buttons in v0.35.
+        if name in ("get", "plan", "oracle", "base", "hash", "dexcheck", "dexrepair"):
+            return f"/{name}"
         # These require a target/claim/session selection. Give usage through Gateway.
         if name in ("find", "xref", "callers", "callees", "why", "deepdive", "report",
                     "claims", "falsify", "smali", "harness", "cancel", "xmatch"):
@@ -121,17 +125,6 @@ class CategoryTelegramTransport(TelegramTransport):
                        "works) — I'll download it and report name/size/sha256.\n"
                        "Then /apk <link> to analyze it (bypasses the 20 MB "
                        "upload cap).",
-                       telegram_ui.home_keyboard(has_artifact))
-            return
-        if data == "action:ask":
-            self.ask_pending.add(user_id)
-            art = self._artifact_for(user_id)
-            note = (f"  (will ground in {art['name']})" if art else "")
-            self._edit(chat_id, message_id,
-                       "💬 Ask mode: type your question next (Enter). "
-                       f"{note}\n"
-                       "  plain text -> /ask · /ask <q> direct · "
-                       "/models router · /start cancels ask mode",
                        telegram_ui.home_keyboard(has_artifact))
             return
         if data.startswith("cmd:"):
