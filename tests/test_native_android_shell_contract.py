@@ -60,6 +60,14 @@ def test_emulator_smoke_runs_in_one_persistent_shell():
     assert "set -euo pipefail" in body
     assert "cd android-app" in body
     assert 'adb install -r "$APK"' in body
-    assert "adb shell am start-foreground-service" in body
-    assert "adb shell am startservice" in body
+    # LiveTestService is intentionally android:exported="false". Starting it
+    # from the ADB shell is rejected by Android; use the app's own UI instead.
+    assert "adb shell am start-foreground-service" not in body
+    assert not re.search(r"^adb\\s+shell\\s+am\\s+startservice\\b", body, re.MULTILINE)
+    assert "adb shell input tap" in body
+    activity = (APP / "app/src/main/java/com/vibe/app/MainActivity.kt").read_text()
+    manifest = (APP / "app/src/main/AndroidManifest.xml").read_text()
+    assert 'android:exported="false"' in manifest
+    assert "startLiveService()" in activity
+    assert "ContextCompat.startForegroundService(this, intent)" in activity
     assert subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True).returncode == 0
