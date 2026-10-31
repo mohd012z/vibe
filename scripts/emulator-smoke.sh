@@ -16,10 +16,26 @@ sleep 2
 adb shell pidof -s com.vibe.app > /tmp/vibe-pid.txt
 cat /tmp/vibe-pid.txt
 adb shell dumpsys activity activities | grep -F 'com.vibe.app/.MainActivity'
-# The service is private: invoke the visible app-owned Live Test button.
-# Avoid ADB shell am startservice against android:exported="false".
-adb shell input tap 150 350
-sleep 2
+# The service is private: start it using an exact visible, app-owned UI
+# button. Hard-coded pixels tapped the wrong control on a 420-dpi emulator.
+# Never use ADB am startservice against android:exported="false".
+BUTTON_FOUND=0
+for attempt in 1 2 3; do
+  adb shell uiautomator dump /sdcard/vibe-window.xml >/dev/null 2>&1 || true
+  adb exec-out cat /sdcard/vibe-window.xml > /tmp/vibe-window.xml || true
+  if python3 ../scripts/locate_live_test_button.py /tmp/vibe-window.xml > /tmp/vibe-button-coordinates.txt; then
+    BUTTON_FOUND=1
+    break
+  fi
+  sleep 2
+done
+if [ "$BUTTON_FOUND" -ne 1 ]; then
+  echo "Live Test button was not visible; refusing to tap blindly." >&2
+  exit 1
+fi
+read -r BUTTON_X BUTTON_Y < /tmp/vibe-button-coordinates.txt
+adb shell input tap "$BUTTON_X" "$BUTTON_Y"
+sleep 3
 adb shell dumpsys activity services com.vibe.app > /tmp/vibe-services.txt
 cat /tmp/vibe-services.txt
 grep -F 'LiveTestService' /tmp/vibe-services.txt
