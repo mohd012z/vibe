@@ -92,7 +92,7 @@ class MainActivity : Activity() {
                 }
                 model = file
                 status.text = "Model imported • Loading…"
-                withContext(Dispatchers.IO) { ai.close(); ai.load(file.absolutePath) }
+                ai.load(file.absolutePath)
                 status.text = "Local AI ready"
             } catch (e: Exception) {
                 status.text = "Model unavailable: ${e.message}"
