@@ -75,4 +75,43 @@ class LiveTestServiceLifecycleTest {
             scenario.close()
         }
     }
+    @Test
+    fun repeatedStartStopAndActivityRecreationLeaveNoNotification() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val notifications = context.getSystemService(NotificationManager::class.java)
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        try {
+            repeat(3) { cycle ->
+                scenario.onActivity { activity ->
+                    val button = findLiveTestButton(activity.window.decorView)
+                    assertNotNull("Cycle $cycle: Live Test button missing", button)
+                    assertTrue("Cycle $cycle: button disabled", button!!.isEnabled)
+                    assertTrue("Cycle $cycle: button not clickable", button.isClickable)
+                    button.performClick()
+                }
+                waitFor("Cycle $cycle: foreground notification missing") {
+                    notifications.activeNotifications.any { it.id == 7001 }
+                }
+                val active = notifications.activeNotifications.single { it.id == 7001 }
+                assertEquals("vibe_live_test", active.notification.channelId)
+                assertTrue(
+                    "Cycle $cycle: foreground flag missing",
+                    active.notification.flags and Notification.FLAG_FOREGROUND_SERVICE != 0
+                )
+                val stopActions = active.notification.actions.orEmpty().filter {
+                    it.title.toString().trim().equals("Stop", ignoreCase = true)
+                }
+                assertEquals("Cycle $cycle: exactly one Stop required", 1, stopActions.size)
+                assertNotNull("Cycle $cycle: Stop intent missing", stopActions.single().actionIntent)
+                stopActions.single().actionIntent.send()
+                waitFor("Cycle $cycle: notification leaked after Stop") {
+                    notifications.activeNotifications.none { it.id == 7001 }
+                }
+                if (cycle == 0) scenario.recreate()
+            }
+        } finally {
+            scenario.close()
+        }
+    }
+
 }
