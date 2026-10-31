@@ -47,3 +47,19 @@ def test_apk_file_mode_uses_android_document_picker():
     source = (APP / "app/src/main/java/com/vibe/app/MainActivity.kt").read_text()
     assert "OpenDocument" in source
     assert "application/vnd.android.package-archive" in source
+
+def test_emulator_smoke_runs_in_one_persistent_shell():
+    """The emulator runner executes YAML script lines in separate shells."""
+    import subprocess
+
+    workflow = (ROOT / ".github/workflows/android-apk.yml").read_text()
+    script = ROOT / "scripts/emulator-smoke.sh"
+    assert "script: bash scripts/emulator-smoke.sh" in workflow
+    assert script.is_file()
+    body = script.read_text()
+    assert "set -euo pipefail" in body
+    assert "cd android-app" in body
+    assert 'adb install -r "$APK"' in body
+    assert "adb shell am start-foreground-service" in body
+    assert "adb shell am startservice" in body
+    assert subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True).returncode == 0
