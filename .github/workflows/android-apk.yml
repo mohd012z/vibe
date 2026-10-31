@@ -115,5 +115,9 @@ jobs:
             /tmp/vibe-services.txt
             /tmp/vibe-services-after-stop.txt
             /tmp/vibe-crash.txt
+            /tmp/vibe-window.xml
+            /tmp/vibe-button-coordinates.txt
+            /tmp/vibe-ui-diagnostics.txt
+            /tmp/vibe-screen.png
           if-no-files-found: ignore
           retention-days: 7
