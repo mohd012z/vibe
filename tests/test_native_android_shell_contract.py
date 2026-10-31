@@ -17,6 +17,9 @@ def test_manifest_declares_launcher_and_foreground_live_test_service():
     assert "android.intent.category.LAUNCHER" in manifest
     assert ".LiveTestService" in manifest
     assert "android.permission.FOREGROUND_SERVICE" in manifest
+    assert "android.permission.FOREGROUND_SERVICE_SPECIAL_USE" in manifest
+    assert 'android:foregroundServiceType="specialUse"' in manifest
+    assert 'android:exported="false"' in manifest
     assert "android.permission.SYSTEM_ALERT_WINDOW" not in manifest
 
 
