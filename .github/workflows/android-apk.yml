@@ -5,6 +5,11 @@ on:
     paths:
       - 'android-app/**'
       - '.github/workflows/android-apk.yml'
+      - 'scripts/emulator-smoke.sh'
+      - 'scripts/locate_live_test_button.py'
+      - 'scripts/recover_quickstep_anr.py'
+      - 'scripts/test_recover_quickstep_anr.py'
+      - 'tests/test_emulator_live_button_selector.py'
   workflow_dispatch:
 
 permissions:
