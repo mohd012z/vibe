@@ -56,3 +56,20 @@ if grep -E 'FATAL EXCEPTION|Process: com\.vibe\.app' /tmp/vibe-crash.txt; then
   echo 'Vibe crash detected' >&2
   exit 1
 fi
+
+# Exercise the app-owned notification's Stop PendingIntent using Android
+# instrumentation, rather than bypassing the private service with ADB.
+adb shell pm grant com.vibe.app android.permission.POST_NOTIFICATIONS
+timeout --signal=TERM --kill-after=20s 6m \
+  gradle --no-daemon --console=plain :app:connectedDebugAndroidTest
+adb shell dumpsys activity services com.vibe.app > /tmp/vibe-services-after-stop.txt
+cat /tmp/vibe-services-after-stop.txt
+if grep -E 'ServiceRecord\\{[^}]*com\\.vibe\\.app/\\.LiveTestService' /tmp/vibe-services-after-stop.txt; then
+  echo 'LiveTestService remained active after notification Stop action' >&2
+  exit 1
+fi
+adb logcat -b crash -d > /tmp/vibe-crash-after-stop.txt
+if grep -E 'FATAL EXCEPTION|Process: com\\.vibe\\.app' /tmp/vibe-crash-after-stop.txt; then
+  echo 'Vibe crashed during notification Stop regression' >&2
+  exit 1
+fi
