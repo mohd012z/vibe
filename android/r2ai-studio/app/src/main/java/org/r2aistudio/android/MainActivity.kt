@@ -4,7 +4,6 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
 import android.os.Bundle
-import android.provider.OpenableColumns
 import android.view.ViewGroup
 import android.widget.*
 import kotlinx.coroutines.*
@@ -67,8 +66,9 @@ class MainActivity : Activity() {
             status.text = "Importing model…"
             try {
                 val file = withContext(Dispatchers.IO) {
-                    val destination = File(filesDir, "local-model.litertlm")
-                    val temp = File(filesDir, "local-model.partial")
+                    // Unique destination preserves the last working model until validation succeeds.
+                    val destination = File(filesDir, "model-" + java.util.UUID.randomUUID() + ".litertlm")
+                    val temp = File(filesDir, destination.name + ".partial")
                     try {
                         contentResolver.openInputStream(uri).use { input ->
                             requireNotNull(input) { "Unable to open selected file" }
@@ -85,15 +85,21 @@ class MainActivity : Activity() {
                             }
                         }
                         require(temp.length() > 0) { "Model is empty" }
-                        if (destination.exists()) require(destination.delete()) { "Cannot replace old model" }
                         require(temp.renameTo(destination)) { "Unable to save model" }
                         destination
                     } finally { temp.delete() }
                 }
-                model = file
                 status.text = "Model imported • Loading…"
-                ai.load(file.absolutePath)
-                status.text = "Local AI ready"
+                try {
+                    ai.load(file.absolutePath)
+                    val previous = model
+                    model = file
+                    if (previous != null && previous != file) previous.delete()
+                    status.text = "Local AI ready"
+                } catch (failure: Exception) {
+                    file.delete()
+                    throw failure
+                }
             } catch (e: Exception) {
                 status.text = "Model unavailable: ${e.message}"
                 AlertDialog.Builder(this@MainActivity).setTitle("Model setup failed")
