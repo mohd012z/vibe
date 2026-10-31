@@ -23,14 +23,16 @@ BUTTON_FOUND=0
 for attempt in 1 2 3; do
   adb shell uiautomator dump /sdcard/vibe-window.xml >/dev/null 2>&1 || true
   adb exec-out cat /sdcard/vibe-window.xml > /tmp/vibe-window.xml || true
-  if python3 ../scripts/locate_live_test_button.py /tmp/vibe-window.xml > /tmp/vibe-button-coordinates.txt; then
+  if python3 ../scripts/locate_live_test_button.py /tmp/vibe-window.xml > /tmp/vibe-button-coordinates.txt 2> /tmp/vibe-ui-diagnostics.txt; then
     BUTTON_FOUND=1
     break
   fi
   sleep 2
 done
 if [ "$BUTTON_FOUND" -ne 1 ]; then
+  adb exec-out screencap -p > /tmp/vibe-screen.png || true
   echo "Live Test button was not visible; refusing to tap blindly." >&2
+  cat /tmp/vibe-ui-diagnostics.txt >&2 || true
   exit 1
 fi
 read -r BUTTON_X BUTTON_Y < /tmp/vibe-button-coordinates.txt
