@@ -65,6 +65,10 @@ def test_emulator_smoke_runs_in_one_persistent_shell():
     assert "adb shell am start-foreground-service" not in body
     assert not re.search(r"^adb\\s+shell\\s+am\\s+startservice\\b", body, re.MULTILINE)
     assert "adb shell input tap" in body
+    assert "locate_live_test_button.py" in body
+    assert 'tap 150 350' not in body
+    assert "BUTTON_FOUND" in body
+    assert (ROOT / "scripts/locate_live_test_button.py").is_file()
     activity = (APP / "app/src/main/java/com/vibe/app/MainActivity.kt").read_text()
     manifest = (APP / "app/src/main/AndroidManifest.xml").read_text()
     assert 'android:exported="false"' in manifest
