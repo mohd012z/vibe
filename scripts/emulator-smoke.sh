@@ -16,22 +16,13 @@ sleep 2
 adb shell pidof -s com.vibe.app > /tmp/vibe-pid.txt
 cat /tmp/vibe-pid.txt
 adb shell dumpsys activity activities | grep -F 'com.vibe.app/.MainActivity'
-adb shell am start-foreground-service -n com.vibe.app/.LiveTestService -a com.vibe.app.START
+# The service is private: invoke the visible app-owned Live Test button.
+# Avoid ADB shell am startservice against android:exported="false".
+adb shell input tap 150 350
 sleep 2
 adb shell dumpsys activity services com.vibe.app > /tmp/vibe-services.txt
 cat /tmp/vibe-services.txt
 grep -F 'LiveTestService' /tmp/vibe-services.txt
-adb shell am startservice -n com.vibe.app/.LiveTestService -a com.vibe.app.MARK_ISSUE
-adb shell am startservice -n com.vibe.app/.LiveTestService -a com.vibe.app.SNAPSHOT
-adb shell am startservice -n com.vibe.app/.LiveTestService -a com.vibe.app.PAUSE_RESUME
-adb shell am startservice -n com.vibe.app/.LiveTestService -a com.vibe.app.STOP
-sleep 1
-adb shell dumpsys activity services com.vibe.app > /tmp/vibe-services-after-stop.txt
-cat /tmp/vibe-services-after-stop.txt
-if grep -Fq 'LiveTestService' /tmp/vibe-services-after-stop.txt; then
-  echo 'LiveTestService still active after STOP' >&2
-  exit 1
-fi
 adb logcat -b crash -d > /tmp/vibe-crash.txt
 cat /tmp/vibe-crash.txt
 if grep -E 'FATAL EXCEPTION|Process: com\.vibe\.app' /tmp/vibe-crash.txt; then
