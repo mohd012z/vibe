@@ -120,7 +120,7 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         scope.cancel()
-        ai.close()
+        Thread({ ai.close() }, "r2ai-engine-shutdown").start()
         super.onDestroy()
     }
 }
