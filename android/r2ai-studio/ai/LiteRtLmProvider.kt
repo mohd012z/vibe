@@ -3,6 +3,7 @@ package org.r2aistudio.ai
 import com.google.ai.edge.litertlm.Backend
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
+import com.google.ai.edge.litertlm.Conversation
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -17,6 +18,7 @@ class LiteRtLmProvider : LocalAiProvider {
     private val dispatcher = executor.asCoroutineDispatcher()
     @Volatile private var loaded = false
     private var engine: Engine? = null
+    private var conversation: Conversation? = null
     override val isLoaded: Boolean get() = loaded
 
     override suspend fun load(modelPath: String) = withContext(dispatcher) {
@@ -44,10 +46,12 @@ class LiteRtLmProvider : LocalAiProvider {
         // Serializes teardown behind any in-flight load/generate task.
         if (executor.isShutdown) return
         val teardown = executor.submit {
+            val chat = conversation
+            conversation = null
             val current = engine
             engine = null
             loaded = false
-            current?.close()
+            try { chat?.close() } finally { current?.close() }
         }
         try { teardown.get() } finally {
             dispatcher.close()
