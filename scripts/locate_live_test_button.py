@@ -15,7 +15,11 @@ def find_live_test_button(xml: str) -> tuple[int, int]:
     root = ElementTree.fromstring(xml)
     candidates: list[tuple[int, int]] = []
     for node in root.iter("node"):
-        if node.attrib.get("text", "").strip() != "Live Test":
+        # Android's Button widget may render text in all caps; match the
+        # semantic label, but only within Vibe's own package.
+        if node.attrib.get("package") != "com.vibe.app":
+            continue
+        if node.attrib.get("text", "").strip().casefold() != "live test":
             continue
         if node.attrib.get("class") != "android.widget.Button":
             continue
@@ -34,7 +38,7 @@ def find_live_test_button(xml: str) -> tuple[int, int]:
         candidates.append(((x1 + x2) // 2, (y1 + y2) // 2))
     if len(candidates) != 1:
         raise ValueError(
-            "expected exactly one enabled clickable Live Test button; "
+            "expected exactly one enabled clickable Vibe Live Test button; "
             f"found {len(candidates)}"
         )
     return candidates[0]
