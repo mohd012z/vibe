@@ -17,9 +17,9 @@ def xml(*nodes: str) -> str:
     return '<hierarchy rotation="0">' + "".join(nodes) + '</hierarchy>'
 
 
-def node(text: str, bounds: str, *, clickable="true", enabled="true", kind="android.widget.Button") -> str:
+def node(text: str, bounds: str, *, clickable="true", enabled="true", kind="android.widget.Button", package="com.vibe.app") -> str:
     return (
-        f'<node class="{kind}" text="{text}" clickable="{clickable}" '
+        f'<node class="{kind}" package="{package}" text="{text}" clickable="{clickable}" '
         f'enabled="{enabled}" bounds="{bounds}" />'
     )
 
@@ -32,6 +32,18 @@ def test_selects_exact_button_center_not_another_action():
     )
     assert MODULE.find_live_test_button(page) == (540, 610)
 
+
+def test_accepts_android_theme_uppercase_label_from_captured_ui():
+    # Actual API35 emulator XML: Button text was "LIVE TEST", not "Live Test".
+    page = xml(node("LIVE TEST", "[32,398][1048,524]"))
+    assert MODULE.find_live_test_button(page) == (540, 461)
+
+
+def test_rejects_matching_foreign_package():
+    import pytest
+    page = xml(node("LIVE TEST", "[32,398][1048,524]", package="android"))
+    with pytest.raises(ValueError, match="found 0"):
+        MODULE.find_live_test_button(page)
 
 def test_rejects_wrong_or_disabled_button():
     import pytest
