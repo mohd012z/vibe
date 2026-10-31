@@ -114,4 +114,57 @@ class LiveTestServiceLifecycleTest {
         }
     }
 
+    @Test
+    fun notificationPermissionDeniedDoesNotBreakAppOwnedStartStop() {
+        if (android.os.Build.VERSION.SDK_INT < 33) return
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val permission = android.Manifest.permission.POST_NOTIFICATIONS
+        val wasGranted = context.checkSelfPermission(permission) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+
+        fun changePermission(command: String) {
+            instrumentation.uiAutomation.executeShellCommand(
+                "pm $command ${context.packageName} $permission"
+            ).use { descriptor ->
+                android.os.ParcelFileDescriptor.AutoCloseInputStream(descriptor).use {
+                    it.readBytes()
+                }
+            }
+        }
+
+        var scenario: ActivityScenario<MainActivity>? = null
+        try {
+            changePermission("revoke")
+            waitFor("Notification permission was not revoked") {
+                context.checkSelfPermission(permission) ==
+                    android.content.pm.PackageManager.PERMISSION_DENIED
+            }
+            scenario = ActivityScenario.launch(MainActivity::class.java)
+            scenario.onActivity { activity ->
+                val button = findLiveTestButton(activity.window.decorView)
+                assertNotNull("Live Test button missing when notifications denied", button)
+                assertTrue("Live Test button disabled when notifications denied", button!!.isEnabled)
+                button.performClick()
+            }
+            // Android may suppress drawer notifications while still running the
+            // foreground service; do not assert activeNotifications visibility.
+            context.startService(
+                android.content.Intent(context, LiveTestService::class.java)
+                    .setAction(LiveTestService.ACTION_STOP)
+            )
+            scenario.onActivity { activity ->
+                assertTrue("Activity was destroyed by denied permission", !activity.isFinishing)
+            }
+        } finally {
+            context.stopService(android.content.Intent(context, LiveTestService::class.java))
+            scenario?.close()
+            if (wasGranted) changePermission("grant") else changePermission("revoke")
+            waitFor("Notification permission state was not restored") {
+                (context.checkSelfPermission(permission) ==
+                    android.content.pm.PackageManager.PERMISSION_GRANTED) == wasGranted
+            }
+        }
+    }
+
 }
