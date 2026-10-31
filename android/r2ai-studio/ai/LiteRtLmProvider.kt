@@ -29,32 +29,30 @@ class LiteRtLmProvider : LocalAiProvider {
             "Select a LiteRT-LM .litertlm model, not a GGUF file"
         }
         check(!closing.get()) { "Provider is closed" }
-        // Switch models on the owning executor without shutting down the executor.
-        val oldChat = conversation
-        val oldEngine = engine
-        conversation = null
-        engine = null
-        loaded = false
-        try { oldChat?.close() } finally { oldEngine?.close() }
+        // Initialize the replacement before releasing the working model.
+        // This preserves the previous session if initialization fails, at the
+        // cost of temporarily needing memory for both models.
         val candidate = Engine(EngineConfig(modelPath = modelPath, backend = Backend.CPU()))
-        // LiteRT-LM documents that closing an engine after failed initialization may throw.
         candidate.initialize()
-        try {
-            conversation = candidate.createConversation()
-            engine = candidate
-            loaded = true
+        val newChat = try {
+            candidate.createConversation()
         } catch (failure: Throwable) {
             candidate.close()
             throw failure
         }
+        val oldChat = conversation
+        val oldEngine = engine
+        conversation = newChat
+        engine = candidate
+        loaded = true
+        try { oldChat?.close() } finally { oldEngine?.close() }
     }
 
     override suspend fun generate(prompt: String): String = withContext(dispatcher) {
         require(prompt.isNotBlank()) { "Enter a question" }
-        val current = checkNotNull(engine) { "Import a model under AI Models" }
-        current.createConversation().use { conversation ->
-            conversation.sendMessage(prompt).toString()
-        }
+        check(!closing.get()) { "Provider is closing" }
+        val chat = checkNotNull(conversation) { "Import a model under AI Models" }
+        chat.sendMessage(prompt).toString()
     }
 
     override fun close() {
