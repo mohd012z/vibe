@@ -8,6 +8,7 @@ import android.view.ViewGroup
 import android.widget.*
 import kotlinx.coroutines.*
 import org.r2aistudio.ai.LiteRtLmProvider
+import org.r2aistudio.ai.ModelIntegrity
 import java.io.File
 import java.security.MessageDigest
 
@@ -17,6 +18,7 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var prompt: EditText
     private lateinit var output: TextView
+    private lateinit var expectedHash: EditText
     private var model: File? = null
     private val importCode = 12
     private var importing = false
@@ -31,11 +33,13 @@ class MainActivity : Activity() {
         }
         status = TextView(this).apply { text = "Offline mode • No model loaded" }
         val import = Button(this).apply { text = "Settings · Import LiteRT model"; setOnClickListener { showSetup() } }
+        expectedHash = EditText(this).apply { hint = "Trusted SHA-256 (optional, 64 hex characters)"; setSingleLine(true) }
         prompt = EditText(this).apply { hint = "Ask about an APK inspection report"; minLines = 2 }
         val send = Button(this).apply { text = "Ask local AI"; setOnClickListener { ask() } }
         output = TextView(this).apply { text = "The editor and offline inspector do not require AI." }
         root.addView(status)
         root.addView(import)
+        root.addView(expectedHash)
         root.addView(prompt)
         root.addView(send)
         val scroll = ScrollView(this)
@@ -67,6 +71,11 @@ class MainActivity : Activity() {
         if (requestCode != importCode || resultCode != RESULT_OK) return
         val uri = data?.data ?: return
         if (importing) return
+        val checksum = expectedHash.text.toString().trim()
+        if (checksum.isNotEmpty()) {
+            try { ModelIntegrity.normalizeExpectedSha256(checksum) }
+            catch (e: IllegalArgumentException) { expectedHash.error = e.message; return }
+        }
         importing = true
         generationEpoch++ // Invalidate any response started for the previous model.
         scope.launch {
@@ -99,6 +108,9 @@ class MainActivity : Activity() {
                         require(temp.length() > 0) { "Model is empty" }
                         val hash = digest.digest().joinToString("") { "%02x".format(it) }
                         require(hash.length == 64) { "SHA-256 calculation failed" }
+                        if (checksum.isNotEmpty()) {
+                            require(hash == ModelIntegrity.normalizeExpectedSha256(checksum)) { "Model SHA-256 does not match trusted checksum" }
+                        }
                         require(temp.renameTo(destination)) { "Unable to save model" }
                         destination
                     } finally { temp.delete() }
