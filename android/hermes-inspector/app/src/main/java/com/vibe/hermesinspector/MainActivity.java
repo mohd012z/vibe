@@ -137,7 +137,23 @@ public final class MainActivity extends Activity {
         getWindow().setNavigationBarColor(BACKGROUND);
         getWindow().getDecorView().setSystemUiVisibility(0);
         libraryStore = new LibraryStore(this);
+        cleanupPreviousSessionTempFiles();
         createView();
+    }
+
+    private void cleanupPreviousSessionTempFiles(){
+        File[] files=getCacheDir().listFiles();
+        if(files==null)return;
+        int removed=0;
+        for(File item:files){
+            String name=item.getName();
+            if(item.isFile() &&
+               (name.startsWith("vibe-inspection-")||name.startsWith("vibe-unsigned-")) &&
+               (name.endsWith(".apk")||name.endsWith(".partial"))){
+                if(item.delete())removed++;
+            }
+            if(removed>=40)break;
+        }
     }
 
     private GradientDrawable surface(int color, int radius) {
