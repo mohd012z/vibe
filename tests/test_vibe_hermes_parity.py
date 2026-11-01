@@ -30,6 +30,21 @@ class ParityTests(unittest.TestCase):
             self.assertEqual(result["hermes_dec_opcodes"],2)
         finally:t.cleanup()
 
+    def test_long_opcode_mnemonic_has_no_padding(self):
+        t,a,b=self.fixture(
+            "Function<global>0(1 params, 4 registers):\n"
+            "\tCreateFunctionEnvironment\tReg8:3, UInt8:0\n"
+            "\tCreateGeneratorClosure\tReg8:0, Reg8:1, UInt16:2\n"
+            "EndFunction\n",
+            '=> [Function #0 "global" of 10 bytes]:\n'
+            '==> 00000000: <CreateFunctionEnvironment>: <Reg8:3, UInt8:0>\n'
+            '==> 00000001: <CreateGeneratorClosure>: <Reg8:0, Reg8:1, UInt16:2>\n')
+        try:
+            result=parity(a,b)
+            self.assertTrue(result["opcode_name_sequence_equal"],result)
+            self.assertEqual(result["hbctool_opcodes"],2)
+        finally:t.cleanup()
+
     def test_instruction_mismatch_reported(self):
         t,a,b=self.fixture(
             "Function<test>0(0 params):\n\tNop                 \t\nEndFunction\n",
