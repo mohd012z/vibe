@@ -64,6 +64,21 @@ public class ApkFeatureAuditTest {
         assertTrue(result.warnings.stream().anyMatch(s->s.contains("not proof")));
         assertEquals(before,ApkInspector.sha256(archive));
     }
+
+    @Test public void genuineD8ConstantStringUseLinksToOwningMethod()throws Exception{
+        File archive=create(java.util.Collections.singletonMap("classes.dex",fixture()));
+        ApkFeatureAudit.Result report=ApkFeatureAudit.analyze(archive);
+        assertTrue(report.opcodeInstructionsScanned>0);
+        assertTrue(report.stringUseSites>0);
+        ApkFeatureAudit.Hit hit=report.hits.get(ApkFeatureAudit.Topic.BILLING).stream()
+            .filter(h->h.kind.equals("Method string use") &&
+                h.classDescriptor!=null && h.evidence.contains("BillingClient"))
+            .findFirst().orElse(null);
+        assertNotNull("Could not attribute BillingClient string to its DEX method",hit);
+        assertEquals("Lcom/vibe/fixture/Greeter;",hit.classDescriptor);
+        assertTrue(hit.evidence.contains("billingEvidence"));
+        assertTrue(report.warnings.stream().anyMatch(s->s.contains("do not prove actual execution")));
+    }
     @Test public void unsupportedOrUnrelatedAssetsYieldZeroMatches()throws Exception{
         Map<String,byte[]> entries=new HashMap<>();
         entries.put("assets/plain.txt","ordinary source".getBytes(StandardCharsets.UTF_8));

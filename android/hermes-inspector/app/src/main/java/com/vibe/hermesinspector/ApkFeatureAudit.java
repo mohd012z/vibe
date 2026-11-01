@@ -21,6 +21,10 @@ import java.util.zip.ZipFile;
 import org.jf.dexlib2.dexbacked.DexBackedDexFile;
 import org.jf.dexlib2.iface.ClassDef;
 import org.jf.dexlib2.iface.Method;
+import org.jf.dexlib2.iface.MethodImplementation;
+import org.jf.dexlib2.iface.instruction.Instruction;
+import org.jf.dexlib2.iface.instruction.ReferenceInstruction;
+import org.jf.dexlib2.iface.reference.StringReference;
 
 /**
  * Evidence-first keyword audit for authorized APKs.
@@ -48,6 +52,8 @@ public final class ApkFeatureAudit {
     public static final int MAX_STRINGS_SCANNED=400000;
     public static final int MAX_CLASSES_SCANNED=60000;
     public static final int MAX_METHODS_SCANNED=350000;
+    public static final int MAX_CODE_OPCODES=600000;
+    public static final int MAX_RELEVANT_STRINGS=12000;
 
     private static final Map<Topic,Pattern> PATTERNS=new EnumMap<>(Topic.class);
     static {
@@ -86,6 +92,7 @@ public final class ApkFeatureAudit {
         public final EnumMap<Topic,List<Hit>> hits=new EnumMap<>(Topic.class);
         public final List<String> warnings=new ArrayList<>();
         public int dexIndexed, stringsScanned, classesScanned, methodsScanned;
+        public int opcodeInstructionsScanned, stringUseSites;
         public boolean limitReached;
         public Result(){
             for(Topic topic:Topic.values())hits.put(topic,new ArrayList<>());
@@ -170,6 +177,7 @@ public final class ApkFeatureAudit {
                         null,new ByteArrayInputStream(raw));
                     result.dexIndexed++;
                     DexBackedDexFile.OptionalIndexedSection<String> strings=dex.getStringSection();
+                    Set<String> relevantStrings=new HashSet<>();
                     for(int stringIndex=0;stringIndex<strings.size();stringIndex++){
                         if(result.stringsScanned>=MAX_STRINGS_SCANNED){
                             result.limitReached=true;break;
@@ -177,6 +185,11 @@ public final class ApkFeatureAudit {
                         String value=strings.get(stringIndex);
                         result.stringsScanned++;
                         match(result,"DEX string #"+stringIndex,name,null,value);
+                        if(relevantStrings.size()<MAX_RELEVANT_STRINGS){
+                            for(Topic topic:Topic.values()){
+                                if(matches(topic,value)){relevantStrings.add(value);break;}
+                            }
+                        }else result.limitReached=true;
                     }
                     for(ClassDef cls:dex.getClasses()){
                         if(result.classesScanned++>=MAX_CLASSES_SCANNED){
@@ -190,6 +203,26 @@ public final class ApkFeatureAudit {
                             }
                             String signature=owner+"->"+method.getName();
                             match(result,"Method definition",name,owner,signature);
+                            if(relevantStrings.isEmpty() || result.opcodeInstructionsScanned>=MAX_CODE_OPCODES)
+                                continue;
+                            MethodImplementation implementation=method.getImplementation();
+                            if(implementation==null)continue;
+                            for(Instruction ins:implementation.getInstructions()){
+                                if(result.opcodeInstructionsScanned>=MAX_CODE_OPCODES){
+                                    result.limitReached=true;
+                                    break;
+                                }
+                                result.opcodeInstructionsScanned++;
+                                if(!ins.getOpcode().name.startsWith("const-string") ||
+                                   !(ins instanceof ReferenceInstruction))continue;
+                                Object reference=((ReferenceInstruction)ins).getReference();
+                                if(!(reference instanceof StringReference))continue;
+                                String literal=((StringReference)reference).getString();
+                                if(!relevantStrings.contains(literal))continue;
+                                match(result,"Method string use",name,owner,
+                                    signature+" uses \""+literal+"\"");
+                                result.stringUseSites++;
+                            }
                         }
                         if(result.methodsScanned>=MAX_METHODS_SCANNED)break;
                     }
@@ -201,6 +234,7 @@ public final class ApkFeatureAudit {
                 }
             }
         }
+        result.warnings.add("Method string-use entries are verified const-string bytecode references; they do not prove actual execution.");
         result.warnings.add("These are static keyword references, not proof of a purchase, entitlement, active advertisement, or feature availability.");
         if(result.limitReached)
             result.warnings.add("Resource limits reached: some matches may be omitted.");
