@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 
 HBC_HEADER=re.compile(r"^Function<.*?>([0-9]{1,10})\(")
+OFFICIAL_HEADER=re.compile(r"^(?:NC)?Function<.*?>([0-9]{1,10})\(")
 HBC_OPCODE=re.compile(r"^\t([A-Za-z][A-Za-z0-9_]*)\s+\t")
 P1_HEADER=re.compile(r'^=> \[(?:Function|Generator function|Async function) #([0-9]{1,10}) ')
 P1_OPCODE=re.compile(r"^==> [0-9A-Fa-f]{8}: <([A-Za-z][A-Za-z0-9_]*)>:")
@@ -26,7 +27,7 @@ def parse(path:Path,provider:str)->dict[int,tuple[str,...]]:
     count=0
     with path.open("r",encoding="utf-8",errors="replace") as f:
         for line in f:
-            header=(HBC_HEADER if provider in ("hbctool","official_hbcdump") else P1_HEADER).match(line)
+            header=(HBC_HEADER if provider=="hbctool" else OFFICIAL_HEADER if provider=="official_hbcdump" else P1_HEADER).match(line)
             if header:
                 fid=int(header.group(1))
                 if fid>0xffffffff or fid in functions or len(functions)>=MAX_FUNCTIONS:
