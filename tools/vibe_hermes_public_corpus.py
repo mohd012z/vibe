@@ -76,6 +76,21 @@ hbctool.asm(sys.argv[2],sys.argv[3])
             out["structural_count_agreement"]=count_a==count_b
             out["instruction_parity"]=parity(hbcout/"instruction.hasm",p1out)
             if version in ("94","99"):
+                metadata=json.loads((hbcout/"metadata.json").read_text("utf-8"))
+                first=metadata["functionHeaders"][0]
+                hbc_offset=first["offset"]
+                p1_source=p1out.read_text("utf-8",errors="replace")
+                m=re.search(r"@ offset 0x([0-9A-Fa-f]+)",p1_source)
+                p1_offset=int(m.group(1),16) if m else None
+                out["first_function_offsets"]={
+                    "hbctool_header":hbc_offset,
+                    "hermes_dec_header":p1_offset,
+                    "equal":hbc_offset==p1_offset,
+                    "first_opcode_bytes_at_hbctool_offset":orig[hbc_offset:hbc_offset+12].hex(),
+                    "first_opcode_bytes_at_p1_offset":orig[p1_offset:p1_offset+12].hex() if p1_offset is not None else None
+                }
+
+            if version in ("94","99"):
                 out["official_oracle"]=compare_to_official(orig,hbcout/"instruction.hasm",p1out,input_file.with_name("sample.hermes_raw_hasm"))
         else:
             out["structural_count_agreement"]=False
