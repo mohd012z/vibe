@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 from vibe_hbc_opcode_parity import parity
+from vibe_hbc_official_oracle import compare_to_official
 
 FIXTURES={"84":"tests/version-84/sample.hbc",
           "94":"tests/version-94/sample.hbc",
@@ -74,6 +75,8 @@ hbctool.asm(sys.argv[2],sys.argv[3])
             out["function_counts"]={"hbctool":count_a,"hermes_dec":count_b}
             out["structural_count_agreement"]=count_a==count_b
             out["instruction_parity"]=parity(hbcout/"instruction.hasm",p1out)
+            if version in ("94","99"):
+                out["official_oracle"]=compare_to_official(orig,hbcout/"instruction.hasm",p1out,input_file.with_name("sample.hermes_raw_hasm"))
         else:
             out["structural_count_agreement"]=False
         out["status"]=("byte_exact_and_function_count_agreement"
