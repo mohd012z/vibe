@@ -126,6 +126,14 @@ public final class DexAnalyzer {
         table(data,countType,offType,4,"typeIds");
         table(data,countMeth,offMeth,8,"methodIds");
         table(data,countClass,offClass,32,"classDefs");
+        // Validate *all* declared string pointers, including entries beyond
+        // the bounded UI preview. A malformed, unreferenced string must not
+        // make a structurally invalid DEX appear valid.
+        for(int i=0;i<countStr;i++){
+            long item=uint(data,offStr+4*i);
+            if(item==0 || item>=data.length)
+                throw new IOException("DEX string-data offset outside file at ID "+i);
+        }
         Result out=new Result();
         out.version=new String(data,4,3,StandardCharsets.US_ASCII);
         out.declaredStrings=countStr;out.declaredTypes=countType;
