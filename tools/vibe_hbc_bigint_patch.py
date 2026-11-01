@@ -30,7 +30,7 @@ def _read_bigint_sections(f, header):
             raise ValueError("BigInt table entry outside declared storage")
         table.append({"offset": offset, "length": length})
     align(f)
-    data = read(f, ["uint", 8, size])
+    data = [readuint(f, bits=8) for _ in range(size)]
     align(f)
     return table, data
 
