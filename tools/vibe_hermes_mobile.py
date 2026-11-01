@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import zipfile
 
 from vibe_hermes import InvalidAPK, inspect_bytes
@@ -183,13 +184,22 @@ def handler_factory(token: str):
             if not self.server.analysis_semaphore.acquire(blocking=False):
                 return self._json(429,{'error':'Analysis already active; retry after completion'})
             try:
-                self.connection.settimeout(20)
                 length=int(self.headers.get('Content-Length','-1'))
                 if not 22<=length<=MAX_MOBILE_UPLOAD:
                     raise InvalidAPK('Invalid request size')
-                raw=self.rfile.read(length)
-                if len(raw)!=length:
-                    raise InvalidAPK('Truncated upload')
+                # read1() allows progress/deadline checks even when clients
+                # trickle fewer bytes than a requested 64KiB chunk.
+                deadline=time.monotonic()+30.0
+                data=bytearray()
+                self.connection.settimeout(5.0)
+                while len(data)<length:
+                    if time.monotonic()>deadline:
+                        raise InvalidAPK('Upload time budget exceeded')
+                    chunk=self.rfile.read1(min(65536,length-len(data)))
+                    if not chunk:
+                        raise InvalidAPK('Truncated upload')
+                    data.extend(chunk)
+                raw=bytes(data)
                 value=(inspect_bytes(raw) if self.path=='/api/inspect'
                        else disassemble(raw,self.headers.get('X-Hermes-Entry','')))
                 return self._json(200,value)
