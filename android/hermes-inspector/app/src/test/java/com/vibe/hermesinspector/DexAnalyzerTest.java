@@ -81,6 +81,17 @@ public class DexAnalyzerTest {
         try{DexAnalyzer.inspect(bytes);fail("Too many table rows");}
         catch(IOException expected){assertTrue(expected.getMessage().contains("limit"));}
     }
+    @Test public void mutatingDexStructureCannotCrashUnchecked(){
+        byte[] original=fixture();
+        java.util.Random rng=new java.util.Random(20261101);
+        for(int i=0;i<300;i++){
+            byte[] sample=original.clone();
+            for(int j=0;j<1+rng.nextInt(4);j++)
+                sample[rng.nextInt(sample.length)]^=(byte)(1+rng.nextInt(255));
+            try{DexAnalyzer.inspect(sample);}
+            catch(IOException rejected){ /* invalid DEX must fail closed */ }
+        }
+    }
     @Test public void rejectsInvalidEndian(){
         byte[] bytes=fixture();bytes[40]=(byte)0xff;
         try{DexAnalyzer.inspect(bytes);fail("Endian spoof");}

@@ -68,15 +68,21 @@ public final class LibraryStore {
         List<Item> list=list();
         JSONArray out=new JSONArray();
         try{
+            java.util.HashSet<String> kept=new java.util.HashSet<>();
+            kept.add(uri.toString());
             out.put(toJson(new Item(uri.toString(),
                 name.length()>100?name.substring(0,100):name,sha,
                 System.currentTimeMillis())));
             for(Item item:list){
                 if(out.length()>=MAX_HISTORY)break;
-                if(!item.uri.equals(uri.toString()))out.put(toJson(item));
+                if(!item.uri.equals(uri.toString())){
+                    out.put(toJson(item));
+                    kept.add(item.uri);
+                }
             }
             if(!prefs().edit().putString(INDEX,out.toString()).commit())
                 throw new IllegalStateException("Cannot persist local APK library");
+            for(Item old:list)if(!kept.contains(old.uri))release(old.uri);
         }catch(JSONException error){
             throw new IllegalStateException("Failed to serialize local library",error);
         }
@@ -94,9 +100,10 @@ public final class LibraryStore {
     }
 
     public void clear(){
-        for(Item item:list()) release(item.uri);
+        List<Item> old=list();
         if(!prefs().edit().remove(INDEX).commit())
             throw new IllegalStateException("Cannot clear local APK references");
+        for(Item item:old)release(item.uri);
     }
 
     private void release(String savedUri) {

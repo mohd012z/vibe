@@ -54,6 +54,20 @@ public class HbcAnalyzerTest {
         assertTrue(h.instructionsDecoded<=HbcAnalyzer.MAX_OPCODES);
         assertTrue(h.truncated);
     }
+    @Test public void declaredStringStorageBoundsAreEnforced()throws Exception{
+        byte[] data=fixture(94);
+        ByteBuffer header=ByteBuffer.wrap(data).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        int functions=header.getInt(40), kinds=header.getInt(44), identifiers=header.getInt(48);
+        int stringTable=128+16*functions+4*kinds+4*identifiers;
+        stringTable=(stringTable+3)&~3;
+        // 8-byte UTF8 string positioned at the maximum 23-bit offset.
+        header.putInt(stringTable,(8<<24)|(0x7fffff<<1));
+        try{inspect(data,94);fail("Storage section escape must be rejected");}
+        catch(IOException expected){
+            assertTrue(expected.getMessage().contains("storage"));
+        }
+    }
+
     @Test public void modifiedHeaderVersionCannotBeReinterpreted()throws Exception{
         byte[] data=fixture(94);
         data[8]=(byte)101;

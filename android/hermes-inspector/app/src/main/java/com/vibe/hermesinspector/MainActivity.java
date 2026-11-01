@@ -55,7 +55,7 @@ public final class MainActivity extends Activity {
     private static final int TEXT = Color.rgb(237, 246, 255);
     private static final int MUTED = Color.rgb(177, 195, 217);
     private static final int ACCENT = Color.rgb(89, 172, 246);
-    private static final int PAGE_SIZE = 50;
+    private static final int PAGE_SIZE = SearchPager.PAGE_SIZE;
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final AtomicBoolean busy = new AtomicBoolean(false);
@@ -264,6 +264,8 @@ public final class MainActivity extends Activity {
         pageLabel = text("Page 1 / 1", 12, TEXT, true);
         pageLabel.setGravity(Gravity.CENTER);
         pageLabel.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        previous.setContentDescription("Previous results page");
+        next.setContentDescription("Next results page");
         nav.addView(previous, new LinearLayout.LayoutParams(0, dp(48), 1));
         nav.addView(pageLabel, new LinearLayout.LayoutParams(0, dp(48), 1));
         nav.addView(next, new LinearLayout.LayoutParams(0, dp(48), 1));
@@ -275,7 +277,7 @@ public final class MainActivity extends Activity {
             }
         });
         next.setOnClickListener(v -> {
-            int count = Math.max(1, (filtered.size() + PAGE_SIZE - 1) / PAGE_SIZE);
+            int count = SearchPager.pageCount(filtered.size());
             if (page + 1 < count) {
                 page++;
                 showPage();
@@ -507,10 +509,10 @@ public final class MainActivity extends Activity {
     private void showPage() {
         if (resultList == null || pageLabel == null) return;
         resultList.removeAllViews();
-        int pages = Math.max(1, (filtered.size() + PAGE_SIZE - 1) / PAGE_SIZE);
-        page = Math.min(Math.max(page, 0), pages - 1);
-        int end = Math.min(filtered.size(), (page + 1) * PAGE_SIZE);
-        for (int index = page * PAGE_SIZE; index < end; index++) {
+        int pages = SearchPager.pageCount(filtered.size());
+        page = SearchPager.clamp(page, filtered.size());
+        int end = SearchPager.end(page, filtered.size());
+        for (int index = SearchPager.start(page, filtered.size()); index < end; index++) {
             TextView row = text((index + 1) + ".  " + filtered.get(index), 14, TEXT, false);
             row.setPadding(dp(5), dp(10), dp(5), dp(10));
             margin(row, resultList, 0, 1);
