@@ -130,26 +130,26 @@ public final class DexAnalyzer {
         out.version=new String(data,4,3,StandardCharsets.US_ASCII);
         out.declaredStrings=countStr;out.declaredTypes=countType;
         out.declaredMethods=countMeth;out.declaredClasses=countClass;
-        int[] cacheIndex=new int[0];
         java.util.HashMap<Integer,String> cache=new java.util.HashMap<>();
-        java.util.function.IntFunction<String> lookup=(id)->{
-            if(id<0||id>=countStr)return null;
-            String cached=cache.get(id);
-            if(cached!=null)return cached;
-            try{
+        class StringLookup {
+            String get(int id)throws IOException {
+                if(id<0||id>=countStr)throw new IOException("DEX invalid string ID");
+                String value=cache.get(id);
+                if(value!=null)return value;
                 int item=checked(uint(data,offStr+id*4),"string-data");
-                String value=stringAt(data,item);
+                value=stringAt(data,item);
                 if(cache.size()<12000)cache.put(id,value);
                 return value;
-            }catch(IOException invalid){return null;}
-        };
+            }
+        }
+        StringLookup lookup=new StringLookup();
         Set<String> seen=new HashSet<>();
         for(int i=0;i<countClass && out.classNames.size()<MAX_NAMES;i++){
             int type=checked(uint(data,offClass+32*i),"class type");
             if(type>=countType)throw new IOException("DEX class index exceeds types");
             int stringIdx=checked(uint(data,offType+4*type),"class descriptor index");
             if(stringIdx>=countStr)throw new IOException("DEX class descriptor index exceeds strings");
-            String name=lookup.apply(stringIdx);
+            String name=lookup.get(stringIdx);
             if(name!=null && seen.add(name))out.classNames.add(validLabel(name));
         }
         for(int i=0;i<countMeth && out.methodReferences.size()<MAX_METHOD_REFS;i++){
@@ -158,14 +158,14 @@ public final class DexAnalyzer {
             int nameId=checked(uint(data,offMeth+8*i+4),"method name");
             if(classId>=countType || nameId>=countStr)
                 throw new IOException("DEX method index exceeds referenced tables");
-            String owner=lookup.apply(checked(uint(data,offType+4*classId),"method owner descriptor"));
-            String method=lookup.apply(nameId);
+            String owner=lookup.get(checked(uint(data,offType+4*classId),"method owner descriptor"));
+            String method=lookup.get(nameId);
             if(owner!=null && method!=null)
                 out.methodReferences.add(String.format(Locale.ROOT,"%d  %s → %s [proto %d]",
                          i,validLabel(owner),validLabel(method),proto));
         }
         for(int i=0;i<countStr && out.strings.size()<MAX_STRINGS;i++){
-            String value=lookup.apply(i);
+            String value=lookup.get(i);
             if(value!=null && !value.isEmpty())out.strings.add(String.format(Locale.ROOT,"#%d  %s",i,validLabel(value)));
         }
         if(out.strings.size()<countStr)out.issues.add("DEX strings capped at "+MAX_STRINGS+" display items");
