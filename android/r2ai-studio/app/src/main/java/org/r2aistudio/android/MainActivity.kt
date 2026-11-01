@@ -26,6 +26,7 @@ class MainActivity : Activity() {
     private var importing = false
     private var generating = false
     private var generationEpoch = 0L
+    private val preferences by lazy { getSharedPreferences("offline_llm", MODE_PRIVATE) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -54,8 +55,32 @@ class MainActivity : Activity() {
             prompt.setText(savedInstanceState.getString("draftPrompt", ""))
             expectedHash.setText(savedInstanceState.getString("expectedHash", ""))
             output.text = savedInstanceState.getString("lastOutput", "The editor and offline inspector do not require AI.")
-            status.text = "Offline mode • Model must be loaded again"
+            status.text = "Offline mode • Restoring model…"
+            autoSetup()
         } else {
+            autoSetup()
+        }
+    }
+
+    private fun autoSetup() {
+        val saved = preferences.getString("activeModel", null)
+        val selected = saved?.let { File(filesDir, it) }
+        if (selected?.isFile == true && selected.name.matches(Regex("model-[0-9a-fA-F-]{36}\\.litertlm"))) {
+            importing = true
+            scope.launch {
+                status.text = "Starting saved offline LLM…"
+                try {
+                    ai.load(selected.absolutePath)
+                    model = selected
+                    status.text = "Local LLM ready"
+                } catch (failure: Exception) {
+                    preferences.edit().remove("activeModel").apply()
+                    status.text = "Saved LLM unavailable: " + (failure.message ?: "Unknown error")
+                    showSetup()
+                } finally { importing = false }
+            }
+        } else {
+            if (saved != null) preferences.edit().remove("activeModel").apply()
             showSetup()
         }
     }
@@ -127,6 +152,7 @@ class MainActivity : Activity() {
                                 ai.load(file.absolutePath)
                                 val previous = model
                                 model = file
+                                preferences.edit().putString("activeModel", file.name).apply()
                                 if (previous != null && previous != file) previous.delete()
                                 status.text = "Downloaded offline LLM ready"
                             } catch (failure: Exception) {
@@ -174,6 +200,7 @@ class MainActivity : Activity() {
                     try {
                         ai.load(selected.absolutePath)
                         model = selected
+                        preferences.edit().putString("activeModel", selected.name).apply()
                         status.text = "Local LLM ready"
                     } catch (failure: Exception) {
                         status.text = "LLM load failed: " + (failure.message ?: "Unknown error")
@@ -257,6 +284,7 @@ class MainActivity : Activity() {
                     ai.load(file.absolutePath)
                     val previous = model
                     model = file
+                    preferences.edit().putString("activeModel", file.name).apply()
                     if (previous != null && previous != file) previous.delete()
                     status.text = "Local AI ready"
                 } catch (failure: Exception) {
