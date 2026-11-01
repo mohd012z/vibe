@@ -118,29 +118,44 @@ public final class ApkPatchWorkspace {
         if(find==null||find.length()<2||find.length()>200||
            replace==null||replace.length()>1000)
             throw new IOException("Search or replacement length outside bounds");
-        int stagedCount=0;
+        LinkedHashMap<String,Change> pending=new LinkedHashMap<>(changes);
+        int affected=0;
+        long declared=0;
         try(ZipFile zip=new ZipFile(original)){
             Set<String> seen=new HashSet<>();
             Enumeration<? extends ZipEntry> all=zip.entries();
+            int members=0;
             while(all.hasMoreElements()){
                 if(Thread.currentThread().isInterrupted())throw new IOException("Batch replacement cancelled");
                 ZipEntry entry=all.nextElement();
+                if(++members>MAX_ZIP_MEMBERS)throw new IOException("ZIP member budget exceeded");
                 String path=entry.getName();
                 if(!safeName(path)||!seen.add(path))throw new IOException("Unsafe/duplicate ZIP path");
-                if(!editable(path)||entry.isDirectory()||
-                   entry.getSize()<0||entry.getSize()>MAX_ASSET_BYTES)continue;
-                String before=decode(readEntry(zip,entry,MAX_ASSET_BYTES));
+                long size=entry.getSize(),packed=entry.getCompressedSize();
+                if(size<0||packed<0||size>MAX_EXPANDED||declared>MAX_EXPANDED-size)
+                    throw new IOException("ZIP size budget exceeded");
+                declared+=size;
+                if(size>1024*1024 && (packed==0||size/Math.max(1,packed)>200))
+                    throw new IOException("Suspicious APK compression ratio");
+                if(!editable(path)||entry.isDirectory()||size>MAX_ASSET_BYTES)continue;
+                byte[] beforeBytes=readEntry(zip,entry,MAX_ASSET_BYTES);
+                String before=decode(beforeBytes);
                 if(!before.contains(find))continue;
-                if(stagedCount>=MAX_STAGE||changes.size()>=MAX_STAGE)
+                if(!pending.containsKey(path)&&pending.size()>=MAX_STAGE)
                     throw new IOException("Batch replacement exceeds twelve-file limit");
                 String after=before.replace(find,replace);
-                if(after.length()>MAX_ASSET_BYTES||after.getBytes(StandardCharsets.UTF_8).length>MAX_ASSET_BYTES)
-                    throw new IOException("Batch output text exceeds limit");
-                stage(original,path,after);
-                stagedCount++;
+                byte[] next=utf8(after);
+                Change change=new Change(path,beforeBytes,next);
+                if(change.beforeSha256.equals(change.afterSha256))
+                    pending.remove(path);
+                else pending.put(path,change);
+                affected++;
             }
         }
-        return stagedCount;
+        // Commit only after every candidate and ZIP member has passed validation.
+        changes.clear();
+        changes.putAll(pending);
+        return affected;
     }
 
     /**
