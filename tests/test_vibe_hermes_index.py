@@ -24,18 +24,19 @@ class IndexTests(unittest.TestCase):
         self.assertEqual(r["functions"][0]["string_refs"],[7])
 
     def test_orphan_annotations_are_not_proven_references(self):
-        source=("Function<orphan>0(0 params, 1 registers):\\n"
-                "\\t; Oper[0]: String(16) fabricated\\n"
-                "\\tNop                  \\t\\n"
-                "\\t; Oper[0]: String(7) supported\\n"
-                "EndFunction\\n")
-        source=source.replace("\\\\n","\\n").replace("\\\\t","\\t")
+        source="\n".join([
+            "Function<orphan>0(0 params, 1 registers):",
+            "\t; Oper[0]: String(16) fabricated",
+            "\tNop                  \t",
+            "\t; Oper[0]: String(7) supported",
+            "EndFunction",
+        ])
         out=function_index(source)
         self.assertEqual(out["functions"][0]["string_refs"],[7])
         self.assertFalse(out["call_graph_proven"])
 
     def test_overlong_id_does_not_crash(self):
-        source="Function<x>"+("9"*6000)+"(0 params):\\nEndFunction\\n"
+        source="Function<x>"+("9"*6000)+"(0 params):\nEndFunction\n"
         self.assertEqual(function_index(source)["function_count"],0)
 
     def test_duplicate_id_rejected(self):
