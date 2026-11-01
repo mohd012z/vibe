@@ -111,3 +111,14 @@ if __name__=="__main__":
     if any(r["hbctool"]["exit"]!=0 or r["hermes_dec"]["exit"]!=0
            for r in rows):
         sys.exit(2)
+    if any(r.get("status")!="byte_exact_and_function_count_agreement" for r in rows):
+        sys.exit(4)
+    if any(not r.get("instruction_parity",{}).get("opcode_name_sequence_equal",False)
+           for r in rows):
+        sys.exit(5)
+    if any(r.get("official_oracle",{}).get("status")!="compared" or
+           not r["official_oracle"]["hbctool"]["opcode_sequence_identical"] or
+           not r["official_oracle"]["hermes_dec"]["opcode_sequence_identical"]
+           for r in rows if r["version"] in ("94","99")):
+        sys.exit(6)
+
