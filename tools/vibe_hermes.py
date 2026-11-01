@@ -37,6 +37,17 @@ def read_hbc_header(data: bytes, entry_size: int | None = None) -> dict:
         result["declared_file_length"] = declared
         if declared and entry_size is not None and declared != entry_size:
             result["length_warning"] = "Declared length differs from ZIP entry length"
+    if 96 <= version <= 100:
+        if len(data) < 72:
+            result["layout_preflight"] = "insufficient_header_bytes"
+        else:
+            bigint_count, bigint_storage = struct.unpack_from("<II", data, 64)
+            result["bigint_count"] = bigint_count
+            result["bigint_storage_size"] = bigint_storage
+            result["layout_preflight"] = (
+                "unsupported_bigint_sections" if bigint_count or bigint_storage
+                else "bigint_sections_empty"
+            )
     return result
 
 
@@ -81,7 +92,7 @@ def inspect_bytes(payload: bytes) -> dict:
             else:
                 try:
                     with z.open(member) as f:
-                        rec.update(read_hbc_header(f.read(64), member.file_size))
+                        rec.update(read_hbc_header(f.read(80), member.file_size))
                     rec["status"] = "hermes"
                 except InvalidAPK:
                     rec["status"] = "not_hermes"
