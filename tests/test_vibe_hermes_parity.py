@@ -41,6 +41,20 @@ class ParityTests(unittest.TestCase):
             self.assertEqual(result["first_mismatches"][0]["function_id"],0)
         finally:t.cleanup()
 
+    def test_official_hbcdump_ncfunction_records(self):
+        t,a,b=self.fixture(
+            "Function<x>0(0 params):\nEndFunction\n",
+            "Function<global>0(0 params):\n"
+            "[@ 0] Nop\n"
+            "NCFunction<helper>1(0 params):\n"
+            "[@ 0] Return\n")
+        try:
+            result=parse(b,"official_hbcdump")
+            self.assertEqual(len(result),2)
+            self.assertEqual(result[0],("Nop",))
+            self.assertEqual(result[1],("Return",))
+        finally:t.cleanup()
+
     def test_unsupported_duplicate_function_rejected(self):
         t,a,b=self.fixture(
             "Function<test>0(0 params):\nEndFunction\n"
