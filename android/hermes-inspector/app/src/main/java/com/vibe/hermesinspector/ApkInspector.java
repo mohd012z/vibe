@@ -145,7 +145,7 @@ public final class ApkInspector {
                 byte[] sample;
                 try (InputStream stream = zip.getInputStream(entry)) {
                     sample = readPrefix(stream, (int) Math.min(size, MAX_SCAN_BYTES));
-                } catch (IllegalArgumentException | RuntimeException error) {
+                } catch (RuntimeException error) {
                     throw new IOException("Malformed compressed Hermes candidate", error);
                 }
                 if (sample.length < 12) continue;
