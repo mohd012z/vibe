@@ -103,6 +103,7 @@ jobs:
           git -C "$temp/HBC-Tool" checkout --quiet eaf70a8700380f35e39e1bdbcaac01a3c49a63b0
           python3 tools/vibe_hbc_patch_all.py "$temp/HBC-Tool"
           python3 tools/vibe_hbc_validate_checkout.py "$temp/HBC-Tool"
+          python3 tools/vibe_hbc_source_audit.py "$temp/HBC-Tool"
       - name: Public genuine HBC94/99 corpus and independent hermes-dec comparison
         run: |
           set -euo pipefail
