@@ -18,6 +18,7 @@ class MainActivity : Activity() {
     private lateinit var output: TextView
     private var model: File? = null
     private val importCode = 12
+    private var importing = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -62,6 +63,8 @@ class MainActivity : Activity() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode != importCode || resultCode != RESULT_OK) return
         val uri = data?.data ?: return
+        if (importing) return
+        importing = true
         scope.launch {
             status.text = "Importing model…"
             try {
@@ -69,6 +72,8 @@ class MainActivity : Activity() {
                     // Unique destination preserves the last working model until validation succeeds.
                     val destination = File(filesDir, "model-" + java.util.UUID.randomUUID() + ".litertlm")
                     val temp = File(filesDir, destination.name + ".partial")
+                    val maxBytes = 4L * 1024 * 1024 * 1024
+                    require(filesDir.usableSpace > 0L) { "Cannot determine free model storage" }
                     try {
                         contentResolver.openInputStream(uri).use { input ->
                             requireNotNull(input) { "Unable to open selected file" }
@@ -105,6 +110,8 @@ class MainActivity : Activity() {
                 AlertDialog.Builder(this@MainActivity).setTitle("Model setup failed")
                     .setMessage("${e.message}\n\nCheck model compatibility and free storage. Offline tools remain available.")
                     .setPositiveButton("Retry") { _, _ -> showSetup() }.setNegativeButton("Close", null).show()
+            } finally {
+                importing = false
             }
         }
     }
