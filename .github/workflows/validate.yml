@@ -61,6 +61,38 @@ jobs:
         run: |
           set -e
           python3 -m unittest discover -s tests -p 'test_vibe_hermes*.py' -v
+      - name: SHA-pinned HBC59/99/100 source repair in temporary checkout
+        run: |
+          set -euo pipefail
+          temp="$(mktemp -d)"
+          trap 'rm -rf "$temp"' EXIT
+          git clone --quiet https://github.com/Kirlif/HBC-Tool.git "$temp/HBC-Tool"
+          git -C "$temp/HBC-Tool" checkout --quiet eaf70a8700380f35e39e1bdbcaac01a3c49a63b0
+          python3 tools/vibe_hbc_patch_checkout.py "$temp/HBC-Tool"
+          python3 - "$temp/HBC-Tool" <<'PYCODE'
+          import sys,types
+          from pathlib import Path
+          sys.path.insert(0,sys.argv[1])
+          sys.modules['docopt']=types.ModuleType('docopt')
+          from hbctool.hbc.hbc59 import HBC59
+          from hbctool.hbc.hbc99 import HBC99
+          from hbctool.hbc.hbc100 import HBC100
+          for cls,v in ((HBC59,59),(HBC99,99),(HBC100,100)):
+              o=cls()
+              assert o.getVersion()==v,(v,o.getVersion())
+              o.setObj({'header':{'stringCount':1},
+                        'stringTableEntries':[{'isUTF16':0,'offset':0,'length':4}],
+                        'stringStorage':[65,66,67,68],
+                        'stringTableOverflowEntries':[]})
+              o.setString(0,'éé')
+              assert bytes(o.getObj()['stringStorage'])=='éé'.encode('utf-8')
+              for too_short in ('x','abc'):
+                  try: o.setString(0,too_short)
+                  except ValueError: pass
+                  else: raise AssertionError(f'HBC{v}: short replacement accepted')
+              assert bytes(o.getObj()['stringStorage'])=='éé'.encode('utf-8')
+          print('Actual pinned upstream source patched: 3 version checks and 6 rejected short-string edits OK')
+          PYCODE
       - name: APK pipeline + Vibe AI + Telegram + deploy suite
         run: |
           set -e
