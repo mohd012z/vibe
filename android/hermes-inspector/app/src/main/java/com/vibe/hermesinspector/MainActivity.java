@@ -58,6 +58,7 @@ public final class MainActivity extends Activity {
     private static final int EXPORT_SOURCE = 4204;
     private static final int EXPORT_PAGE = 4205;
     private static final int SOURCE_PAGE_SIZE = 25;
+    private static final int AUDIT_PAGE_SIZE = 20;
     private static final String[] MODES = {"DEX strings", "DEX classes", "DEX method references", "Hermes strings", "Hermes functions", "Hermes opcodes", "Hermes string references", "Printable candidates"};
     private static final int BACKGROUND = Color.rgb(13, 20, 32);
     private static final int SURFACE = Color.rgb(28, 40, 59);
@@ -70,6 +71,14 @@ public final class MainActivity extends Activity {
     private final AtomicBoolean busy = new AtomicBoolean(false);
     private final List<String> filtered = new ArrayList<>();
     private ApkInspector.Report report;
+    private ApkFeatureAudit.Result featureAudit;
+    private LinearLayout auditCard, auditList;
+    private TextView auditSummary, auditPage;
+    private Spinner auditTopic;
+    private EditText auditFilter, assetEditor;
+    private Button auditPrevious, auditNext, editCopy, applyCopy;
+    private final List<ApkFeatureAudit.Hit> auditMatches=new ArrayList<>();
+    private int auditPageNumber=0;
     private ApkSourceExplorer.Result sourceIndex;
     private File sourceApk;
     private String selectedSourceText;
@@ -216,6 +225,62 @@ public final class MainActivity extends Activity {
         status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         margin(status, importCard, 0, 0);
 
+        auditCard=card("🔎 Feature evidence — VIP / Premium / Billing / Ads");
+        margin(text("Searches real DEX strings, class names and method definitions. Results are references, not unlocked features.",12,MUTED,false),auditCard,0,8);
+        auditSummary=text("Choose an APK to scan premium, subscription, billing and advertising references.",13,MUTED,false);
+        auditSummary.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        margin(auditSummary,auditCard,0,9);
+        auditTopic=new Spinner(this);
+        ArrayList<String> topics=new ArrayList<>();
+        for(ApkFeatureAudit.Topic t:ApkFeatureAudit.Topic.values())topics.add(t.title);
+        ArrayAdapter<String> adapter=new ArrayAdapter<>(this,
+            android.R.layout.simple_spinner_dropdown_item,topics);
+        auditTopic.setAdapter(adapter);
+        auditTopic.setContentDescription("Choose feature evidence category");
+        margin(auditTopic,auditCard,0,9);
+        auditTopic.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener(){
+            @Override public void onItemSelected(AdapterView<?> parent,View view,int position,long id){
+                auditPageNumber=0;showAuditMatches();
+            }
+            @Override public void onNothingSelected(AdapterView<?> parent){}
+        });
+        auditFilter=new EditText(this);
+        auditFilter.setSingleLine(true);
+        auditFilter.setTextColor(TEXT);
+        auditFilter.setHintTextColor(MUTED);
+        auditFilter.setHint("Filter feature references");
+        auditFilter.setContentDescription("Search within selected premium, billing or ad evidence");
+        auditFilter.setPadding(dp(12),dp(11),dp(12),dp(11));
+        auditFilter.setBackground(surface(Color.rgb(14,26,43),10));
+        margin(auditFilter,auditCard,0,9);
+        auditFilter.addTextChangedListener(new TextWatcher(){
+            @Override public void beforeTextChanged(CharSequence x,int a,int n,int b){}
+            @Override public void onTextChanged(CharSequence x,int a,int b,int n){
+                auditPageNumber=0;showAuditMatches();
+            }
+            @Override public void afterTextChanged(Editable x){}
+        });
+        LinearLayout auditNavigation=new LinearLayout(this);
+        auditNavigation.setOrientation(LinearLayout.HORIZONTAL);
+        auditPrevious=button("Previous");
+        auditNext=button("Next");
+        auditPage=text("Page 1 / 1",12,TEXT,true);
+        auditPage.setGravity(Gravity.CENTER);
+        auditPage.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        auditNavigation.addView(auditPrevious,new LinearLayout.LayoutParams(0,dp(48),2));
+        auditNavigation.addView(auditPage,new LinearLayout.LayoutParams(0,dp(48),2));
+        auditNavigation.addView(auditNext,new LinearLayout.LayoutParams(0,dp(48),2));
+        margin(auditNavigation,auditCard,0,8);
+        auditPrevious.setOnClickListener(v->{if(auditPageNumber>0){auditPageNumber--;showAuditPage();}});
+        auditNext.setOnClickListener(v->{
+            if((auditPageNumber+1)*AUDIT_PAGE_SIZE<auditMatches.size()){
+                auditPageNumber++;showAuditPage();
+            }
+        });
+        auditList=vertical();
+        auditCard.addView(auditList);
+        showAuditMatches();
+
         LinearLayout recentCard=card("Local APK library");
         margin(text("Saved document references only. No APK copies retained after analysis.",
                 12,MUTED,false),recentCard,0,8);
@@ -330,6 +395,37 @@ public final class MainActivity extends Activity {
         sourceExport.setEnabled(false);
         margin(sourceExport,sourceCard,0,8);
         sourceExport.setOnClickListener(v->startSourceExport());
+        editCopy=button("✎ Edit a local text copy");
+        editCopy.setEnabled(false);
+        margin(editCopy,sourceCard,0,8);
+        editCopy.setOnClickListener(v->startEditCopy());
+        assetEditor=new EditText(this);
+        assetEditor.setTextColor(TEXT);
+        assetEditor.setTextSize(13);
+        assetEditor.setTypeface(Typeface.MONOSPACE);
+        assetEditor.setGravity(Gravity.TOP);
+        assetEditor.setMinLines(8);
+        assetEditor.setMaxLines(18);
+        assetEditor.setContentDescription("Editable local copy of packaged plaintext resource");
+        assetEditor.setVisibility(View.GONE);
+        assetEditor.setBackground(surface(Color.rgb(14,26,43),10));
+        assetEditor.setPadding(dp(10),dp(10),dp(10),dp(10));
+        margin(assetEditor,sourceCard,0,8);
+        applyCopy=button("Use edited text for export");
+        applyCopy.setVisibility(View.GONE);
+        margin(applyCopy,sourceCard,0,8);
+        applyCopy.setOnClickListener(v->{
+            if(assetEditor.getVisibility()!=View.VISIBLE)return;
+            String text=assetEditor.getText().toString();
+            if(text.getBytes(StandardCharsets.UTF_8).length>65536){
+                status.setText("Edited text exceeds 64 KiB export budget");return;
+            }
+            selectedSourceText="# Edited LOCAL COPY — original APK unchanged\n"+
+                text;
+            renderSourcePreview(selectedSourceText);
+            sourceExport.setEnabled(true);
+            status.setText("Local copy edited. Export it separately; original APK remains unchanged.");
+        });
         sourceText=text("Select a class or file to view its decoded content.",12,TEXT,false);
         sourceText.setTypeface(Typeface.MONOSPACE);
         sourceText.setTextIsSelectable(true);
@@ -458,6 +554,10 @@ public final class MainActivity extends Activity {
                 ApkSourceExplorer.Result sources=null;
                 try{sources=ApkSourceExplorer.index(scratch);}
                 catch(IOException rejected){result.warnings.add("Source browser unavailable: "+rejected.getMessage());}
+                ApkFeatureAudit.Result audit=null;
+                try{audit=ApkFeatureAudit.analyze(scratch);}
+                catch(IOException rejected){result.warnings.add("Feature evidence scan failed: "+rejected.getMessage());}
+                final ApkFeatureAudit.Result featureResults=audit;
                 final ApkSourceExplorer.Result ready=sources;
                 final File captured=scratch;
                 scratch=null;
@@ -466,12 +566,17 @@ public final class MainActivity extends Activity {
                     if(sourceApk!=null && !sourceApk.equals(captured))sourceApk.delete();
                     sourceApk=captured;
                     sourceIndex=ready;
+                    featureAudit=featureResults;
+                    updateAuditSummary();
                     selectedSourceText=null;
                     selectedSourceName=null;
                     selectedSourceEntry=null;
                     pendingSourceExports.clear();
                     if(sourceLinks!=null)sourceLinks.removeAllViews();
                     sourceExport.setEnabled(false);
+                    editCopy.setEnabled(false);
+                    assetEditor.setVisibility(View.GONE);
+                    applyCopy.setVisibility(View.GONE);
                     sourceText.setText("Select a file or class to read its bytecode.");
                     sourceCard.setVisibility(ready==null?View.GONE:View.VISIBLE);
                     sourcePage=0;
@@ -596,6 +701,8 @@ public final class MainActivity extends Activity {
                     if(sourceApk!=null){sourceApk.delete();sourceApk=null;}
                     sourceIndex=null;
                     sourceCard.setVisibility(View.GONE);
+                    featureAudit=null;
+                    updateAuditSummary();
                     report=restored;
                     lastFilename="Imported report";
                     status.setText("Saved report loaded. Original APK NOT re-verified.");
@@ -631,6 +738,96 @@ public final class MainActivity extends Activity {
                 });
             }
         });
+    }
+
+    private void updateAuditSummary(){
+        if(auditSummary==null)return;
+        if(featureAudit==null){
+            auditSummary.setText("No full DEX evidence scan available.");
+        }else{
+            StringBuilder out=new StringBuilder();
+            out.append("DEX scanned: ").append(featureAudit.dexIndexed)
+               .append(" · strings ").append(featureAudit.stringsScanned)
+               .append(" · methods ").append(featureAudit.methodsScanned).append("\n");
+            for(ApkFeatureAudit.Topic topic:ApkFeatureAudit.Topic.values())
+                out.append(topic.title).append(": ")
+                   .append(featureAudit.count(topic)).append(" static matches\n");
+            if(featureAudit.limitReached)out.append("Some results truncated by safety limits.\n");
+            out.append("Matches do NOT verify any active premium entitlement or ad delivery.");
+            auditSummary.setText(out.toString());
+        }
+        showAuditMatches();
+    }
+
+    private void showAuditMatches(){
+        if(auditList==null||auditTopic==null)return;
+        auditMatches.clear();
+        if(featureAudit!=null){
+            ApkFeatureAudit.Topic[] values=ApkFeatureAudit.Topic.values();
+            int topic=Math.max(0,Math.min(auditTopic.getSelectedItemPosition(),values.length-1));
+            String filter=auditFilter==null?"":auditFilter.getText().toString().toLowerCase(Locale.ROOT).trim();
+            for(ApkFeatureAudit.Hit hit:featureAudit.hits.get(values[topic])){
+                if(filter.isEmpty()||hit.display().toLowerCase(Locale.ROOT).contains(filter))
+                    auditMatches.add(hit);
+            }
+        }
+        showAuditPage();
+    }
+
+    private void showAuditPage(){
+        if(auditList==null||auditPage==null)return;
+        auditList.removeAllViews();
+        int pages=Math.max(1,(auditMatches.size()+AUDIT_PAGE_SIZE-1)/AUDIT_PAGE_SIZE);
+        auditPageNumber=Math.min(Math.max(0,auditPageNumber),pages-1);
+        int from=auditPageNumber*AUDIT_PAGE_SIZE;
+        int to=Math.min(auditMatches.size(),from+AUDIT_PAGE_SIZE);
+        for(int i=from;i<to;i++){
+            ApkFeatureAudit.Hit hit=auditMatches.get(i);
+            Button item=button(hit.display());
+            item.setTextSize(12);
+            item.setContentDescription("Inspect static evidence "+hit.display());
+            margin(item,auditList,0,3);
+            item.setOnClickListener(v->{
+                if(hit.classDescriptor!=null&&sourceIndex!=null){
+                    for(ApkSourceExplorer.Entry candidate:sourceIndex.entries){
+                        if("class".equals(candidate.kind)&&
+                           hit.classDescriptor.equals(candidate.classDescriptor)&&
+                           hit.dexPath.equals(candidate.archivePath)){
+                            sourceSearch.setText(hit.classDescriptor);
+                            openSourceEntry(candidate);
+                            return;
+                        }
+                    }
+                }
+                ClipboardManager clipboard=(ClipboardManager)getSystemService(Context.CLIPBOARD_SERVICE);
+                if(clipboard!=null)
+                    clipboard.setPrimaryClip(ClipData.newPlainText("Static APK audit evidence",hit.display()));
+                status.setText("Static evidence copied. Does not prove entitlement/ad status.");
+            });
+        }
+        if(auditMatches.isEmpty())
+            margin(text("No matching static references in this category.",13,MUTED,false),
+                auditList,0,5);
+        auditPage.setText("Page "+(auditPageNumber+1)+" / "+pages);
+        auditPrevious.setEnabled(auditPageNumber>0);
+        auditNext.setEnabled(auditPageNumber+1<pages);
+    }
+
+    private void startEditCopy(){
+        if(selectedSourceEntry==null||selectedSourceText==null||
+           !"file".equals(selectedSourceEntry.kind)||
+           !ApkSourceExplorer.isText(selectedSourceEntry.archivePath))return;
+        String source=selectedSourceText;
+        int newline=source.indexOf("\n\n");
+        if(source.startsWith("# Packaged text asset:") && newline>=0)
+            source=source.substring(newline+2);
+        if(source.getBytes(StandardCharsets.UTF_8).length>65536){
+            status.setText("Text resource too large for safe editing");return;
+        }
+        assetEditor.setText(source);
+        assetEditor.setVisibility(View.VISIBLE);
+        applyCopy.setVisibility(View.VISIBLE);
+        status.setText("Editing an exported copy; the imported APK is unchanged.");
     }
 
     private void refreshSourceResults() {
@@ -677,6 +874,9 @@ public final class MainActivity extends Activity {
         final File file=sourceApk;
         selectedSourceEntry=entry;
         sourceText.setText("Reading "+entry.title+"…");
+        editCopy.setEnabled(false);
+        assetEditor.setVisibility(View.GONE);
+        applyCopy.setVisibility(View.GONE);
         sourceExport.setEnabled(false);
         sourceLinks.removeAllViews();
         final int viewMode=sourceModePicker.getSelectedItemPosition();
@@ -693,6 +893,10 @@ public final class MainActivity extends Activity {
                         entry.archivePath.replace('/','_')+".txt";
                     renderSourcePreview(output);
                     sourceExport.setEnabled(true);
+                    boolean textAsset="file".equals(entry.kind) &&
+                        ApkSourceExplorer.isText(entry.archivePath) &&
+                        output.length()<=65536 && !output.contains("Binary or unsupported asset");
+                    editCopy.setEnabled(textAsset);
                     showSourceLinks(targets);
                     status.setText("Viewing source: "+entry.title);
                 });
