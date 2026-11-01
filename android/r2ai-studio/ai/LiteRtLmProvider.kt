@@ -38,13 +38,15 @@ class LiteRtLmProvider : LocalAiProvider {
         loaded = false
         try { oldChat?.close() } finally { oldEngine?.close() }
         val candidate = Engine(EngineConfig(modelPath = modelPath, backend = Backend.CPU()))
+        // LiteRT-LM forbids closing an Engine whose initialize() failed.
+        // The engine is owned only after initialization completes.
+        candidate.initialize()
         try {
-            candidate.initialize()
             conversation = candidate.createConversation()
             engine = candidate
             loaded = true
         } catch (failure: Throwable) {
-            candidate.close()
+            runCatching { candidate.close() }
             throw failure
         }
     }
