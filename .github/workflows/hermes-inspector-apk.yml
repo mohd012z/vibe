@@ -1,6 +1,12 @@
 name: Vibe Hermes Inspector Android APK
 
 on:
+  push:
+    branches:
+      - feature/read-only-hermes-inspector-20261101
+    paths:
+      - android/hermes-inspector/**
+      - .github/workflows/hermes-inspector-apk.yml
   workflow_dispatch:
 
 permissions:
@@ -69,6 +75,21 @@ jobs:
               public static String echo(String text) { return text; }
               public static String greeting() {
                   return echo("Hello from genuine Dalvik bytecode");
+              }
+              public static String premiumEvidence() {
+                  return "VIP Premium Pro entitlement";
+              }
+              public static String subscriptionEvidence() {
+                  return "subscription paywall";
+              }
+              public static String billingEvidence() {
+                  return "BillingClient productDetails";
+              }
+              public static String adsEvidence() {
+                  return "AdMob AdView AppLovin";
+              }
+              public static String analyticsEvidence() {
+                  return "AppsFlyer attribution";
               }
           }
           JAVA
