@@ -19,6 +19,7 @@ class MainActivity : Activity() {
     private var model: File? = null
     private val importCode = 12
     private var importing = false
+    private var generating = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -84,7 +85,8 @@ class MainActivity : Activity() {
                                     val n = input.read(buffer)
                                     if (n < 0) break
                                     total += n
-                                    require(total <= 4L * 1024 * 1024 * 1024) { "Model exceeds 4 GiB limit" }
+                                    require(total <= maxBytes) { "Model exceeds 4 GiB limit" }
+                                    require(n.toLong() <= filesDir.usableSpace) { "Not enough free storage for model" }
                                     output.write(buffer, 0, n)
                                 }
                             }
@@ -118,7 +120,10 @@ class MainActivity : Activity() {
 
     private fun ask() {
         if (!ai.isLoaded) { showSetup(); return }
+        if (generating || importing) return
         val question = prompt.text.toString()
+        if (question.isBlank()) { prompt.error = "Enter a question"; return }
+        generating = true
         scope.launch {
             status.text = "Generating locally…"
             try {
@@ -127,6 +132,8 @@ class MainActivity : Activity() {
             } catch (e: Exception) {
                 status.text = "Generation failed"
                 output.text = e.message ?: "Unknown error"
+            } finally {
+                generating = false
             }
         }
     }
