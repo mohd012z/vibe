@@ -4,7 +4,7 @@
         android:allowBackup="false"
         android:fullBackupContent="false"
         android:label="Vibe Hermes Inspector"
-        android:icon="@android:drawable/ic_menu_info_details"
+        android:icon="@drawable/ic_hermes"
         android:supportsRtl="true"
         android:usesCleartextTraffic="false"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
