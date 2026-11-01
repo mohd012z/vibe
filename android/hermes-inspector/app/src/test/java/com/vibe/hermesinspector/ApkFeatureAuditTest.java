@@ -79,6 +79,32 @@ public class ApkFeatureAuditTest {
         assertTrue(hit.evidence.contains("billingEvidence"));
         assertTrue(report.warnings.stream().anyMatch(s->s.contains("do not prove actual execution")));
     }
+    @Test public void fourDexFilesAreIndexedWithoutLosingOwners()throws Exception{
+        byte[] raw=fixture();
+        Map<String,byte[]> values=new HashMap<>();
+        values.put("classes.dex",raw);
+        values.put("classes2.dex",raw);
+        values.put("classes3.dex",raw);
+        values.put("classes4.dex",raw);
+        File apk=create(values);
+        String originalHash=ApkInspector.sha256(apk);
+        ApkFeatureAudit.Result report=ApkFeatureAudit.analyze(apk);
+        assertEquals(4,report.dexIndexed);
+        assertTrue(report.stringUseSites>=4);
+        assertTrue(report.hits.get(ApkFeatureAudit.Topic.PREMIUM).stream()
+            .anyMatch(hit->"classes4.dex".equals(hit.dexPath) &&
+                hit.classDescriptor!=null));
+        assertEquals(originalHash,ApkInspector.sha256(apk));
+    }
+    @Test public void maliciousCompressedDexIsRejectedBeforeParsing()throws Exception{
+        File apk=create(java.util.Collections.singletonMap("classes.dex",new byte[3_000_000]));
+        try{
+            ApkFeatureAudit.analyze(apk);
+            fail("Compressed archive bomb accepted");
+        }catch(IOException expected){
+            assertTrue(expected.getMessage().contains("compressed DEX ratio"));
+        }
+    }
     @Test public void unsupportedOrUnrelatedAssetsYieldZeroMatches()throws Exception{
         Map<String,byte[]> entries=new HashMap<>();
         entries.put("assets/plain.txt","ordinary source".getBytes(StandardCharsets.UTF_8));
