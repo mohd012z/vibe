@@ -57,6 +57,27 @@ jobs:
           cp "$tmp/tests/version-94/sample.hermes_raw_hasm" "$target/hbc94.official"
           cp "$tmp/tests/version-99-202602/sample.hermes_raw_hasm" "$target/hbc99.official"
           sha256sum "$target"/hbc*.hbc
+      - name: Generate an authentic DEX class fixture using Android D8
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$RUNNER_TEMP/vibe-source-fixture"
+          mkdir -p "$tmp/java/com/vibe/fixture" "$tmp/classes" "$tmp/dex"
+          cat > "$tmp/java/com/vibe/fixture/Greeter.java" <<'JAVA'
+          package com.vibe.fixture;
+          public final class Greeter {
+              public static String greeting() {
+                  return "Hello from genuine Dalvik bytecode";
+              }
+          }
+          JAVA
+          javac --release 8 -d "$tmp/classes" "$tmp/java/com/vibe/fixture/Greeter.java"
+          "$ANDROID_HOME/build-tools/35.0.0/d8" --min-api 28 \
+             --lib "$ANDROID_HOME/platforms/android-35/android.jar" \
+             --output "$tmp/dex" "$tmp/classes/com/vibe/fixture/Greeter.class"
+          test -s "$tmp/dex/classes.dex"
+          cp "$tmp/dex/classes.dex" "android/hermes-inspector/app/src/test/resources/source-explorer-fixture.dex"
+          sha256sum "android/hermes-inspector/app/src/test/resources/source-explorer-fixture.dex"
       - name: Build Android 9+ debug APK and execute JVM unit tests
         run: |
           set -euo pipefail
