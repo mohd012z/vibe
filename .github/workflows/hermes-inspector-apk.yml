@@ -1,6 +1,12 @@
 name: Vibe Hermes Inspector Android APK
 
 on:
+  push:
+    branches:
+      - feature/read-only-hermes-inspector-20261101
+    paths:
+      - android/hermes-inspector/**
+      - .github/workflows/hermes-inspector-apk.yml
   workflow_dispatch:
 
 permissions:
@@ -66,8 +72,9 @@ jobs:
           cat > "$tmp/java/com/vibe/fixture/Greeter.java" <<'JAVA'
           package com.vibe.fixture;
           public final class Greeter {
+              public static String echo(String text) { return text; }
               public static String greeting() {
-                  return "Hello from genuine Dalvik bytecode";
+                  return echo("Hello from genuine Dalvik bytecode");
               }
           }
           JAVA
@@ -102,6 +109,19 @@ jobs:
           fi
           unzip -Z1 "$APK" | grep -qx classes.dex
           sha256sum "$APK" | tee android/hermes-inspector/app/build/outputs/apk/debug/SHA256SUMS.txt
+      - name: Verify release signing fails without private signing credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          if env -u VIBE_RELEASE_KEYSTORE_FILE -u VIBE_RELEASE_STORE_PASSWORD \
+                 -u VIBE_RELEASE_KEY_ALIAS -u VIBE_RELEASE_KEY_PASSWORD \
+                 gradle --no-daemon -p android/hermes-inspector verifyReleaseSigning \
+                 > /tmp/signing-gate-check.log 2>&1; then
+            echo "Release signing gate unexpectedly passed without keystore" >&2
+            exit 1
+          fi
+          grep -q 'Release signing requires' /tmp/signing-gate-check.log
+          echo 'PASS: private release-signing gate fails closed'
       - name: Upload installable signed debug APK
         uses: actions/upload-artifact@v4
         with:
