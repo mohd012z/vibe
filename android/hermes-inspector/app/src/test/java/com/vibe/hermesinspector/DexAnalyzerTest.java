@@ -63,9 +63,17 @@ public class DexAnalyzerTest {
     }
     @Test public void rejectsMissingStringReference(){
         byte[] bytes=fixture();
+        // String ID 2 is not referenced by a class or method, but must
+        // still be validated before the DEX is accepted.
         ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).putInt(120,90000);
         try{DexAnalyzer.inspect(bytes);fail("Invalid string pointer accepted");}
-        catch(IOException expected){assertNotNull(expected.getMessage());}
+        catch(IOException expected){assertTrue(expected.getMessage().contains("string-data offset"));}
+    }
+    @Test public void rejectsZeroStringPointer(){
+        byte[] bytes=fixture();
+        ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).putInt(120,0);
+        try{DexAnalyzer.inspect(bytes);fail("Null string pointer accepted");}
+        catch(IOException expected){assertTrue(expected.getMessage().contains("string-data offset"));}
     }
     @Test public void rejectsHugeTableCounts(){
         byte[] bytes=fixture();
