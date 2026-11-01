@@ -26,6 +26,7 @@ class MainActivity : Activity() {
     private val importCode = 12
     private var importing = false
     private var generating = false
+    private var downloadJob: Job? = null
     private var generationEpoch = 0L
     private val preferences by lazy { getSharedPreferences("offline_llm", MODE_PRIVATE) }
 
@@ -45,6 +46,10 @@ class MainActivity : Activity() {
         root.addView(import)
         root.addView(Button(this).apply { text = "LLM · Download model"; setOnClickListener { showDownloadModel() } })
         root.addView(Button(this).apply { text = "LLM · Load saved model"; setOnClickListener { showSavedModels() } })
+        root.addView(Button(this).apply {
+            text = "Cancel model download"
+            setOnClickListener { downloadJob?.cancel() }
+        })
         root.addView(expectedHash)
         root.addView(prompt)
         root.addView(send)
@@ -112,7 +117,7 @@ class MainActivity : Activity() {
                 } else {
                     importing = true
                     generationEpoch++
-                    scope.launch {
+                    downloadJob = scope.launch {
                         status.text = "Downloading LLM…"
                         try {
                             val file = withContext(Dispatchers.IO) {
@@ -138,6 +143,7 @@ class MainActivity : Activity() {
                                                 val buffer = ByteArray(65536)
                                                 var count = 0L
                                                 while (true) {
+                                                    currentCoroutineContext().ensureActive()
                                                     val n = input.read(buffer)
                                                     if (n == -1) break
                                                     count += n
@@ -177,9 +183,13 @@ class MainActivity : Activity() {
                                 }
                                 throw failure
                             }
+                        } catch (failure: CancellationException) {
+                            status.text = "LLM download cancelled"
+                            throw failure
                         } catch (failure: Exception) {
                             status.text = "LLM download failed: " + (failure.message ?: "Unknown error")
                         } finally {
+                            downloadJob = null
                             importing = false
                         }
                     }
