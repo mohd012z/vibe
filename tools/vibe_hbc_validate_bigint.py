@@ -6,7 +6,11 @@ import io
 import sys
 from pathlib import Path
 import types
-from vibe_hbc_bigint_patch import VERSIONS
+import tempfile
+import shutil
+import os
+import subprocess
+from vibe_hbc_bigint_patch import VERSIONS, patch
 from vibe_hbc_patch_all import git, PINNED
 
 def validate(root:Path)->dict:
@@ -51,6 +55,36 @@ def validate(root:Path)->dict:
             except (ValueError,TypeError): pass
             else:raise AssertionError(f"HBC{version} allowed corrupt BigInt section")
             count+=1
+    # Fault-inject a crash on second atomic replacement in a separate checkout.
+    with tempfile.TemporaryDirectory(prefix="vibe-bigint-rollback-") as work:
+        scratch=Path(work)/"checkout"
+        shutil.copytree(root,scratch,symlinks=True,
+             ignore=shutil.ignore_patterns(".vibe-hbc-bigint-backup-v1"))
+        originals={}
+        for version in VERSIONS:
+            rel=f"hbctool/hbc/hbc{version}/parser.py"
+            proc=subprocess.run(["git","-C",str(root),"show",f"HEAD:{rel}"],
+                    stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=True)
+            path=scratch/rel
+            path.write_bytes(proc.stdout)
+            originals[path]=proc.stdout
+        counter=[0]
+        def fail_second(src,dst):
+            counter[0]+=1
+            if counter[0]==2:
+                raise OSError("injected replacement failure")
+            return os.replace(src,dst)
+        try:
+            patch(scratch,replace=fail_second)
+        except OSError as exc:
+            assert "injected" in str(exc),str(exc)
+        else:
+            raise AssertionError("Fault-injection did not trigger")
+        assert counter[0]==2
+        for path,original in originals.items():
+            assert path.read_bytes()==original,("rollback mismatch",path)
+        assert not list(scratch.rglob(".vibe-hbc-stage-*"))
+    print("PASS: BigInt patch mid-replacement rollback recovered all original parser bytes")
     return {"versions":len(VERSIONS),"codec_cases":count,"status":"PASS",
             "genuine_nonempty_bigint_roundtrip":"unverified"}
 
