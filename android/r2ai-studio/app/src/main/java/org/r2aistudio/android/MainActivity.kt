@@ -9,6 +9,7 @@ import android.widget.*
 import kotlinx.coroutines.*
 import org.r2aistudio.ai.LiteRtLmProvider
 import org.r2aistudio.ai.ModelIntegrity
+import org.r2aistudio.ai.DefaultModelCatalog
 import java.io.File
 import java.security.MessageDigest
 import java.net.URL
@@ -93,6 +94,7 @@ class MainActivity : Activity() {
         val address = EditText(this).apply {
             setText("https://huggingface.co/litert-community/Qwen3-0.6B/resolve/main/Qwen3-0.6B.litertlm")
             hint = "https://.../model.litertlm"
+            setText(DefaultModelCatalog.url)
             setSingleLine(true)
             inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
         }
