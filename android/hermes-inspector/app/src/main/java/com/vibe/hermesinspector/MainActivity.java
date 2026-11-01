@@ -50,6 +50,8 @@ public final class MainActivity extends Activity {
     private static final int PICK_APK = 4201;
     private static final int EXPORT_REPORT = 4202;
     private static final int IMPORT_REPORT = 4203;
+    private static final int EXPORT_SOURCE = 4204;
+    private static final int SOURCE_PAGE_SIZE = 25;
     private static final String[] MODES = {"DEX strings", "DEX classes", "DEX method references", "Hermes strings", "Hermes functions", "Hermes opcodes", "Hermes string references", "Printable candidates"};
     private static final int BACKGROUND = Color.rgb(13, 20, 32);
     private static final int SURFACE = Color.rgb(28, 40, 59);
@@ -62,6 +64,16 @@ public final class MainActivity extends Activity {
     private final AtomicBoolean busy = new AtomicBoolean(false);
     private final List<String> filtered = new ArrayList<>();
     private ApkInspector.Report report;
+    private ApkSourceExplorer.Result sourceIndex;
+    private File sourceApk;
+    private String selectedSourceText;
+    private String selectedSourceName;
+    private final List<ApkSourceExplorer.Entry> sourceMatches=new ArrayList<>();
+    private LinearLayout sourceCard, sourceList;
+    private TextView sourceCounter, sourcePageLabel, sourceText;
+    private EditText sourceSearch;
+    private Button sourcePrevious, sourceNext, sourceExport;
+    private int sourcePage=0;
     private LibraryStore libraryStore;
     private LinearLayout libraryList;
     private Spinner modePicker;
@@ -225,6 +237,61 @@ public final class MainActivity extends Activity {
         importReport.setContentDescription("Import a previously saved analysis report");
         importReport.setOnClickListener(v -> chooseReport());
 
+        sourceCard=card("Explore APK source & files");
+        sourceCard.setVisibility(View.GONE);
+        margin(text("Files, bundled scripts and reconstructed DEX method bytecode. Original Kotlin/Java/Dart source is generally absent.",13,MUTED,false),sourceCard,0,10);
+        sourceSearch=new EditText(this);
+        sourceSearch.setTextColor(TEXT);
+        sourceSearch.setHintTextColor(MUTED);
+        sourceSearch.setSingleLine(true);
+        sourceSearch.setHint("Find class, source file, or resource path");
+        sourceSearch.setContentDescription("Search packaged APK files and DEX classes");
+        sourceSearch.setBackground(surface(Color.rgb(14,26,43),10));
+        sourceSearch.setPadding(dp(14),dp(11),dp(14),dp(11));
+        margin(sourceSearch,sourceCard,0,8);
+        sourceSearch.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence t,int start,int count,int after){}
+            @Override public void onTextChanged(CharSequence t,int start,int before,int count){
+                sourcePage=0; refreshSourceResults();
+            }
+            @Override public void afterTextChanged(Editable e){}
+        });
+        sourceCounter=text("No source index",13,MUTED,false);
+        margin(sourceCounter,sourceCard,0,8);
+        LinearLayout sourceNav=new LinearLayout(this);
+        sourceNav.setOrientation(LinearLayout.HORIZONTAL);
+        sourceNav.setGravity(Gravity.CENTER_VERTICAL);
+        sourcePrevious=button("‹");
+        sourcePrevious.setContentDescription("Previous APK source file page");
+        sourceNext=button("›");
+        sourceNext.setContentDescription("Next APK source file page");
+        sourcePageLabel=text("Page 1/1",12,TEXT,true);
+        sourcePageLabel.setGravity(Gravity.CENTER);
+        sourcePageLabel.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        sourceNav.addView(sourcePrevious,new LinearLayout.LayoutParams(0,dp(48),1));
+        sourceNav.addView(sourcePageLabel,new LinearLayout.LayoutParams(0,dp(48),3));
+        sourceNav.addView(sourceNext,new LinearLayout.LayoutParams(0,dp(48),1));
+        margin(sourceNav,sourceCard,0,6);
+        sourcePrevious.setOnClickListener(v->{if(sourcePage>0){sourcePage--;showSourceResults();}});
+        sourceNext.setOnClickListener(v->{
+            if((sourcePage+1)*SOURCE_PAGE_SIZE<sourceMatches.size()){
+                sourcePage++;showSourceResults();
+            }
+        });
+        sourceList=vertical();
+        sourceCard.addView(sourceList);
+        margin(text("Source preview (read-only)",16,TEXT,true),sourceCard,12,6);
+        sourceExport=button("Export selected text/source");
+        sourceExport.setEnabled(false);
+        margin(sourceExport,sourceCard,0,8);
+        sourceExport.setOnClickListener(v->startSourceExport());
+        sourceText=text("Select a class or file to view its decoded content.",12,TEXT,false);
+        sourceText.setTypeface(Typeface.MONOSPACE);
+        sourceText.setTextIsSelectable(true);
+        sourceText.setPadding(dp(12),dp(12),dp(12),dp(12));
+        sourceText.setBackground(surface(Color.rgb(12,23,37),10));
+        margin(sourceText,sourceCard,0,6);
+
         LinearLayout stringCard = card("Indexed analysis & search");
         margin(text("Browse verified DEX and Hermes records by category. Printable candidates are unverified.",
                 12, MUTED, false), stringCard, 0, 8);
@@ -322,6 +389,8 @@ public final class MainActivity extends Activity {
             writeExport(uri);
         }else if(requestCode==IMPORT_REPORT) {
             importReport(uri);
+        }else if(requestCode==EXPORT_SOURCE){
+            exportSource(uri);
         }
     }
 
@@ -337,8 +406,25 @@ public final class MainActivity extends Activity {
                 copyBounded(uri,scratch);
                 ApkInspector.Report result=ApkInspector.inspect(scratch,
                     version->getAssets().open("opcodes/hbc"+version+".json"));
+                ApkSourceExplorer.Result sources=null;
+                try{sources=ApkSourceExplorer.index(scratch);}
+                catch(IOException rejected){result.warnings.add("Source browser unavailable: "+rejected.getMessage());}
+                final ApkSourceExplorer.Result ready=sources;
+                final File captured=scratch;
+                scratch=null;
                 runOnUiThread(()->{
                     if(isFinishing()||isDestroyed())return;
+                    if(sourceApk!=null && !sourceApk.equals(captured))sourceApk.delete();
+                    sourceApk=captured;
+                    sourceIndex=ready;
+                    selectedSourceText=null;
+                    selectedSourceName=null;
+                    sourceExport.setEnabled(false);
+                    sourceText.setText("Select a file or class to read its bytecode.");
+                    sourceCard.setVisibility(ready==null?View.GONE:View.VISIBLE);
+                    sourcePage=0;
+                    sourceSearch.setText("");
+                    refreshSourceResults();
                     report=result;
                     lastFilename=name;
                     status.setText("Completed: "+name);
@@ -455,6 +541,9 @@ public final class MainActivity extends Activity {
                 final ApkInspector.Report restored=ReportImporter.parse(content);
                 runOnUiThread(()->{
                     if(isFinishing()||isDestroyed())return;
+                    if(sourceApk!=null){sourceApk.delete();sourceApk=null;}
+                    sourceIndex=null;
+                    sourceCard.setVisibility(View.GONE);
                     report=restored;
                     lastFilename="Imported report";
                     status.setText("Saved report loaded. Original APK NOT re-verified.");
@@ -487,6 +576,105 @@ public final class MainActivity extends Activity {
                         choose.setEnabled(true);
                         spinner.setVisibility(View.GONE);
                     }
+                });
+            }
+        });
+    }
+
+    private void refreshSourceResults() {
+        if(sourceSearch==null||sourceCounter==null||sourceList==null)return;
+        sourceMatches.clear();
+        if(sourceIndex!=null) {
+            String query=sourceSearch.getText().toString().trim().toLowerCase(Locale.ROOT);
+            for(ApkSourceExplorer.Entry e:sourceIndex.entries)
+                if(e.title.toLowerCase(Locale.ROOT).contains(query))
+                    sourceMatches.add(e);
+            sourceCounter.setText(sourceMatches.size()+" matching source entries · "+
+                sourceIndex.totalDexClasses+" DEX classes · "+
+                sourceIndex.dexFiles+" DEX files"+
+                (sourceIndex.truncated?" · INDEX LIMITED":""));
+        }else sourceCounter.setText("No APK source index available");
+        showSourceResults();
+    }
+
+    private void showSourceResults() {
+        if(sourceList==null||sourcePrevious==null||sourceNext==null)return;
+        sourceList.removeAllViews();
+        int total=sourceMatches.size();
+        int pages=Math.max(1,(total+SOURCE_PAGE_SIZE-1)/SOURCE_PAGE_SIZE);
+        sourcePage=Math.min(Math.max(0,sourcePage),pages-1);
+        int from=sourcePage*SOURCE_PAGE_SIZE;
+        int end=Math.min(total,from+SOURCE_PAGE_SIZE);
+        for(int i=from;i<end;i++){
+            ApkSourceExplorer.Entry entry=sourceMatches.get(i);
+            Button view=button(entry.title);
+            view.setTextSize(12);
+            view.setContentDescription("Open APK "+entry.kind+" "+entry.title);
+            margin(view,sourceList,0,3);
+            view.setOnClickListener(v->openSourceEntry(entry));
+        }
+        if(total==0)margin(text("No matching files or classes",13,MUTED,false),sourceList,4,8);
+        sourcePageLabel.setText("Page "+(sourcePage+1)+" / "+pages);
+        sourcePrevious.setEnabled(sourcePage>0);
+        sourceNext.setEnabled(sourcePage+1<pages);
+    }
+
+    private void openSourceEntry(ApkSourceExplorer.Entry entry){
+        if(sourceApk==null || entry==null)return;
+        final File file=sourceApk;
+        sourceText.setText("Reading "+entry.title+"…");
+        sourceExport.setEnabled(false);
+        executor.execute(()->{
+            try{
+                String output=ApkSourceExplorer.open(file,entry);
+                runOnUiThread(()->{
+                    if(isFinishing()||isDestroyed()||sourceApk!=file)return;
+                    selectedSourceText=output;
+                    selectedSourceName=entry.classDescriptor!=null?
+                        entry.classDescriptor.substring(1,entry.classDescriptor.length()-1).replace('/','_')+".smali":
+                        entry.archivePath.replace('/','_')+".txt";
+                    sourceText.setText(output);
+                    sourceExport.setEnabled(true);
+                    status.setText("Viewing source: "+entry.title);
+                });
+            }catch(Exception error){
+                runOnUiThread(()->{
+                    if(isFinishing()||isDestroyed()||sourceApk!=file)return;
+                    sourceText.setText("Unable to display source: "+error.getMessage());
+                });
+            }
+        });
+    }
+
+    private void startSourceExport(){
+        if(selectedSourceText==null)return;
+        Intent intent=new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("text/plain");
+        intent.putExtra(Intent.EXTRA_TITLE,selectedSourceName);
+        try{startActivityForResult(intent,EXPORT_SOURCE);}
+        catch(android.content.ActivityNotFoundException error){
+            status.setText("No document provider available for source export");
+        }
+    }
+    private void exportSource(Uri uri){
+        if(selectedSourceText==null)return;
+        final String text=selectedSourceText;
+        executor.execute(()->{
+            try(OutputStream stream=getContentResolver().openOutputStream(uri,"w")){
+                if(stream==null)throw new IOException("Document provider rejected source export");
+                byte[] bytes=text.getBytes(StandardCharsets.UTF_8);
+                if(bytes.length>ApkSourceExplorer.MAX_TEXT+4096)
+                    throw new IOException("Source preview exceeds export limit");
+                stream.write(bytes);
+                stream.flush();
+                runOnUiThread(()->{
+                    if(!isFinishing()&&!isDestroyed())status.setText("Selected source exported");
+                });
+            }catch(Exception error){
+                runOnUiThread(()->{
+                    if(!isFinishing()&&!isDestroyed())
+                        status.setText("Source export refused: "+error.getMessage());
                 });
             }
         });
@@ -615,6 +803,7 @@ public final class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         executor.shutdownNow();
+        if(sourceApk!=null){sourceApk.delete();sourceApk=null;}
         super.onDestroy();
     }
 }
