@@ -103,6 +103,19 @@ jobs:
           git -C "$temp/HBC-Tool" checkout --quiet eaf70a8700380f35e39e1bdbcaac01a3c49a63b0
           python3 tools/vibe_hbc_patch_all.py "$temp/HBC-Tool"
           python3 tools/vibe_hbc_validate_checkout.py "$temp/HBC-Tool"
+      - name: Public genuine HBC94/99 corpus and independent hermes-dec comparison
+        run: |
+          set -euo pipefail
+          temp="$(mktemp -d)"
+          trap 'rm -rf "$temp"' EXIT
+          git clone --quiet https://github.com/Kirlif/HBC-Tool.git "$temp/HBC-Tool"
+          git -C "$temp/HBC-Tool" checkout --quiet eaf70a8700380f35e39e1bdbcaac01a3c49a63b0
+          python3 tools/vibe_hbc_patch_all.py "$temp/HBC-Tool"
+          git clone --quiet --filter=blob:none --no-checkout https://github.com/P1sec/hermes-dec.git "$temp/hermes-dec"
+          git -C "$temp/hermes-dec" sparse-checkout init --cone
+          git -C "$temp/hermes-dec" sparse-checkout set src tests/version-94 tests/version-99-202602
+          git -C "$temp/hermes-dec" checkout --quiet 2e796663e1fedb93dca51060797ebf3327b3fedb
+          python3 tools/vibe_hermes_public_corpus.py "$temp/HBC-Tool" "$temp/hermes-dec"
       - name: APK pipeline + Vibe AI + Telegram + deploy suite
         run: |
           set -e
