@@ -77,6 +77,11 @@ public final class MainActivity extends Activity {
     private Spinner auditTopic;
     private EditText auditFilter, assetEditor;
     private Button auditPrevious, auditNext, editCopy, applyCopy;
+    private Button undoDraftButton, previewDiffButton;
+    private LinearLayout draftActions;
+    private TextView diffPreview;
+    private TextDraft localDraft;
+    private final Button[] quickAuditButtons=new Button[5];
     private final List<ApkFeatureAudit.Hit> auditMatches=new ArrayList<>();
     private int auditPageNumber=0;
     private ApkSourceExplorer.Result sourceIndex;
@@ -243,6 +248,28 @@ public final class MainActivity extends Activity {
         auditTopic.setAdapter(adapter);
         auditTopic.setContentDescription("Choose feature evidence category");
         margin(auditTopic,auditCard,0,9);
+        String[] quickNames={"VIP / Pro","Subscription","Billing","Ads","Analytics"};
+        for(int quickRow=0;quickRow<3;quickRow++){
+            LinearLayout row= new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            for(int column=0;column<2;column++){
+                int choice=quickRow*2+column;
+                if(choice>=quickNames.length)break;
+                Button quick=button(quickNames[choice]+" · 0");
+                quick.setTextSize(12);
+                quick.setContentDescription("Show "+quickNames[choice]+" evidence");
+                quickAuditButtons[choice]=quick;
+                LinearLayout.LayoutParams config=new LinearLayout.LayoutParams(0,dp(47),1);
+                if(column==1)config.setMargins(dp(5),0,0,0);
+                row.addView(quick,config);
+                quick.setOnClickListener(v->{
+                    auditTopic.setSelection(choice);
+                    if(auditFilter!=null)auditFilter.setText("");
+                    auditPageNumber=0;showAuditMatches();
+                });
+            }
+            margin(row,auditCard,0,5);
+        }
         auditTopic.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener(){
             @Override public void onItemSelected(AdapterView<?> parent,View view,int position,long id){
                 auditPageNumber=0;showAuditMatches();
@@ -416,20 +443,55 @@ public final class MainActivity extends Activity {
         assetEditor.setBackground(surface(Color.rgb(14,26,43),10));
         assetEditor.setPadding(dp(10),dp(10),dp(10),dp(10));
         margin(assetEditor,sourceCard,0,8);
+        draftActions=new LinearLayout(this);
+        draftActions.setOrientation(LinearLayout.HORIZONTAL);
+        undoDraftButton=button("↶ Undo edit");
+        previewDiffButton=button("Show changes");
+        draftActions.addView(undoDraftButton,new LinearLayout.LayoutParams(0,dp(48),1));
+        LinearLayout.LayoutParams diffButtonSize=new LinearLayout.LayoutParams(0,dp(48),1);
+        diffButtonSize.setMargins(dp(5),0,0,0);
+        draftActions.addView(previewDiffButton,diffButtonSize);
+        draftActions.setVisibility(View.GONE);
+        margin(draftActions,sourceCard,0,8);
+        diffPreview=text("No changes.",12,MUTED,false);
+        diffPreview.setTypeface(Typeface.MONOSPACE);
+        diffPreview.setTextIsSelectable(true);
+        diffPreview.setVisibility(View.GONE);
+        margin(diffPreview,sourceCard,0,7);
+        undoDraftButton.setOnClickListener(v->{
+            if(localDraft==null)return;
+            boolean reversed=localDraft.undo();
+            assetEditor.setText(localDraft.current());
+            diffPreview.setText(localDraft.diff());
+            status.setText(reversed?"Last applied local edit undone.":"No older applied edit.");
+        });
+        previewDiffButton.setOnClickListener(v->{
+            if(localDraft==null)return;
+            try{
+                TextDraft candidate=new TextDraft(localDraft.original());
+                candidate.apply(assetEditor.getText().toString());
+                diffPreview.setText(candidate.diff());
+                status.setText("Diff shows local copy only; original APK unchanged.");
+            }catch(IllegalArgumentException error){
+                status.setText("Diff refused: "+error.getMessage());
+            }
+        });
         applyCopy=button("Use edited text for export");
         applyCopy.setVisibility(View.GONE);
         margin(applyCopy,sourceCard,0,8);
         applyCopy.setOnClickListener(v->{
-            if(assetEditor.getVisibility()!=View.VISIBLE)return;
-            String text=assetEditor.getText().toString();
-            if(text.getBytes(StandardCharsets.UTF_8).length>65536){
-                status.setText("Edited text exceeds 64 KiB export budget");return;
+            if(assetEditor.getVisibility()!=View.VISIBLE||localDraft==null)return;
+            try{
+                localDraft.apply(assetEditor.getText().toString());
+                selectedSourceText="# Edited LOCAL COPY — original APK unchanged\n"+
+                    localDraft.current();
+                renderSourcePreview(selectedSourceText);
+                diffPreview.setText(localDraft.diff());
+                sourceExport.setEnabled(true);
+                status.setText("Local copy modified for export only. Original APK unchanged.");
+            }catch(IllegalArgumentException over){
+                status.setText("Edit refused: "+over.getMessage());
             }
-            selectedSourceText="# Edited LOCAL COPY — original APK unchanged\n"+
-                text;
-            renderSourcePreview(selectedSourceText);
-            sourceExport.setEnabled(true);
-            status.setText("Local copy edited. Export it separately; original APK remains unchanged.");
         });
         sourceText=text("Select a class or file to view its decoded content.",12,TEXT,false);
         sourceText.setTypeface(Typeface.MONOSPACE);
@@ -576,6 +638,9 @@ public final class MainActivity extends Activity {
                     selectedSourceText=null;
                     selectedSourceName=null;
                     selectedSourceEntry=null;
+                    localDraft=null;
+                    draftActions.setVisibility(View.GONE);
+                    diffPreview.setVisibility(View.GONE);
                     pendingSourceExports.clear();
                     if(sourceLinks!=null)sourceLinks.removeAllViews();
                     sourceExport.setEnabled(false);
@@ -708,6 +773,9 @@ public final class MainActivity extends Activity {
                     sourceCard.setVisibility(View.GONE);
                     featureAudit=null;
                     updateAuditSummary();
+                    localDraft=null;
+                    draftActions.setVisibility(View.GONE);
+                    diffPreview.setVisibility(View.GONE);
                     report=restored;
                     lastFilename="Imported report";
                     status.setText("Saved report loaded. Original APK NOT re-verified.");
@@ -753,13 +821,20 @@ public final class MainActivity extends Activity {
             StringBuilder out=new StringBuilder();
             out.append("DEX scanned: ").append(featureAudit.dexIndexed)
                .append(" · strings ").append(featureAudit.stringsScanned)
-               .append(" · methods ").append(featureAudit.methodsScanned).append("\n");
+               .append(" · methods ").append(featureAudit.methodsScanned)
+               .append(" · string-use sites ").append(featureAudit.stringUseSites).append("\n");
             for(ApkFeatureAudit.Topic topic:ApkFeatureAudit.Topic.values())
                 out.append(topic.title).append(": ")
                    .append(featureAudit.count(topic)).append(" static matches\n");
             if(featureAudit.limitReached)out.append("Some results truncated by safety limits.\n");
             out.append("Matches do NOT verify any active premium entitlement or ad delivery.");
             auditSummary.setText(out.toString());
+        }
+        String[] titles={"VIP / Pro","Subscription","Billing","Ads","Analytics"};
+        for(int i=0;i<quickAuditButtons.length;i++){
+            if(quickAuditButtons[i]!=null)
+                quickAuditButtons[i].setText(titles[i]+" · "+
+                    (featureAudit==null?0:featureAudit.count(ApkFeatureAudit.Topic.values()[i])));
         }
         showAuditMatches();
     }
@@ -799,6 +874,12 @@ public final class MainActivity extends Activity {
                            hit.classDescriptor.equals(candidate.classDescriptor)&&
                            hit.dexPath.equals(candidate.archivePath)){
                             sourceSearch.setText(hit.classDescriptor);
+                            if("Method string use".equals(hit.kind)){
+                                int arrow=hit.evidence.indexOf("->");
+                                int space=hit.evidence.indexOf(" uses ",arrow);
+                                if(arrow>=0&&space>arrow+2)
+                                    previewFind.setText(hit.evidence.substring(arrow+2,space));
+                            }
                             openSourceEntry(candidate);
                             return;
                         }
@@ -829,9 +910,17 @@ public final class MainActivity extends Activity {
         if(source.getBytes(StandardCharsets.UTF_8).length>65536){
             status.setText("Text resource too large for safe editing");return;
         }
+        try{
+            localDraft=new TextDraft(source);
+        }catch(IllegalArgumentException invalid){
+            status.setText("Cannot edit local copy: "+invalid.getMessage());return;
+        }
         assetEditor.setText(source);
         assetEditor.setVisibility(View.VISIBLE);
         applyCopy.setVisibility(View.VISIBLE);
+        draftActions.setVisibility(View.VISIBLE);
+        diffPreview.setVisibility(View.VISIBLE);
+        diffPreview.setText("No changes.");
         status.setText("Editing an exported copy; the imported APK is unchanged.");
     }
 
@@ -879,6 +968,9 @@ public final class MainActivity extends Activity {
         final File file=sourceApk;
         selectedSourceEntry=entry;
         sourceText.setText("Reading "+entry.title+"…");
+        localDraft=null;
+        draftActions.setVisibility(View.GONE);
+        diffPreview.setVisibility(View.GONE);
         editCopy.setEnabled(false);
         assetEditor.setVisibility(View.GONE);
         applyCopy.setVisibility(View.GONE);
