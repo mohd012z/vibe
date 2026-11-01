@@ -135,6 +135,19 @@ jobs:
           Path('/tmp/vibe-hermes-ui-check.js').write_text(script)
           PYCODE
           node --check /tmp/vibe-hermes-ui-check.js
+      - name: Genuine 10-version public Talaria bytecode compatibility survey
+        run: |
+          set -euo pipefail
+          temp="$(mktemp -d)"
+          trap 'rm -rf "$temp"' EXIT
+          git clone --quiet https://github.com/Kirlif/HBC-Tool.git "$temp/HBC-Tool"
+          git -C "$temp/HBC-Tool" checkout --quiet eaf70a8700380f35e39e1bdbcaac01a3c49a63b0
+          python3 tools/vibe_hbc_patch_all.py "$temp/HBC-Tool"
+          git clone --quiet --filter=blob:none --no-checkout https://github.com/tuvior/Talaria.git "$temp/Talaria"
+          git -C "$temp/Talaria" sparse-checkout init --cone
+          git -C "$temp/Talaria" sparse-checkout set src/talaria/hbc
+          git -C "$temp/Talaria" checkout --quiet 279c0f21e35e0e99ac699e6bdad9f237497adc12
+          python3 tools/vibe_hbc_talaria_corpus.py "$temp/HBC-Tool" "$temp/Talaria"
       - name: APK pipeline + Vibe AI + Telegram + deploy suite
         run: |
           set -e
