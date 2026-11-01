@@ -74,6 +74,7 @@ jobs:
           from pathlib import Path
           sys.path.insert(0,sys.argv[1])
           sys.modules['docopt']=types.ModuleType('docopt')
+          sys.modules['docopt'].docopt=lambda *args,**kwargs: {}
           from hbctool.hbc.hbc59 import HBC59
           from hbctool.hbc.hbc99 import HBC99
           from hbctool.hbc.hbc100 import HBC100
