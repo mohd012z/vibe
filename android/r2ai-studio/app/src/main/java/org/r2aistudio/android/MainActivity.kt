@@ -91,12 +91,13 @@ class MainActivity : Activity() {
             return
         }
         val address = EditText(this).apply {
+            setText("https://huggingface.co/litert-community/Qwen3-0.6B/resolve/main/Qwen3-0.6B.litertlm")
             hint = "https://.../model.litertlm"
             setSingleLine(true)
             inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
         }
-        AlertDialog.Builder(this).setTitle("Download LiteRT-LM model")
-            .setMessage("Use a direct HTTPS model file URL from a trusted publisher. Supply its SHA-256 in the main screen for verification. Downloads require internet; inference remains offline.")
+        AlertDialog.Builder(this).setTitle("Default model · Qwen3 0.6B")
+            .setMessage("Suggested CPU-compatible LiteRT-LM model from the LiteRT community. Verify the publisher license, exact file size and trusted SHA-256 before downloading. This dialog requires your confirmation; downloads use internet, inference is offline.")
             .setView(address)
             .setPositiveButton("Download") { _, _ ->
                 val urlText = address.text.toString().trim()
