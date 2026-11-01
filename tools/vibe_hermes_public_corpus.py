@@ -14,7 +14,8 @@ import subprocess
 import sys
 import tempfile
 
-FIXTURES={"94":"tests/version-94/sample.hbc",
+FIXTURES={"84":"tests/version-84/sample.hbc",
+          "94":"tests/version-94/sample.hbc",
           "99":"tests/version-99-202602/sample.hbc"}
 
 def run(argv:list[str], *, timeout:int=30, env:dict|None=None):
@@ -52,12 +53,12 @@ hbctool.asm(sys.argv[2],sys.argv[3])
 """,encoding="utf-8")
         env=dict(os.environ)
         env["PYTHONPATH"]=str(toolroot.resolve())
-        out["hbctool"]=run([sys.executable,str(shim),str(input_file),str(hbcout),str(rebuilt)],env=env)
+        out["hbctool"]=run([sys.executable,str(shim),str(input_file),str(hbcout),str(rebuilt)],env=env,timeout=90 if version=="84" else 30)
         p1out=temp/"p1.hasm"
         env_p1=dict(os.environ)
         env_p1["PYTHONPATH"]=str((p1root/"src").resolve())
         out["hermes_dec"]=run([sys.executable,str(p1root/"hbc-disassembler"),
-                               str(input_file),str(p1out)],env=env_p1)
+                               str(input_file),str(p1out)],env=env_p1,timeout=90 if version=="84" else 30)
         if rebuilt.is_file() and rebuilt.stat().st_size<8*1024*1024:
             newer=rebuilt.read_bytes()
             out["reassembled_sha256"]=hashlib.sha256(newer).hexdigest()
