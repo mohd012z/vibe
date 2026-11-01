@@ -17,6 +17,9 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.WindowInsets;
 import android.widget.Button;
+import android.widget.Spinner;
+import android.widget.ArrayAdapter;
+import android.widget.AdapterView;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
@@ -29,6 +32,8 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -43,6 +48,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 public final class MainActivity extends Activity {
     private static final int PICK_APK = 4201;
+    private static final int EXPORT_REPORT = 4202;
+    private static final String[] MODES = {"DEX strings", "DEX classes", "DEX method references", "Hermes strings", "Hermes functions", "Hermes opcodes", "Hermes string references", "Printable candidates"};
     private static final int BACKGROUND = Color.rgb(13, 20, 32);
     private static final int SURFACE = Color.rgb(28, 40, 59);
     private static final int TEXT = Color.rgb(237, 246, 255);
@@ -54,6 +61,11 @@ public final class MainActivity extends Activity {
     private final AtomicBoolean busy = new AtomicBoolean(false);
     private final List<String> filtered = new ArrayList<>();
     private ApkInspector.Report report;
+    private LibraryStore libraryStore;
+    private LinearLayout libraryList;
+    private Spinner modePicker;
+    private Button exportReport;
+    private String lastFilename = "APK";
     private int page = 0;
     private LinearLayout root;
     private LinearLayout resultList;
@@ -80,6 +92,7 @@ public final class MainActivity extends Activity {
         getWindow().setStatusBarColor(BACKGROUND);
         getWindow().setNavigationBarColor(BACKGROUND);
         getWindow().getDecorView().setSystemUiVisibility(0);
+        libraryStore = new LibraryStore(this);
         createView();
     }
 
@@ -179,6 +192,13 @@ public final class MainActivity extends Activity {
         status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         margin(status, importCard, 0, 0);
 
+        LinearLayout recentCard=card("Local APK library");
+        margin(text("Saved document references only. No APK copies retained after analysis.",
+                12,MUTED,false),recentCard,0,8);
+        libraryList=vertical();
+        recentCard.addView(libraryList);
+        refreshLibrary();
+
         LinearLayout metadataCard = card("Package & bytecode metadata");
         summary = text("No APK selected", 14, TEXT, false);
         margin(summary, metadataCard, 2, 8);
@@ -195,17 +215,33 @@ public final class MainActivity extends Activity {
                 status.setText("SHA-256 copied to clipboard.");
             }
         });
+        exportReport=button("Export analysis report (.json)");
+        exportReport.setEnabled(false);
+        margin(exportReport,metadataCard,9,0);
+        exportReport.setOnClickListener(v -> exportReport());
 
-        LinearLayout stringCard = card("Search printable byte sequences");
-        margin(text("These are sampled printable candidates, not validated Hermes string-table records.",
+        LinearLayout stringCard = card("Indexed analysis & search");
+        margin(text("Browse verified DEX and Hermes records by category. Printable candidates are unverified.",
                 12, MUTED, false), stringCard, 0, 8);
+        modePicker = new Spinner(this);
+        ArrayAdapter<String> modes = new ArrayAdapter<>(this,
+             android.R.layout.simple_spinner_dropdown_item, MODES);
+        modePicker.setAdapter(modes);
+        modePicker.setContentDescription("Choose indexed analysis category");
+        margin(modePicker, stringCard, 0, 12);
+        modePicker.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> parent,View view,int position,long id) {
+                page=0;updateResults();
+            }
+            @Override public void onNothingSelected(AdapterView<?> parent) {}
+        });
         search = new EditText(this);
         search.setSingleLine(true);
         search.setTextColor(TEXT);
         search.setHintTextColor(MUTED);
         search.setTextSize(16);
-        search.setHint("Search text candidates");
-        search.setContentDescription("Filter printable Hermes byte sequences");
+        search.setHint("Search indexed records");
+        search.setContentDescription("Filter indexed DEX and Hermes analysis records");
         search.setBackground(surface(Color.rgb(14, 26, 43), 10));
         search.setPadding(dp(14), dp(11), dp(14), dp(11));
         margin(search, stringCard, 0, 10);
@@ -217,7 +253,7 @@ public final class MainActivity extends Activity {
             }
             @Override public void afterTextChanged(Editable s) {}
         });
-        searchCaption = text("0 candidates", 13, MUTED, false);
+        searchCaption = text("0 matching records", 13, MUTED, false);
         margin(searchCaption, stringCard, 0, 8);
 
         LinearLayout nav = new LinearLayout(this);
@@ -259,7 +295,7 @@ public final class MainActivity extends Activity {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.setType("*/*");
-        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
         try {
             startActivityForResult(intent, PICK_APK);
         } catch (android.content.ActivityNotFoundException missingPicker) {
@@ -268,54 +304,144 @@ public final class MainActivity extends Activity {
     }
 
     @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != PICK_APK || resultCode != RESULT_OK || data == null) return;
-        Uri uri = data.getData();
-        if (uri == null || !busy.compareAndSet(false, true)) return;
-        final String name = displayName(uri);
+    protected void onActivityResult(int requestCode,int resultCode,Intent data) {
+        super.onActivityResult(requestCode,resultCode,data);
+        if(resultCode!=RESULT_OK || data==null || data.getData()==null)return;
+        Uri uri=data.getData();
+        if(requestCode==PICK_APK) {
+            boolean persisted=libraryStore.grant(uri);
+            startAnalysis(uri,displayName(uri),persisted);
+        }else if(requestCode==EXPORT_REPORT) {
+            writeExport(uri);
+        }
+    }
+
+    private void startAnalysis(Uri uri,String name,boolean persisted) {
+        if(!busy.compareAndSet(false,true))return;
         choose.setEnabled(false);
         spinner.setVisibility(View.VISIBLE);
-        status.setText("Analyzing " + name + " locally…");
-        executor.execute(() -> {
-            File scratch = null;
-            try {
-                scratch = File.createTempFile("vibe-hermes-", ".apk", getCacheDir());
-                copyBounded(uri, scratch);
-                ApkInspector.Report parsed = ApkInspector.inspect(scratch);
-                runOnUiThread(() -> {
-                    if (isFinishing() || isDestroyed()) return;
-                    report = parsed;
-                    status.setText("Completed: " + name);
-                    summary.setText("SHA-256: " + parsed.sha256 + "\n" +
-                        "Size: " + parsed.byteSize + " bytes\n" +
-                        "ZIP members: " + parsed.entries + "\n" +
-                        "Technologies: " + String.join(", ", parsed.technologies) + "\n" +
-                        "Confirmed Hermes bundles: " + parsed.hermesBundles + "\n" +
-                        "Total declared functions: " + parsed.functionCount);
-                    bundles.setText(parsed.bundleDetails.isEmpty() ?
-                            "No confirmed Hermes bundles" :
-                            String.join("\n\n", parsed.bundleDetails));
-                    warnings.setText(String.join("\n\n", parsed.warnings));
+        status.setText("Analyzing "+name+" locally…");
+        executor.execute(()->{
+            File scratch=null;
+            try{
+                scratch=File.createTempFile("vibe-inspection-",".apk",getCacheDir());
+                copyBounded(uri,scratch);
+                ApkInspector.Report result=ApkInspector.inspect(scratch,
+                    version->getAssets().open("opcodes/hbc"+version+".json"));
+                runOnUiThread(()->{
+                    if(isFinishing()||isDestroyed())return;
+                    report=result;
+                    lastFilename=name;
+                    status.setText("Completed: "+name);
+                    summary.setText(
+                        "SHA-256: "+result.sha256+"\n"+
+                        "Size: "+result.byteSize+" bytes\n"+
+                        "ZIP entries: "+result.entries+"\n"+
+                        "Technologies: "+String.join(", ",result.technologies)+"\n"+
+                        "DEX files indexed: "+result.dexParsed+"\n"+
+                        "DEX classes declared: "+result.dexDeclaredClasses+"\n"+
+                        "DEX method references declared: "+result.dexDeclaredMethods+"\n"+
+                        "DEX strings declared: "+result.dexDeclaredStrings+"\n"+
+                        "Confirmed Hermes bundles: "+result.hermesBundles+"\n"+
+                        "Hermes functions declared: "+result.functionCount+"\n"+
+                        "Hermes instructions decoded: "+result.hermesDecodedInstructions);
+                    bundles.setText(result.bundleDetails.isEmpty()?
+                        "No Hermes bundles. Choose DEX strings/classes/methods below.":
+                        String.join("\n\n",result.bundleDetails));
+                    warnings.setText(String.join("\n\n",result.warnings));
                     copyHash.setEnabled(true);
-                    page = 0;
-                    updateResults();
+                    exportReport.setEnabled(true);
+                    modePicker.setSelection(result.dexParsed>0 ? 0 :
+                        result.hermesBundles>0 ? 3 : 7);
+                    page=0;updateResults();
+                    if(persisted){
+                        libraryStore.save(uri,name,result.sha256);
+                        refreshLibrary();
+                    }
                 });
-            } catch (Exception error) {
-                final String message = error.getMessage() == null ?
-                        "Inspection failed safely" : error.getMessage();
-                runOnUiThread(() -> {
-                    if (!isFinishing() && !isDestroyed())
-                        status.setText("Unable to inspect APK: " + message);
+            }catch(Exception failure){
+                final String message=failure.getMessage()==null?
+                    "Malformed or unsupported APK":failure.getMessage();
+                runOnUiThread(()->{
+                    if(!isFinishing()&&!isDestroyed())
+                        status.setText("Inspection failed: "+message);
                 });
-            } finally {
-                if (scratch != null && scratch.exists()) scratch.delete();
+            }finally{
+                if(scratch!=null && scratch.exists())scratch.delete();
                 busy.set(false);
-                runOnUiThread(() -> {
-                    if (!isFinishing() && !isDestroyed()) {
+                runOnUiThread(()->{
+                    if(!isFinishing()&&!isDestroyed()){
                         choose.setEnabled(true);
                         spinner.setVisibility(View.GONE);
                     }
+                });
+            }
+        });
+    }
+
+    private void refreshLibrary() {
+        if(libraryList==null)return;
+        libraryList.removeAllViews();
+        List<LibraryStore.Item> items=libraryStore.list();
+        if(items.isEmpty()){
+            margin(text("No saved APK references yet",13,MUTED,false),libraryList,2,4);
+            return;
+        }
+        for(LibraryStore.Item item:items){
+            LinearLayout row=vertical();
+            margin(text(item.name,14,TEXT,true),row,4,2);
+            TextView digest=text(item.sha.substring(0,16)+"…",11,MUTED,false);
+            margin(digest,row,0,5);
+            LinearLayout buttons=new LinearLayout(this);
+            buttons.setOrientation(LinearLayout.HORIZONTAL);
+            Button open=button("Open");
+            Button forget=button("Remove");
+            buttons.addView(open,new LinearLayout.LayoutParams(0,dp(44),2));
+            buttons.addView(forget,new LinearLayout.LayoutParams(0,dp(44),1));
+            margin(buttons,row,0,4);
+            open.setOnClickListener(v->
+                startAnalysis(Uri.parse(item.uri),item.name,false));
+            forget.setOnClickListener(v->{
+                libraryStore.remove(item.uri);
+                refreshLibrary();
+            });
+            margin(row,libraryList,3,6);
+        }
+    }
+
+    private void exportReport() {
+        if(report==null)return;
+        Intent intent=new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("application/json");
+        intent.putExtra(Intent.EXTRA_TITLE,"Vibe_Hermes_Report_"+
+            report.sha256.substring(0,10)+".json");
+        try{
+            startActivityForResult(intent,EXPORT_REPORT);
+        }catch(android.content.ActivityNotFoundException missing){
+            status.setText("No document export provider installed.");
+        }
+    }
+
+    private void writeExport(Uri destination) {
+        if(report==null)return;
+        final ApkInspector.Report selected=report;
+        final String name=lastFilename;
+        executor.execute(()->{
+            try(OutputStream out=getContentResolver().openOutputStream(destination,"w")){
+                if(out==null)throw new IOException("Document provider refused export");
+                byte[] encoded=ReportExporter.toJson(selected,name).getBytes(StandardCharsets.UTF_8);
+                if(encoded.length>4*1024*1024)
+                    throw new IOException("Export exceeds 4 MiB");
+                out.write(encoded);
+                out.flush();
+                runOnUiThread(()->{
+                    if(!isFinishing()&&!isDestroyed())status.setText("Report saved as JSON");
+                });
+            }catch(Exception failure){
+                runOnUiThread(()->{
+                    if(!isFinishing()&&!isDestroyed())
+                        status.setText("Export failed: "+failure.getMessage());
                 });
             }
         });
@@ -355,16 +481,26 @@ public final class MainActivity extends Activity {
     }
 
     private void updateResults() {
-        if (filtered == null || search == null || searchCaption == null) return;
+        if(search==null||searchCaption==null||modePicker==null)return;
         filtered.clear();
-        if (report != null) {
-            String query = search.getText().toString().toLowerCase(Locale.ROOT).trim();
-            for (String candidate : report.candidates) {
-                if (candidate.toLowerCase(Locale.ROOT).contains(query)) filtered.add(candidate);
+        if(report!=null){
+            List<String> source;
+            switch(modePicker.getSelectedItemPosition()){
+                case 0:source=report.dexStrings;break;
+                case 1:source=report.dexClasses;break;
+                case 2:source=report.dexMethods;break;
+                case 3:source=report.hermesStrings;break;
+                case 4:source=report.hermesFunctions;break;
+                case 5:source=report.hermesInstructions;break;
+                case 6:source=report.hermesReferences;break;
+                default:source=report.candidates;
             }
+            String query=search.getText().toString().trim().toLowerCase(Locale.ROOT);
+            for(String value:source)
+                if(value.toLowerCase(Locale.ROOT).contains(query))
+                    filtered.add(value);
         }
-        searchCaption.setText(filtered.size() + " matching candidates" +
-                (report != null && report.sampleLimited ? " (first 8 MiB per bundle)" : ""));
+        searchCaption.setText(filtered.size()+" matching records");
         showPage();
     }
 
