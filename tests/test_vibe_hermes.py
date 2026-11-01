@@ -43,6 +43,24 @@ class InspectorTests(unittest.TestCase):
             with self.assertRaises(InvalidAPK):
                 read_hbc_header(data)
 
+    def test_bigint_preflight_fails_closed(self):
+        raw=bytearray(80)
+        struct.pack_into("<QI",raw,0,MAGIC,100)
+        struct.pack_into("<I",raw,32,80)
+        struct.pack_into("<II",raw,64,2,16)
+        result=read_hbc_header(bytes(raw),80)
+        self.assertEqual(result["layout_preflight"],"unsupported_bigint_sections")
+        inventory=inspect_bytes(apk([("assets/index.android.bundle",bytes(raw))]))
+        self.assertEqual(inventory["bundles"][0]["layout_preflight"],
+                         "unsupported_bigint_sections")
+
+    def test_bigint_empty_preflight(self):
+        raw=bytearray(80)
+        struct.pack_into("<QI",raw,0,MAGIC,99)
+        struct.pack_into("<I",raw,32,80)
+        self.assertEqual(read_hbc_header(bytes(raw),80)["layout_preflight"],
+                         "bigint_sections_empty")
+
     def test_mixed_technology(self):
         raw = apk([("classes.dex", b"dex"), ("lib/arm64-v8a/libflutter.so", b"x"),
                    ("assets/index.android.bundle", bytecode(100))])
