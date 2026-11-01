@@ -90,7 +90,7 @@ def disassemble(apk: bytes, entry: str) -> dict:
     bundle = found[0]
     if not bundle['hbctool_0_1_7_registered']:
         return {'status': 'unsupported', 'reason': 'Unregistered HBC version'}
-    if 96 <= bundle['hbc_version'] <= 100 and bundle.get('layout_preflight') != 'bigint_sections_empty':
+    if 87 <= bundle['hbc_version'] <= 100 and bundle.get('layout_preflight') != 'bigint_sections_empty':
         return {'status': 'unsupported', 'reason': 'Unverified or unsupported BigInt section layout'}
     if bundle['size'] > MAX_DISASM:
         raise InvalidAPK('Hermes candidate exceeds local analysis limit')
