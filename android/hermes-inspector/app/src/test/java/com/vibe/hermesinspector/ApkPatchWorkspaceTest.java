@@ -108,4 +108,22 @@ public class ApkPatchWorkspaceTest {
         catch(IOException expected){assertTrue(expected.getMessage().contains("compression ratio"));}
         assertFalse(out.exists());
     }
+    @Test public void oversizedBatchRollsBackAllStagedChanges()throws Exception{
+        Map<String,byte[]> assets=sample();
+        for(int i=0;i<13;i++)
+            assets.put("assets/replace"+i+".txt","findme in resource".getBytes(StandardCharsets.UTF_8));
+        File original=archive("many.apk",assets);
+        ApkPatchWorkspace plan=new ApkPatchWorkspace(original);
+        plan.stage(original,"assets/theme.css","body { color: blue; }");
+        int before=plan.size();
+        try{
+            plan.replaceLiteral(original,"findme","updated");
+            fail("Thirteen-file batch accepted");
+        }catch(IOException expected){
+            assertTrue(expected.getMessage().contains("twelve-file"));
+        }
+        assertEquals(before,plan.size());
+        assertTrue(plan.staged().get(0).path.equals("assets/theme.css"));
+    }
+
 }
