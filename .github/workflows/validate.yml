@@ -147,6 +147,15 @@ jobs:
           python3 tools/vibe_hbc_patch_all.py "$temp/HBC-Tool"
           python3 tools/vibe_hbc_bigint_patch.py "$temp/HBC-Tool"
           python3 tools/vibe_hbc_validate_bigint.py "$temp/HBC-Tool"
+      - name: SHA-pinned Hermes opcode translator mutation fuzz (22 versions)
+        run: |
+          set -euo pipefail
+          temp="$(mktemp -d)"
+          trap 'rm -rf "$temp"' EXIT
+          git clone --quiet https://github.com/Kirlif/HBC-Tool.git "$temp/HBC-Tool"
+          git -C "$temp/HBC-Tool" checkout --quiet eaf70a8700380f35e39e1bdbcaac01a3c49a63b0
+          python3 tools/vibe_hbc_translator_patch.py "$temp/HBC-Tool"
+          python3 tools/vibe_hbc_translator_fuzz.py "$temp/HBC-Tool"
       - name: Genuine 10-version public Talaria bytecode compatibility survey
         run: |
           set -euo pipefail
