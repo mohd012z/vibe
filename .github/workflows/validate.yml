@@ -117,6 +117,24 @@ jobs:
           git -C "$temp/hermes-dec" sparse-checkout set src tests/version-84 tests/version-94 tests/version-99-202602
           git -C "$temp/hermes-dec" checkout --quiet 2e796663e1fedb93dca51060797ebf3327b3fedb
           python3 tools/vibe_hermes_public_corpus.py "$temp/HBC-Tool" "$temp/hermes-dec"
+      - name: Check mobile Hermes JavaScript syntax and viewport markup
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          import ast
+          from pathlib import Path
+          source=Path('tools/vibe_hermes_mobile.py').read_text()
+          tree=ast.parse(source)
+          page=next(node.value.value for node in tree.body if isinstance(node,ast.Assign)
+              and any(isinstance(t,ast.Name) and t.id=='PAGE' for t in node.targets))
+          assert 'name="viewport"' in page
+          assert 'id="pageInfo"' in page
+          assert 'aria-live="polite"' in page
+          assert 'PAGE_SIZE=50' in page
+          script=page.split('<script>',1)[1].split('</script>',1)[0]
+          Path('/tmp/vibe-hermes-ui-check.js').write_text(script)
+          PYCODE
+          node --check /tmp/vibe-hermes-ui-check.js
       - name: APK pipeline + Vibe AI + Telegram + deploy suite
         run: |
           set -e
