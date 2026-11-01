@@ -103,9 +103,11 @@ class MainActivity : Activity() {
             .setPositiveButton("Download") { _, _ ->
                 val urlText = address.text.toString().trim()
                 val checksum = expectedHash.text.toString().trim()
+                val pinnedDefault = DefaultModelCatalog.isTrustedTransport(urlText)
+                val requiredHash = if (pinnedDefault) DefaultModelCatalog.sha256 else checksum
                 if (!urlText.startsWith("https://", ignoreCase = true) || !urlText.substringBefore('?').endsWith(".litertlm", ignoreCase = true)) {
                     status.text = "Provide a direct HTTPS .litertlm URL"
-                } else if (checksum.isNotEmpty() && runCatching { ModelIntegrity.normalizeExpectedSha256(checksum) }.isFailure) {
+                } else if (requiredHash.isNotEmpty() && runCatching { ModelIntegrity.normalizeExpectedSha256(requiredHash) }.isFailure) {
                     status.text = "Invalid expected SHA-256"
                 } else {
                     importing = true
@@ -127,6 +129,9 @@ class MainActivity : Activity() {
                                         require(connection.responseCode == 200) { "Download failed: HTTP " + connection.responseCode }
                                         require(connection.url.protocol.equals("https", ignoreCase = true)) { "Insecure download redirect refused" }
                                         require(connection.contentLengthLong <= limit) { "Model exceeds 4 GiB" }
+                                        if (pinnedDefault && connection.contentLengthLong >= 0L) {
+                                            require(connection.contentLengthLong == DefaultModelCatalog.estimatedBytes) { "Default model size mismatch" }
+                                        }
                                         val declaredLength = connection.contentLengthLong
                                         connection.inputStream.use { input ->
                                             temp.outputStream().use { output ->
@@ -149,8 +154,8 @@ class MainActivity : Activity() {
                                         require(declaredLength < 0L || temp.length() == declaredLength) { "Incomplete download" }
                                         require(temp.length() > 0) { "Downloaded model is empty" }
                                         val hash = digest.digest().joinToString("") { "%02x".format(it) }
-                                        if (checksum.isNotEmpty()) {
-                                            require(hash == ModelIntegrity.normalizeExpectedSha256(checksum)) { "Model checksum mismatch" }
+                                        if (requiredHash.isNotEmpty()) {
+                                            require(hash == ModelIntegrity.normalizeExpectedSha256(requiredHash)) { "Model checksum mismatch" }
                                         }
                                         require(temp.renameTo(destination)) { "Unable to save downloaded model" }
                                         destination
