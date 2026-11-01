@@ -216,6 +216,11 @@ public final class MainActivity extends Activity {
         choose.setContentDescription("Choose an APK through the Android document picker");
         margin(choose, importCard, 0, 9);
         choose.setOnClickListener(v -> chooseApk());
+        Button dualFileManager=button("⇄  Dual-pane file manager / Compare");
+        dualFileManager.setContentDescription("Open dual-pane file manager to browse and compare files or APKs");
+        margin(dualFileManager,importCard,8,3);
+        dualFileManager.setOnClickListener(v->
+            startActivity(new Intent(this,DualPaneActivity.class)));
 
         spinner = new ProgressBar(this);
         spinner.setIndeterminate(true);
