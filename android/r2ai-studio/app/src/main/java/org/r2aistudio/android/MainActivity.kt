@@ -9,6 +9,7 @@ import android.widget.*
 import kotlinx.coroutines.*
 import org.r2aistudio.ai.LiteRtLmProvider
 import java.io.File
+import java.security.MessageDigest
 
 class MainActivity : Activity() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -74,6 +75,7 @@ class MainActivity : Activity() {
                     val destination = File(filesDir, "model-" + java.util.UUID.randomUUID() + ".litertlm")
                     val temp = File(filesDir, destination.name + ".partial")
                     val maxBytes = 4L * 1024 * 1024 * 1024
+                    val digest = MessageDigest.getInstance("SHA-256")
                     require(filesDir.usableSpace > 0L) { "Cannot determine free model storage" }
                     try {
                         contentResolver.openInputStream(uri).use { input ->
@@ -88,10 +90,13 @@ class MainActivity : Activity() {
                                     require(total <= maxBytes) { "Model exceeds 4 GiB limit" }
                                     require(n.toLong() <= filesDir.usableSpace) { "Not enough free storage for model" }
                                     output.write(buffer, 0, n)
+                                    digest.update(buffer, 0, n)
                                 }
                             }
                         }
                         require(temp.length() > 0) { "Model is empty" }
+                        val hash = digest.digest().joinToString("") { "%02x".format(it) }
+                        require(hash.length == 64) { "SHA-256 calculation failed" }
                         require(temp.renameTo(destination)) { "Unable to save model" }
                         destination
                     } finally { temp.delete() }
@@ -105,6 +110,10 @@ class MainActivity : Activity() {
                     status.text = "Local AI ready"
                 } catch (failure: Exception) {
                     file.delete()
+                    val previous = model
+                    if (previous?.isFile == true && !ai.isLoaded) {
+                        try { ai.load(previous.absolutePath) } catch (_: Exception) { /* Keep original error. */ }
+                    }
                     throw failure
                 }
             } catch (e: Exception) {
