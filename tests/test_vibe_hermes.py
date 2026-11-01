@@ -54,6 +54,17 @@ class InspectorTests(unittest.TestCase):
         self.assertEqual(inventory["bundles"][0]["layout_preflight"],
                          "unsupported_bigint_sections")
 
+    def test_bigint_preflight_all_affected_versions(self):
+        for version in (87,88,90,94,95,96,97,98,99,100):
+            with self.subTest(version=version):
+                raw=bytearray(80)
+                struct.pack_into("<QI",raw,0,MAGIC,version)
+                struct.pack_into("<I",raw,32,80)
+                struct.pack_into("<II",raw,64,1,8)
+                result=read_hbc_header(bytes(raw),80)
+                self.assertEqual(result["layout_preflight"],
+                                 "unsupported_bigint_sections")
+
     def test_bigint_empty_preflight(self):
         raw=bytearray(80)
         struct.pack_into("<QI",raw,0,MAGIC,99)
