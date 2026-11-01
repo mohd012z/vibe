@@ -83,6 +83,32 @@ class MobileServerTests(unittest.TestCase):
         self.assertEqual(status,200)
         self.assertEqual(json.loads(body)['bundles'][0]['hbc_version'],100)
 
+    def test_mobile_pagination_markup(self):
+        status,body,_=self.request('GET','/')
+        self.assertEqual(status,200)
+        for element in (b'id="pageInfo"',b'id="prev"',b'id="next"',
+                        b'PAGE_SIZE=50',b'aria-live="polite"'):
+            self.assertIn(element,body)
+
+    def test_reject_parallel_analysis(self):
+        acquired=self.server.analysis_semaphore.acquire(blocking=False)
+        self.assertTrue(acquired)
+        try:
+            status,body,_=self.request('POST','/api/inspect',make_apk(),
+              {'X-Vibe-Token':self.token})
+            self.assertEqual(status,429)
+            self.assertIn(b'Analysis already active',body)
+        finally:
+            self.server.analysis_semaphore.release()
+
+    def test_resource_guard_recovers_after_bad_request(self):
+        status,_,_=self.request('POST','/api/inspect',b'no',
+          {'X-Vibe-Token':self.token})
+        self.assertEqual(status,400)
+        status,_,_=self.request('POST','/api/inspect',make_apk(),
+          {'X-Vibe-Token':self.token})
+        self.assertEqual(status,200)
+
     def test_disassembly_rejects_invalid_entry(self):
         with self.assertRaises(ValueError):
             disassemble(make_apk(),'../../../etc/passwd')
