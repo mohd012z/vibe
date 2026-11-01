@@ -146,7 +146,8 @@ public final class HbcAnalyzer {
         result.declaredStrings=declaredStrings;
 
         long functionTable=128;
-        long offset=table(data,functionTable,declaredFunctions,16);
+        int functionHeaderWidth=version<=96?16:12;
+        long offset=table(data,functionTable,declaredFunctions,functionHeaderWidth);
         offset=table(data,offset,kindCount,4);
         offset=table(data,offset,identifierCount,4);
         long stringTable=offset;
@@ -179,16 +180,16 @@ public final class HbcAnalyzer {
             }else if(result.strings.size()>=MAX_NAMES)result.truncated=true;
             result.stringsIndexed++;
         }
-        boolean modern=version>=97;
+        boolean modern=version>=98;
         JSONArray definitions=opcodes(schema);
         int fnLimit=Math.min(declaredFunctions,MAX_FUNCTIONS);
         for(int fid=0;fid<fnLimit;fid++){
-            long header=functionTable+(long)fid*16;
+            long header=functionTable+(long)fid*functionHeaderWidth;
             long w0=unsigned32(data,header),w1=unsigned32(data,header+4);
             long absolute=w0&0x1ffffffL;
             int functionName=(int)((w1 >>> (modern?14:15))& (modern?255:0x1ffff));
             long byteSize=w1& (modern?0x3fff:0x7fff);
-            int flags=data[atPosition(data,header+15,1)]&255;
+            int flags=data[atPosition(data,header+functionHeaderWidth-1,1)]&255;
             if((flags&0x20)!=0){
                 long largeOffset=((long)functionName<<24)|absolute;
                 atPosition(data,largeOffset,modern?32:32);
