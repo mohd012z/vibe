@@ -37,7 +37,7 @@ def read_hbc_header(data: bytes, entry_size: int | None = None) -> dict:
         result["declared_file_length"] = declared
         if declared and entry_size is not None and declared != entry_size:
             result["length_warning"] = "Declared length differs from ZIP entry length"
-    if 96 <= version <= 100:
+    if 87 <= version <= 100:
         if len(data) < 72:
             result["layout_preflight"] = "insufficient_header_bytes"
         else:
