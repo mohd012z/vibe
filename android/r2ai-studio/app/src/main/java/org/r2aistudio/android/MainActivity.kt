@@ -65,7 +65,7 @@ class MainActivity : Activity() {
     private fun autoSetup() {
         val saved = preferences.getString("activeModel", null)
         val selected = saved?.let { File(filesDir, it) }
-        if (selected?.isFile == true && selected.name.matches(Regex("model-[0-9a-fA-F-]{36}\\.litertlm"))) {
+        if (selected?.isFile == true && selected.name.startsWith("model-") && selected.name.endsWith(".litertlm") && selected.canonicalFile.parentFile == filesDir.canonicalFile) {
             importing = true
             scope.launch {
                 status.text = "Starting saved offline LLM…"
