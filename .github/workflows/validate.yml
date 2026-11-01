@@ -94,6 +94,15 @@ jobs:
               assert bytes(o.getObj()['stringStorage'])=='éé'.encode('utf-8')
           print('Actual pinned upstream source patched: 3 version checks and 6 rejected short-string edits OK')
           PYCODE
+      - name: All-version source and BitWriter validation on pinned HBC checkout
+        run: |
+          set -euo pipefail
+          temp="$(mktemp -d)"
+          trap 'rm -rf "$temp"' EXIT
+          git clone --quiet https://github.com/Kirlif/HBC-Tool.git "$temp/HBC-Tool"
+          git -C "$temp/HBC-Tool" checkout --quiet eaf70a8700380f35e39e1bdbcaac01a3c49a63b0
+          python3 tools/vibe_hbc_patch_all.py "$temp/HBC-Tool"
+          python3 tools/vibe_hbc_validate_checkout.py "$temp/HBC-Tool"
       - name: APK pipeline + Vibe AI + Telegram + deploy suite
         run: |
           set -e
