@@ -12,6 +12,7 @@ class IndexTests(unittest.TestCase):
       "\tCall                 \tReg8:0, Reg8:1\n"
       "EndFunction\n\n"
       "Function<beta>1(0 params, 2 registers, 0 numbers, 0 non-pointers):\n"
+      "\tLoadConstString       \tReg8:0, UInt16:7\n"
       "\t; Oper[0]: String(7) 'duplicate'\n"
       "EndFunction\n\n")
 
@@ -21,6 +22,21 @@ class IndexTests(unittest.TestCase):
         self.assertEqual(r["references_scanned"],2)
         self.assertEqual(r["functions"][0]["instruction_count"],2)
         self.assertEqual(r["functions"][0]["string_refs"],[7])
+
+    def test_orphan_annotations_are_not_proven_references(self):
+        source=("Function<orphan>0(0 params, 1 registers):\\n"
+                "\\t; Oper[0]: String(16) fabricated\\n"
+                "\\tNop                  \\t\\n"
+                "\\t; Oper[0]: String(7) supported\\n"
+                "EndFunction\\n")
+        source=source.replace("\\\\n","\\n").replace("\\\\t","\\t")
+        out=function_index(source)
+        self.assertEqual(out["functions"][0]["string_refs"],[7])
+        self.assertFalse(out["call_graph_proven"])
+
+    def test_overlong_id_does_not_crash(self):
+        source="Function<x>"+("9"*6000)+"(0 params):\\nEndFunction\\n"
+        self.assertEqual(function_index(source)["function_count"],0)
 
     def test_duplicate_id_rejected(self):
         src=self.SAMPLE+self.SAMPLE.split("Function<beta>")[0]
