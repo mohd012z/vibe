@@ -11,12 +11,13 @@ HBC_HEADER=re.compile(r"^Function<.*?>([0-9]{1,10})\(")
 HBC_OPCODE=re.compile(r"^\t([A-Za-z][A-Za-z0-9_]*)\s+\t")
 P1_HEADER=re.compile(r'^=> \[(?:Function|Generator function|Async function) #([0-9]{1,10}) ')
 P1_OPCODE=re.compile(r"^==> [0-9A-Fa-f]{8}: <([A-Za-z][A-Za-z0-9_]*)>:")
+OFFICIAL_OPCODE=re.compile(r"^\[@\s*[0-9]+\]\s+([A-Za-z][A-Za-z0-9_]*)\b")
 MAX_BYTES=64*1024*1024
 MAX_OPCODES=1000000
 MAX_FUNCTIONS=20000
 
 def parse(path:Path,provider:str)->dict[int,tuple[str,...]]:
-    if provider not in ("hbctool","hermes_dec"):
+    if provider not in ("hbctool","hermes_dec","official_hbcdump"):
         raise ValueError("Unknown provider")
     if not path.is_file() or path.is_symlink() or path.stat().st_size>MAX_BYTES:
         raise ValueError("Missing or oversized opcode listing")
@@ -25,7 +26,7 @@ def parse(path:Path,provider:str)->dict[int,tuple[str,...]]:
     count=0
     with path.open("r",encoding="utf-8",errors="replace") as f:
         for line in f:
-            header=(HBC_HEADER if provider=="hbctool" else P1_HEADER).match(line)
+            header=(HBC_HEADER if provider in ("hbctool","official_hbcdump") else P1_HEADER).match(line)
             if header:
                 fid=int(header.group(1))
                 if fid>0xffffffff or fid in functions or len(functions)>=MAX_FUNCTIONS:
@@ -38,7 +39,8 @@ def parse(path:Path,provider:str)->dict[int,tuple[str,...]]:
                 continue
             if current is None:
                 continue
-            inst=(HBC_OPCODE if provider=="hbctool" else P1_OPCODE).match(line)
+            matcher=HBC_OPCODE if provider=="hbctool" else OFFICIAL_OPCODE if provider=="official_hbcdump" else P1_OPCODE
+            inst=matcher.match(line)
             if inst:
                 functions[current].append(inst.group(1))
                 count+=1
