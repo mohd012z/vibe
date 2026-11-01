@@ -169,11 +169,14 @@ public final class ApkFeatureAudit {
                     DexBackedDexFile dex=DexBackedDexFile.fromInputStream(
                         null,new ByteArrayInputStream(raw));
                     result.dexIndexed++;
-                    for(String value:dex.getStrings()){
-                        if(result.stringsScanned++>=MAX_STRINGS_SCANNED){
+                    DexBackedDexFile.OptionalIndexedSection<String> strings=dex.getStringSection();
+                    for(int stringIndex=0;stringIndex<strings.size();stringIndex++){
+                        if(result.stringsScanned>=MAX_STRINGS_SCANNED){
                             result.limitReached=true;break;
                         }
-                        match(result,"DEX string",name,null,value);
+                        String value=strings.get(stringIndex);
+                        result.stringsScanned++;
+                        match(result,"DEX string #"+stringIndex,name,null,value);
                     }
                     for(ClassDef cls:dex.getClasses()){
                         if(result.classesScanned++>=MAX_CLASSES_SCANNED){
