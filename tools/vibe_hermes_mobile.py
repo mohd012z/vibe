@@ -13,13 +13,16 @@ import secrets
 import shutil
 import subprocess
 import tempfile
+import threading
 import zipfile
 
-from vibe_hermes import InvalidAPK, MAX_APK, inspect_bytes
+from vibe_hermes import InvalidAPK, inspect_bytes
+from vibe_hermes_index import function_index
 
 MAX_DISASM = 48 * 1024 * 1024
 MAX_OUTPUT = 16 * 1024 * 1024
 MAX_RESULTS = 2000
+MAX_MOBILE_UPLOAD = 96 * 1024 * 1024
 
 PAGE = r'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -43,12 +46,12 @@ table{border-collapse:collapse;width:100%;font-size:14px}th,td{text-align:left;p
 <label for="entry">Hermes bundle</label><select id="entry"></select></section>
 <section id="analysis" hidden><h2>String and function search</h2>
 <label for="query">Search</label><input id="query" type="search" placeholder="Filter up to 2000 strings and functions">
-<p id="counts"></p><div class="scroll"><table><thead><tr><th>Type</th><th>ID</th><th>Value</th></tr></thead><tbody id="rows"></tbody></table></div></section>
+<p id="counts"></p><nav aria-label="Search results pages"><button id="prev" disabled>Previous</button> <output id="pageInfo" aria-live="polite">Page 1</output> <button id="next" disabled>Next</button></nav><div class="scroll"><table><thead><tr><th>Type</th><th>ID</th><th>Value</th></tr></thead><tbody id="rows"></tbody></table></div></section>
 <script>
-const token='__TOKEN__';let file=null;let records=[];const el=s=>document.getElementById(s);
+const token='__TOKEN__';let file=null;let records=[];let pageNumber=0;const PAGE_SIZE=50;const el=s=>document.getElementById(s);
 const status=s=>el('status').textContent=s;
 async function post(route,entry){
- if(!file)throw Error('Select an APK first');if(file.size>268435456)throw Error('APK exceeds 256 MiB');
+ if(!file)throw Error('Select an APK first');if(file.size>100663296)throw Error('APK exceeds 96 MiB mobile limit');
  const headers={'X-Vibe-Token':token,'Content-Type':'application/octet-stream'};
  if(entry)headers['X-Hermes-Entry']=entry;
  const r=await fetch(route,{method:'POST',headers,body:file,cache:'no-store'});
@@ -62,13 +65,19 @@ el('scan').onclick=async()=>{el('scan').disabled=true;try{status('Inspecting loc
  catch(e){status('Error: '+e.message)}finally{el('scan').disabled=false}};
 el('disasm').onclick=async()=>{el('disasm').disabled=true;try{status('Analyzing in temporary directory…');
  let x=await post('/api/disasm',el('entry').value);if(x.status!=='ok')throw Error(x.reason||x.status);
- records=[...x.strings.map(v=>['String',v.id,v.value]),...x.functions.map(v=>['Function',v.id,v.name])];
+ records=[...x.strings.map(v=>['String',v.id,v.value]),...x.functions.map(v=>['Function',v.id,v.name+' · '+v.instruction_count+' instructions · strings '+v.string_refs.join(',')])];pageNumber=0;
  el('analysis').hidden=false;el('counts').textContent=x.string_count+' strings, '+x.function_count+' functions'+(x.truncated?' (results capped)':'');
  render();status('Read-only analysis complete');}catch(e){status('Error: '+e.message)}finally{el('disasm').disabled=false}};
 function render(){let q=el('query').value.toLowerCase();let body=el('rows');body.replaceChildren();
- let matches=records.filter(r=>String(r[2]).toLowerCase().includes(q)).slice(0,300);
- for(let rec of matches){let row=document.createElement('tr');for(let v of rec){let cell=document.createElement('td');cell.textContent=String(v);row.append(cell)}body.append(row)}}
-el('query').oninput=render;
+ let matches=records.filter(r=>String(r[2]).toLowerCase().includes(q));let totalPages=Math.max(1,Math.ceil(matches.length/PAGE_SIZE));
+ pageNumber=Math.max(0,Math.min(pageNumber,totalPages-1));let start=pageNumber*PAGE_SIZE;
+ for(let rec of matches.slice(start,start+PAGE_SIZE)){let row=document.createElement('tr');for(let v of rec){let cell=document.createElement('td');cell.textContent=String(v);row.append(cell)}body.append(row)}
+ el('pageInfo').textContent='Page '+(pageNumber+1)+' / '+totalPages+' ('+matches.length+' results)';
+ el('prev').disabled=pageNumber===0;el('next').disabled=pageNumber>=totalPages-1;
+}
+el('prev').onclick=()=>{pageNumber--;render()};
+el('next').onclick=()=>{pageNumber++;render()};
+el('query').oninput=()=>{pageNumber=0;render()};
 </script></body></html>'''
 
 
@@ -115,13 +124,14 @@ def disassemble(apk: bytes, entry: str) -> dict:
             if not isinstance(strings,list):
                 raise ValueError('Invalid string table')
             text = inst_path.read_text('utf-8')
-            functions = re.findall(r'^Function<([^\n>]*)>(\d+)\(',text,re.MULTILINE)
+            indexed = function_index(text)
         except (OSError,UnicodeError,ValueError):
             return {'status':'error','reason':'Malformed analysis output'}
-        return {'status':'ok', 'string_count':len(strings), 'function_count':len(functions),
+        return {'status':'ok', 'string_count':len(strings), 'function_count':indexed['function_count'],
                 'strings':[{'id':v.get('id'),'value':str(v.get('value',''))[:1024]} for v in strings[:MAX_RESULTS] if isinstance(v,dict)],
-                'functions':[{'id':int(number),'name':name[:200]} for name,number in functions[:MAX_RESULTS]],
-                'truncated':len(strings)>MAX_RESULTS or len(functions)>MAX_RESULTS}
+                'functions':indexed['functions'],
+                'references_scanned':indexed['references_scanned'],
+                'truncated':len(strings)>MAX_RESULTS or indexed['truncated']}
 
 
 def handler_factory(token: str):
@@ -168,9 +178,12 @@ def handler_factory(token: str):
                   f'http://127.0.0.1:{self.server.server_port}',
                   f'http://localhost:{self.server.server_port}'):
                 return self._json(403,{'error':'Origin rejected'})
+            if not self.server.analysis_semaphore.acquire(blocking=False):
+                return self._json(429,{'error':'Analysis already active; retry after completion'})
             try:
+                self.connection.settimeout(20)
                 length=int(self.headers.get('Content-Length','-1'))
-                if not 22<=length<=MAX_APK:
+                if not 22<=length<=MAX_MOBILE_UPLOAD:
                     raise InvalidAPK('Invalid request size')
                 raw=self.rfile.read(length)
                 if len(raw)!=length:
@@ -182,12 +195,17 @@ def handler_factory(token: str):
                 return self._json(400,{'error':str(e)[:150]})
             except Exception:
                 return self._json(400,{'error':'Inspection failed safely'})
+            finally:
+                self.server.analysis_semaphore.release()
     return Handler
 
 
 class LocalServer(ThreadingHTTPServer):
     daemon_threads=True
     request_queue_size=8
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.analysis_semaphore=threading.BoundedSemaphore(1)
 
 
 def main():
