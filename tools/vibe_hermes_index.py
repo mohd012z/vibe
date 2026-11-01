@@ -22,6 +22,7 @@ def function_index(hasm: str, max_functions: int = MAX_FUNCTIONS,
     functions=[]
     references=0
     current=None
+    current_refs=set()
     used_ids=set()
     truncated=False
     for line in hasm.splitlines():
@@ -38,6 +39,7 @@ def function_index(hasm: str, max_functions: int = MAX_FUNCTIONS,
             if fid in used_ids:
                 raise ValueError("Duplicate HASM function ID")
             used_ids.add(fid)
+            current_refs=set()
             current={"id":fid,"name":m.group(1)[:200],"string_refs":[],
                      "instruction_count":0}
             functions.append(current)
@@ -58,7 +60,8 @@ def function_index(hasm: str, max_functions: int = MAX_FUNCTIONS,
                         truncated=True
                         continue
                     references+=1
-                    if sid not in current["string_refs"]:
+                    if sid not in current_refs:
+                        current_refs.add(sid)
                         current["string_refs"].append(sid)
             continue
         # Only count actual assembler instruction lines; never accept prose.
