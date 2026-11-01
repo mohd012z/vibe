@@ -21,6 +21,7 @@ class MainActivity : Activity() {
     private val importCode = 12
     private var importing = false
     private var generating = false
+    private var generationEpoch = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -67,6 +68,7 @@ class MainActivity : Activity() {
         val uri = data?.data ?: return
         if (importing) return
         importing = true
+        generationEpoch++ // Invalidate any response started for the previous model.
         scope.launch {
             status.text = "Importing model…"
             try {
@@ -133,14 +135,20 @@ class MainActivity : Activity() {
         val question = prompt.text.toString()
         if (question.isBlank()) { prompt.error = "Enter a question"; return }
         generating = true
+        val epoch = ++generationEpoch
         scope.launch {
             status.text = "Generating locally…"
             try {
-                output.text = ai.generate(question)
-                status.text = "Local AI ready"
+                val answer = ai.generate(question)
+                if (epoch == generationEpoch && !isFinishing && !isDestroyed) {
+                    output.text = answer
+                    status.text = "Local AI ready"
+                }
             } catch (e: Exception) {
-                status.text = "Generation failed"
-                output.text = e.message ?: "Unknown error"
+                if (epoch == generationEpoch && !isFinishing && !isDestroyed) {
+                    status.text = "Generation failed"
+                    output.text = e.message ?: "Unknown error"
+                }
             } finally {
                 generating = false
             }
@@ -148,6 +156,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        generationEpoch++
         scope.cancel()
         Thread({ ai.close() }, "r2ai-engine-shutdown").start()
         super.onDestroy()
