@@ -29,23 +29,24 @@ class LiteRtLmProvider : LocalAiProvider {
             "Select a LiteRT-LM .litertlm model, not a GGUF file"
         }
         check(!closing.get()) { "Provider is closed" }
-        // Initialize the replacement before releasing the working model.
-        // This preserves the previous session if initialization fails, at the
-        // cost of temporarily needing memory for both models.
+        // Low-memory mode: release the old model before allocating the new one.
+        // On failure the caller may reload the previous model file.
+        val oldChat = conversation
+        val oldEngine = engine
+        conversation = null
+        engine = null
+        loaded = false
+        try { oldChat?.close() } finally { oldEngine?.close() }
         val candidate = Engine(EngineConfig(modelPath = modelPath, backend = Backend.CPU()))
         candidate.initialize()
-        val newChat = try {
-            candidate.createConversation()
+        try {
+            conversation = candidate.createConversation()
+            engine = candidate
+            loaded = true
         } catch (failure: Throwable) {
             candidate.close()
             throw failure
         }
-        val oldChat = conversation
-        val oldEngine = engine
-        conversation = newChat
-        engine = candidate
-        loaded = true
-        try { oldChat?.close() } finally { oldEngine?.close() }
     }
 
     override suspend fun generate(prompt: String): String = withContext(dispatcher) {
