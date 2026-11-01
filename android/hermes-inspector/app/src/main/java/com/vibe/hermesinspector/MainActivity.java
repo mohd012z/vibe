@@ -27,6 +27,11 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.text.Editable;
 import android.text.TextWatcher;
+import android.text.SpannableString;
+import android.text.Spanned;
+import android.text.style.ForegroundColorSpan;
+import java.util.regex.Pattern;
+import java.util.regex.Matcher;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -51,6 +56,7 @@ public final class MainActivity extends Activity {
     private static final int EXPORT_REPORT = 4202;
     private static final int IMPORT_REPORT = 4203;
     private static final int EXPORT_SOURCE = 4204;
+    private static final int EXPORT_PAGE = 4205;
     private static final int SOURCE_PAGE_SIZE = 25;
     private static final String[] MODES = {"DEX strings", "DEX classes", "DEX method references", "Hermes strings", "Hermes functions", "Hermes opcodes", "Hermes string references", "Printable candidates"};
     private static final int BACKGROUND = Color.rgb(13, 20, 32);
@@ -72,7 +78,12 @@ public final class MainActivity extends Activity {
     private LinearLayout sourceCard, sourceList;
     private TextView sourceCounter, sourcePageLabel, sourceText;
     private EditText sourceSearch;
-    private Button sourcePrevious, sourceNext, sourceExport;
+    private Button sourcePrevious, sourceNext, sourceExport, sourceExportPage;
+    private Spinner sourceModePicker;
+    private EditText previewFind;
+    private LinearLayout sourceLinks;
+    private ApkSourceExplorer.Entry selectedSourceEntry;
+    private List<ApkSourceExplorer.Entry> pendingSourceExports = new ArrayList<>();
     private int sourcePage=0;
     private LibraryStore libraryStore;
     private LinearLayout libraryList;
@@ -281,6 +292,40 @@ public final class MainActivity extends Activity {
         sourceList=vertical();
         sourceCard.addView(sourceList);
         margin(text("Source preview (read-only)",16,TEXT,true),sourceCard,12,6);
+        sourceModePicker=new Spinner(this);
+        sourceModePicker.setContentDescription("Smali, pseudocode or explicit calls view mode");
+        ArrayAdapter<String> sourceViews=new ArrayAdapter<>(this,
+            android.R.layout.simple_spinner_dropdown_item,
+            new String[]{"DEX bytecode (Smali-like)","Java-like commentary (approximate)",
+                "Explicit invoke callsites"});
+        sourceModePicker.setAdapter(sourceViews);
+        margin(sourceModePicker,sourceCard,0,8);
+        sourceModePicker.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener(){
+            @Override public void onItemSelected(AdapterView<?> parent,View view,int position,long id){
+                if(selectedSourceEntry!=null)openSourceEntry(selectedSourceEntry);
+            }
+            @Override public void onNothingSelected(AdapterView<?> parent){}
+        });
+        previewFind=new EditText(this);
+        previewFind.setSingleLine(true);
+        previewFind.setTextColor(TEXT);
+        previewFind.setHintTextColor(MUTED);
+        previewFind.setHint("Highlight text in open source");
+        previewFind.setContentDescription("Search within displayed source preview");
+        previewFind.setPadding(dp(12),dp(8),dp(12),dp(8));
+        previewFind.setBackground(surface(Color.rgb(14,26,43),10));
+        margin(previewFind,sourceCard,0,8);
+        previewFind.addTextChangedListener(new TextWatcher(){
+            @Override public void beforeTextChanged(CharSequence t,int st,int n,int after){}
+            @Override public void onTextChanged(CharSequence t,int st,int before,int count){
+                if(selectedSourceText!=null)renderSourcePreview(selectedSourceText);
+            }
+            @Override public void afterTextChanged(Editable t){}
+        });
+        sourceExportPage=button("Export visible source page as ZIP (up to 25)");
+        sourceExportPage.setEnabled(false);
+        margin(sourceExportPage,sourceCard,0,7);
+        sourceExportPage.setOnClickListener(v->startPageExport());
         sourceExport=button("Export selected text/source");
         sourceExport.setEnabled(false);
         margin(sourceExport,sourceCard,0,8);
@@ -291,6 +336,8 @@ public final class MainActivity extends Activity {
         sourceText.setPadding(dp(12),dp(12),dp(12),dp(12));
         sourceText.setBackground(surface(Color.rgb(12,23,37),10));
         margin(sourceText,sourceCard,0,6);
+        sourceLinks=vertical();
+        sourceCard.addView(sourceLinks);
 
         LinearLayout stringCard = card("Indexed analysis & search");
         margin(text("Browse verified DEX and Hermes records by category. Printable candidates are unverified.",
@@ -391,6 +438,8 @@ public final class MainActivity extends Activity {
             importReport(uri);
         }else if(requestCode==EXPORT_SOURCE){
             exportSource(uri);
+        }else if(requestCode==EXPORT_PAGE){
+            exportPage(uri);
         }
     }
 
@@ -419,6 +468,9 @@ public final class MainActivity extends Activity {
                     sourceIndex=ready;
                     selectedSourceText=null;
                     selectedSourceName=null;
+                    selectedSourceEntry=null;
+                    pendingSourceExports.clear();
+                    if(sourceLinks!=null)sourceLinks.removeAllViews();
                     sourceExport.setEnabled(false);
                     sourceText.setText("Select a file or class to read its bytecode.");
                     sourceCard.setVisibility(ready==null?View.GONE:View.VISIBLE);
@@ -617,24 +669,31 @@ public final class MainActivity extends Activity {
         sourcePageLabel.setText("Page "+(sourcePage+1)+" / "+pages);
         sourcePrevious.setEnabled(sourcePage>0);
         sourceNext.setEnabled(sourcePage+1<pages);
+        if(sourceExportPage!=null)sourceExportPage.setEnabled(total>0 && sourceApk!=null);
     }
 
     private void openSourceEntry(ApkSourceExplorer.Entry entry){
         if(sourceApk==null || entry==null)return;
         final File file=sourceApk;
+        selectedSourceEntry=entry;
         sourceText.setText("Reading "+entry.title+"…");
         sourceExport.setEnabled(false);
+        sourceLinks.removeAllViews();
+        final int viewMode=sourceModePicker.getSelectedItemPosition();
         executor.execute(()->{
             try{
-                String output=ApkSourceExplorer.open(file,entry);
+                String output=ApkSourceExplorer.open(file,entry,viewMode);
+                List<String> targets="class".equals(entry.kind)?
+                    ApkSourceExplorer.callTargets(file,entry):java.util.Collections.emptyList();
                 runOnUiThread(()->{
                     if(isFinishing()||isDestroyed()||sourceApk!=file)return;
                     selectedSourceText=output;
                     selectedSourceName=entry.classDescriptor!=null?
                         entry.classDescriptor.substring(1,entry.classDescriptor.length()-1).replace('/','_')+".smali":
                         entry.archivePath.replace('/','_')+".txt";
-                    sourceText.setText(output);
+                    renderSourcePreview(output);
                     sourceExport.setEnabled(true);
+                    showSourceLinks(targets);
                     status.setText("Viewing source: "+entry.title);
                 });
             }catch(Exception error){
@@ -643,6 +702,107 @@ public final class MainActivity extends Activity {
                     sourceText.setText("Unable to display source: "+error.getMessage());
                 });
             }
+        });
+    }
+
+    private void renderSourcePreview(String value) {
+        if(sourceText==null)return;
+        if(value.length()>ApkSourceExplorer.MAX_TEXT+4096){
+            sourceText.setText(value.substring(0,ApkSourceExplorer.MAX_TEXT));
+            return;
+        }
+        SpannableString colored=new SpannableString(value);
+        Matcher lines=Pattern.compile("(?m)^(?:\\\\.class|\\\\.super|\\\\.method|\\\\.end|\\\\.field|\\\\.registers|METHOD|method |#).*?$")
+            .matcher(value);
+        int count=0;
+        while(lines.find()&&count++<1200)
+            colored.setSpan(new ForegroundColorSpan(ACCENT),lines.start(),lines.end(),
+                            Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        String query=previewFind==null?"":previewFind.getText().toString().trim();
+        if(!query.isEmpty()&&query.length()<=120){
+            String lower=value.toLowerCase(Locale.ROOT);
+            String needle=query.toLowerCase(Locale.ROOT);
+            int pos=0,highlighted=0;
+            while((pos=lower.indexOf(needle,pos))>=0&&highlighted++<300){
+                colored.setSpan(new ForegroundColorSpan(Color.rgb(255,196,83)),
+                    pos,pos+needle.length(),Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                pos+=Math.max(1,needle.length());
+            }
+        }
+        sourceText.setText(colored);
+    }
+
+    private void showSourceLinks(List<String> targetMethods) {
+        sourceLinks.removeAllViews();
+        if(targetMethods==null||targetMethods.isEmpty()||sourceIndex==null)return;
+        margin(text("Referenced classes (explicit invoke sites)",14,ACCENT,true),
+               sourceLinks,10,5);
+        java.util.HashSet<String> owners=new java.util.HashSet<>();
+        int shown=0;
+        for(String target:targetMethods){
+            int arrow=target.indexOf("->");
+            if(arrow<1)continue;
+            String owner=target.substring(0,arrow);
+            if(!owners.add(owner))continue;
+            ApkSourceExplorer.Entry match=null;
+            for(ApkSourceExplorer.Entry candidate:sourceIndex.entries){
+                if("class".equals(candidate.kind)&&owner.equals(candidate.classDescriptor)){
+                    match=candidate;break;
+                }
+            }
+            if(match==null)continue;
+            final ApkSourceExplorer.Entry go=match;
+            Button ref=button("Open "+target);
+            ref.setTextSize(12);
+            ref.setContentDescription("Navigate to referenced class "+owner);
+            margin(ref,sourceLinks,0,4);
+            ref.setOnClickListener(v->{
+                sourceSearch.setText(owner);
+                openSourceEntry(go);
+            });
+            if(++shown>=16)break;
+        }
+    }
+
+    private void startPageExport(){
+        if(sourceApk==null||sourceMatches.isEmpty()||busy.get())return;
+        int start=sourcePage*SOURCE_PAGE_SIZE;
+        int end=Math.min(sourceMatches.size(),start+SOURCE_PAGE_SIZE);
+        pendingSourceExports=new ArrayList<>(sourceMatches.subList(start,end));
+        Intent intent=new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("application/zip");
+        intent.putExtra(Intent.EXTRA_TITLE,"Vibe_Source_Page_"+(sourcePage+1)+".zip");
+        try{startActivityForResult(intent,EXPORT_PAGE);}
+        catch(android.content.ActivityNotFoundException unavailable){
+            status.setText("No Android document provider for ZIP export");
+        }
+    }
+
+    private void exportPage(Uri destination){
+        if(sourceApk==null||pendingSourceExports.isEmpty())return;
+        if(!busy.compareAndSet(false,true))return;
+        final File file=sourceApk;
+        final List<ApkSourceExplorer.Entry> chosen=new ArrayList<>(pendingSourceExports);
+        final int mode=sourceModePicker.getSelectedItemPosition();
+        executor.execute(()->{
+            try{
+                byte[] contents=SourceBundleExporter.create(file,chosen,mode);
+                try(OutputStream stream=getContentResolver().openOutputStream(destination,"w")){
+                    if(stream==null)throw new IOException("Document provider denied ZIP export");
+                    stream.write(contents);
+                    stream.flush();
+                }
+                runOnUiThread(()->{
+                    if(!isFinishing()&&!isDestroyed())
+                        status.setText("Exported "+chosen.size()+" source previews as ZIP.");
+                });
+            }catch(Exception error){
+                runOnUiThread(()->{
+                    if(!isFinishing()&&!isDestroyed())
+                        status.setText("ZIP export rejected: "+error.getMessage());
+                });
+            }finally{busy.set(false);}
         });
     }
 
