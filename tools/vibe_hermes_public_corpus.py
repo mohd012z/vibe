@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from vibe_hbc_opcode_parity import parity
 
 FIXTURES={"84":"tests/version-84/sample.hbc",
           "94":"tests/version-94/sample.hbc",
@@ -72,6 +73,7 @@ hbctool.asm(sys.argv[2],sys.argv[3])
             count_b=len(re.findall(r"^=> \[(?:Function|Generator function|Async function) #",b,re.MULTILINE))
             out["function_counts"]={"hbctool":count_a,"hermes_dec":count_b}
             out["structural_count_agreement"]=count_a==count_b
+            out["instruction_parity"]=parity(hbcout/"instruction.hasm",p1out)
         else:
             out["structural_count_agreement"]=False
         out["status"]=("byte_exact_and_function_count_agreement"
