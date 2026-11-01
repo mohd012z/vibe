@@ -74,6 +74,8 @@ public final class ApkSourceExplorer {
         if(apk==null || !apk.isFile() || apk.length()>ApkInspector.MAX_APK_BYTES ||
            apk.length()<22)throw new IOException("No valid bounded APK selected");
         Result result=new Result();
+        long declaredTotal=0;
+        java.util.Set<String> seenNames=new java.util.HashSet<>();
         try(ZipFile zip=new ZipFile(apk)){
             Enumeration<? extends ZipEntry> all=zip.entries();
             int members=0;
@@ -85,7 +87,15 @@ public final class ApkSourceExplorer {
                     throw new IOException("APK has too many ZIP entries");
                 String path=member.getName();
                 if(!safePath(path))throw new IOException("Unsafe ZIP member");
+                if(!seenNames.add(path))throw new IOException("Duplicate APK ZIP entry");
                 if(member.isDirectory())continue;
+                long size=member.getSize(),packed=member.getCompressedSize();
+                if(size<0||packed<0||size>ApkInspector.MAX_TOTAL_UNCOMPRESSED||
+                   declaredTotal>ApkInspector.MAX_TOTAL_UNCOMPRESSED-size)
+                    throw new IOException("APK source ZIP size budget exceeded");
+                declaredTotal+=size;
+                if(size>1024*1024 && (packed==0 || size/Math.max(1,packed)>200))
+                    throw new IOException("APK source compression ratio exceeds limit");
                 if(result.entries.size()<MAX_INDEX){
                     result.entries.add(new Entry("file",path,null,"FILE  "+path));
                     result.totalAssets++;
