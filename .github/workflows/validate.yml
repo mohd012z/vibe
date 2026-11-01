@@ -104,7 +104,7 @@ jobs:
           python3 tools/vibe_hbc_patch_all.py "$temp/HBC-Tool"
           python3 tools/vibe_hbc_validate_checkout.py "$temp/HBC-Tool"
           python3 tools/vibe_hbc_source_audit.py "$temp/HBC-Tool"
-      - name: Public genuine HBC94/99 corpus and independent hermes-dec comparison
+      - name: Public genuine HBC84/94/99 corpus and independent hermes-dec comparison
         run: |
           set -euo pipefail
           temp="$(mktemp -d)"
@@ -114,7 +114,7 @@ jobs:
           python3 tools/vibe_hbc_patch_all.py "$temp/HBC-Tool"
           git clone --quiet --filter=blob:none --no-checkout https://github.com/P1sec/hermes-dec.git "$temp/hermes-dec"
           git -C "$temp/hermes-dec" sparse-checkout init --cone
-          git -C "$temp/hermes-dec" sparse-checkout set src tests/version-94 tests/version-99-202602
+          git -C "$temp/hermes-dec" sparse-checkout set src tests/version-84 tests/version-94 tests/version-99-202602
           git -C "$temp/hermes-dec" checkout --quiet 2e796663e1fedb93dca51060797ebf3327b3fedb
           python3 tools/vibe_hermes_public_corpus.py "$temp/HBC-Tool" "$temp/hermes-dec"
       - name: APK pipeline + Vibe AI + Telegram + deploy suite
