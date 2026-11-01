@@ -38,11 +38,27 @@ public final class ApkInspector {
               87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100)));
     private ApkInspector() {}
 
+    public interface OpcodeProvider {
+        InputStream open(int version) throws IOException;
+    }
+    public static boolean supportedHbc(int version) {
+        return REGISTERED.contains(version);
+    }
+
     public static final class Report {
         public final List<String> technologies = new ArrayList<>();
         public final List<String> bundleDetails = new ArrayList<>();
         public final List<String> candidates = new ArrayList<>();
         public final List<String> warnings = new ArrayList<>();
+        public final List<String> dexStrings = new ArrayList<>();
+        public final List<String> dexClasses = new ArrayList<>();
+        public final List<String> dexMethods = new ArrayList<>();
+        public final List<String> hermesStrings = new ArrayList<>();
+        public final List<String> hermesFunctions = new ArrayList<>();
+        public final List<String> hermesInstructions = new ArrayList<>();
+        public final List<String> hermesReferences = new ArrayList<>();
+        public int dexParsed, dexDeclaredClasses, dexDeclaredMethods, dexDeclaredStrings;
+        public int hermesDecodedInstructions;
         public String sha256;
         public long byteSize;
         public int entries;
@@ -95,6 +111,10 @@ public final class ApkInspector {
     }
 
     public static Report inspect(File file) throws IOException {
+        return inspect(file, null);
+    }
+
+    public static Report inspect(File file, OpcodeProvider opcodeProvider) throws IOException {
         if (file == null || !file.isFile()) throw new IOException("APK file not found");
         if (file.length() < 22 || file.length() > MAX_APK_BYTES)
             throw new IOException("APK is empty or exceeds 96 MiB");
@@ -105,6 +125,7 @@ public final class ApkInspector {
         Set<String> names = new HashSet<>();
         LinkedHashSet<String> candidateStrings = new LinkedHashSet<>();
         boolean hasDex = false, hasFlutter = false, hasReactNative = false;
+        long totalDexBytes = 0;
         long declaredTotal = 0L;
 
         try (ZipFile zip = new ZipFile(file)) {
@@ -130,7 +151,29 @@ public final class ApkInspector {
                     throw new IOException("Excessive ZIP compression ratio");
 
                 String lower = name.toLowerCase(Locale.ROOT);
-                if (lower.matches("classes[0-9]*\\.dex")) hasDex = true;
+                if (lower.matches("classes[0-9]*\\.dex")) {
+                    hasDex = true;
+                    if(size > 0 && size <= DexAnalyzer.MAX_DEX_BYTES &&
+                       totalDexBytes + size <= 64L * 1024L * 1024L) {
+                        totalDexBytes += size;
+                        try (InputStream stream = zip.getInputStream(entry)) {
+                            byte[] data = readDexBytes(stream, (int)size);
+                            DexAnalyzer.Result dex = DexAnalyzer.inspect(data);
+                            report.dexParsed++;
+                            report.dexDeclaredClasses += dex.declaredClasses;
+                            report.dexDeclaredMethods += dex.declaredMethods;
+                            report.dexDeclaredStrings += dex.declaredStrings;
+                            appendCapped(report.dexStrings,dex.strings,6000);
+                            appendCapped(report.dexClasses,dex.classNames,3000);
+                            appendCapped(report.dexMethods,dex.methodReferences,4000);
+                            report.warnings.addAll(dex.issues);
+                        } catch(IOException | RuntimeException invalid) {
+                            report.warnings.add(name+": DEX index rejected: "+safeReason(invalid));
+                        }
+                    } else {
+                        report.warnings.add(name+": DEX indexing skipped because it exceeds memory limits");
+                    }
+                }
                 if (lower.endsWith("/libflutter.so") || lower.endsWith("/libapp.so")
                         || lower.startsWith("assets/flutter_assets/")) hasFlutter = true;
                 if (lower.startsWith("assets/") &&
@@ -171,6 +214,22 @@ public final class ApkInspector {
                 if (size > MAX_SCAN_BYTES) report.sampleLimited = true;
                 addAsciiCandidates(sample, candidateStrings);
                 addUtf16Candidates(sample, candidateStrings);
+                if(opcodeProvider!=null && sample.length >= 128 && supportedHbc(header.version)
+                        && sample.length == size) {
+                    try (InputStream schema = opcodeProvider.open(header.version)) {
+                        HbcAnalyzer.Result hbc = HbcAnalyzer.parse(sample,schema);
+                        appendCapped(report.hermesStrings,hbc.strings,6000);
+                        appendCapped(report.hermesFunctions,hbc.functions,3000);
+                        appendCapped(report.hermesInstructions,hbc.instructions,6000);
+                        appendCapped(report.hermesReferences,hbc.references,3000);
+                        report.hermesDecodedInstructions += hbc.instructionsDecoded;
+                        report.warnings.addAll(hbc.warnings);
+                    } catch(IOException | RuntimeException invalid) {
+                        report.warnings.add(name+": full HBC index unavailable: "+safeReason(invalid));
+                    }
+                } else if(opcodeProvider!=null && sample.length<size && header.registered) {
+                    report.warnings.add(name+": HBC bytecode exceeds 8 MiB sample window; full disassembly skipped");
+                }
             }
         } catch (IOException invalid) {
             throw new IOException("APK inspection refused: " + invalid.getMessage(), invalid);
@@ -183,11 +242,41 @@ public final class ApkInspector {
         if (report.technologies.isEmpty()) report.technologies.add("Unknown APK technology");
         if (report.hermesBundles == 0)
             report.warnings.add("No confirmed Hermes magic found in candidate bundle entries");
-        report.warnings.add("Printable strings are candidate byte sequences, not a decoded Hermes string table.");
-        report.warnings.add("Function count is header metadata; function bodies and names are not decompiled.");
+        if(report.dexParsed==0 && hasDex)
+            report.warnings.add("DEX detected, but no complete class/string index was available under scan limits.");
+        if(report.hermesBundles==0)
+            report.warnings.add("This APK has DEX bytecode, not Hermes. Select DEX strings/classes/methods to search.");
+        report.warnings.add("Printable byte sequences are heuristics, separate from verified HBC/DEX string tables.");
+        report.warnings.add("Decoded Hermes instructions show bytecode opcodes, not reconstructed JavaScript.");
+        report.warnings.add("DEX method references do not prove executable method bodies or call relationships.");
         if (report.sampleLimited)
             report.warnings.add("Large bundle: inspected first 8 MiB only for string candidates.");
         return report;
+    }
+
+    private static String safeReason(Throwable error) {
+        String message=error.getMessage();
+        if(message==null)return "malformed or unsupported data";
+        return message.length()>160?message.substring(0,160):message;
+    }
+    private static void appendCapped(List<String> to,List<String> from,int limit) {
+        for(String item:from){
+            if(to.size()>=limit)break;
+            to.add(item);
+        }
+    }
+    private static byte[] readDexBytes(InputStream input,int size)throws IOException {
+        if(size<=0||size>DexAnalyzer.MAX_DEX_BYTES)throw new IOException("DEX input too large");
+        byte[] data=new byte[size];
+        int p=0;
+        while(p<data.length){
+            if(Thread.currentThread().isInterrupted())throw new IOException("DEX decoding cancelled");
+            int n=input.read(data,p,Math.min(65536,data.length-p));
+            if(n<0)throw new IOException("Truncated DEX stream");
+            if(n==0)continue;
+            p+=n;
+        }
+        return data;
     }
 
     private static boolean isSafeZipName(String name) {
