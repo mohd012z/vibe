@@ -11,6 +11,8 @@ import org.r2aistudio.ai.LiteRtLmProvider
 import org.r2aistudio.ai.ModelIntegrity
 import java.io.File
 import java.security.MessageDigest
+import java.net.URL
+import java.net.HttpURLConnection
 
 class MainActivity : Activity() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -39,6 +41,7 @@ class MainActivity : Activity() {
         output = TextView(this).apply { text = "The editor and offline inspector do not require AI." }
         root.addView(status)
         root.addView(import)
+        root.addView(Button(this).apply { text = "LLM · Download model"; setOnClickListener { showDownloadModel() } })
         root.addView(Button(this).apply { text = "LLM · Load saved model"; setOnClickListener { showSavedModels() } })
         root.addView(expectedHash)
         root.addView(prompt)
@@ -55,6 +58,93 @@ class MainActivity : Activity() {
         } else {
             showSetup()
         }
+    }
+
+    private fun showDownloadModel() {
+        if (importing || generating) {
+            status.text = "Wait for the current model operation to finish"
+            return
+        }
+        val address = EditText(this).apply {
+            hint = "https://.../model.litertlm"
+            setSingleLine(true)
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
+        }
+        AlertDialog.Builder(this).setTitle("Download LiteRT-LM model")
+            .setMessage("Use a direct HTTPS model file URL from a trusted publisher. Supply its SHA-256 in the main screen for verification. Downloads require internet; inference remains offline.")
+            .setView(address)
+            .setPositiveButton("Download") { _, _ ->
+                val urlText = address.text.toString().trim()
+                val checksum = expectedHash.text.toString().trim()
+                if (!urlText.startsWith("https://", ignoreCase = true) || !urlText.substringBefore('?').endsWith(".litertlm", ignoreCase = true)) {
+                    status.text = "Provide a direct HTTPS .litertlm URL"
+                } else if (checksum.isNotEmpty() && runCatching { ModelIntegrity.normalizeExpectedSha256(checksum) }.isFailure) {
+                    status.text = "Invalid expected SHA-256"
+                } else {
+                    importing = true
+                    generationEpoch++
+                    scope.launch {
+                        status.text = "Downloading LLM…"
+                        try {
+                            val file = withContext(Dispatchers.IO) {
+                                val destination = File(filesDir, "model-" + java.util.UUID.randomUUID() + ".litertlm")
+                                val temp = File(filesDir, destination.name + ".partial")
+                                val digest = MessageDigest.getInstance("SHA-256")
+                                val limit = 4L * 1024 * 1024 * 1024
+                                try {
+                                    val connection = URL(urlText).openConnection() as HttpURLConnection
+                                    connection.connectTimeout = 15000
+                                    connection.readTimeout = 30000
+                                    connection.instanceFollowRedirects = false
+                                    try {
+                                        require(connection.responseCode == 200) { "Download failed: HTTP " + connection.responseCode }
+                                        require(connection.contentLengthLong <= limit) { "Model exceeds 4 GiB" }
+                                        connection.inputStream.use { input ->
+                                            temp.outputStream().use { output ->
+                                                val buffer = ByteArray(65536)
+                                                var count = 0L
+                                                while (true) {
+                                                    val n = input.read(buffer)
+                                                    if (n == -1) break
+                                                    count += n
+                                                    require(count <= limit && n.toLong() <= filesDir.usableSpace) { "Model exceeds size or available storage" }
+                                                    output.write(buffer, 0, n)
+                                                    digest.update(buffer, 0, n)
+                                                }
+                                            }
+                                        }
+                                        require(temp.length() > 0) { "Downloaded model is empty" }
+                                        val hash = digest.digest().joinToString("") { "%02x".format(it) }
+                                        if (checksum.isNotEmpty()) {
+                                            require(hash == ModelIntegrity.normalizeExpectedSha256(checksum)) { "Model checksum mismatch" }
+                                        }
+                                        require(temp.renameTo(destination)) { "Unable to save downloaded model" }
+                                        destination
+                                    } finally { connection.disconnect() }
+                                } finally { temp.delete() }
+                            }
+                            try {
+                                ai.load(file.absolutePath)
+                                val previous = model
+                                model = file
+                                if (previous != null && previous != file) previous.delete()
+                                status.text = "Downloaded offline LLM ready"
+                            } catch (failure: Exception) {
+                                file.delete()
+                                val previous = model
+                                if (previous?.isFile == true && !ai.isLoaded) {
+                                    runCatching { ai.load(previous.absolutePath) }
+                                }
+                                throw failure
+                            }
+                        } catch (failure: Exception) {
+                            status.text = "LLM download failed: " + (failure.message ?: "Unknown error")
+                        } finally {
+                            importing = false
+                        }
+                    }
+                }
+            }.setNegativeButton("Cancel", null).show()
     }
 
     private fun showSavedModels() {
