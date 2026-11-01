@@ -1,6 +1,12 @@
 name: Vibe Hermes Inspector Android APK
 
 on:
+  push:
+    branches:
+      - feature/read-only-hermes-inspector-20261101
+    paths:
+      - android/hermes-inspector/**
+      - .github/workflows/hermes-inspector-apk.yml
   workflow_dispatch:
 
 permissions:
@@ -40,6 +46,21 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.10.2'
+      - name: Provision pinned genuine HBC84/94/99 test-only fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$RUNNER_TEMP/hermes-fixture-corpus"
+          git clone --quiet --filter=blob:none --no-checkout https://github.com/P1sec/hermes-dec.git "$tmp"
+          git -C "$tmp" sparse-checkout init --cone
+          git -C "$tmp" sparse-checkout set tests/version-84 tests/version-94 tests/version-99-202602
+          git -C "$tmp" checkout --quiet 2e796663e1fedb93dca51060797ebf3327b3fedb
+          target="android/hermes-inspector/app/src/test/resources"
+          mkdir -p "$target"
+          cp "$tmp/tests/version-84/sample.hbc" "$target/hbc84.hbc"
+          cp "$tmp/tests/version-94/sample.hbc" "$target/hbc94.hbc"
+          cp "$tmp/tests/version-99-202602/sample.hbc" "$target/hbc99.hbc"
+          sha256sum "$target"/hbc*.hbc
       - name: Build Android 9+ debug APK and execute JVM unit tests
         run: |
           set -euo pipefail
