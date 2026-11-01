@@ -49,6 +49,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class MainActivity extends Activity {
     private static final int PICK_APK = 4201;
     private static final int EXPORT_REPORT = 4202;
+    private static final int IMPORT_REPORT = 4203;
     private static final String[] MODES = {"DEX strings", "DEX classes", "DEX method references", "Hermes strings", "Hermes functions", "Hermes opcodes", "Hermes string references", "Printable candidates"};
     private static final int BACKGROUND = Color.rgb(13, 20, 32);
     private static final int SURFACE = Color.rgb(28, 40, 59);
@@ -219,6 +220,10 @@ public final class MainActivity extends Activity {
         exportReport.setEnabled(false);
         margin(exportReport,metadataCard,9,0);
         exportReport.setOnClickListener(v -> exportReport());
+        Button importReport=button("Import saved analysis (.json)");
+        margin(importReport,metadataCard,9,0);
+        importReport.setContentDescription("Import a previously saved analysis report");
+        importReport.setOnClickListener(v -> chooseReport());
 
         LinearLayout stringCard = card("Indexed analysis & search");
         margin(text("Browse verified DEX and Hermes records by category. Printable candidates are unverified.",
@@ -315,6 +320,8 @@ public final class MainActivity extends Activity {
             startAnalysis(uri,displayName(uri),persisted);
         }else if(requestCode==EXPORT_REPORT) {
             writeExport(uri);
+        }else if(requestCode==IMPORT_REPORT) {
+            importReport(uri);
         }
     }
 
@@ -409,6 +416,80 @@ public final class MainActivity extends Activity {
             });
             margin(row,libraryList,3,6);
         }
+    }
+
+    private void chooseReport() {
+        if(busy.get())return;
+        Intent intent=new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("application/json");
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        try{startActivityForResult(intent,IMPORT_REPORT);}
+        catch(android.content.ActivityNotFoundException error){
+            status.setText("No document provider is available for report import");
+        }
+    }
+
+    private void importReport(Uri uri) {
+        if(!busy.compareAndSet(false,true))return;
+        choose.setEnabled(false);
+        spinner.setVisibility(View.VISIBLE);
+        status.setText("Validating offline JSON report…");
+        executor.execute(()->{
+            try(InputStream input=getContentResolver().openInputStream(uri)){
+                if(input==null)throw new IOException("Document provider returned no report");
+                java.io.ByteArrayOutputStream buf=new java.io.ByteArrayOutputStream();
+                byte[] chunk=new byte[32768];
+                int n;
+                while((n=input.read(chunk))!=-1){
+                    if(Thread.currentThread().isInterrupted())throw new IOException("Import cancelled");
+                    if(buf.size()+n>ReportImporter.MAX_JSON_BYTES)
+                        throw new IOException("JSON report exceeds 4 MiB");
+                    buf.write(chunk,0,n);
+                }
+                java.nio.charset.CharsetDecoder decoder=StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT);
+                String content=decoder.decode(
+                    java.nio.ByteBuffer.wrap(buf.toByteArray())).toString();
+                final ApkInspector.Report restored=ReportImporter.parse(content);
+                runOnUiThread(()->{
+                    if(isFinishing()||isDestroyed())return;
+                    report=restored;
+                    lastFilename="Imported report";
+                    status.setText("Saved report loaded. Original APK NOT re-verified.");
+                    summary.setText("IMPORTED ANALYSIS — UNVERIFIED\n"+
+                        "Recorded SHA-256: "+restored.sha256+"\n"+
+                        "Recorded APK bytes: "+restored.byteSize+"\n"+
+                        "Recorded DEX class IDs: "+restored.dexDeclaredClasses+"\n"+
+                        "Recorded Hermes functions: "+restored.functionCount);
+                    bundles.setText(restored.bundleDetails.isEmpty()?
+                        "No HBC bundle records in imported report":
+                        String.join("\n\n",restored.bundleDetails));
+                    warnings.setText(String.join("\n\n",restored.warnings));
+                    copyHash.setEnabled(true);
+                    exportReport.setEnabled(true);
+                    modePicker.setSelection(!restored.dexStrings.isEmpty()?0:
+                        !restored.hermesStrings.isEmpty()?3:7);
+                    page=0;updateResults();
+                });
+            }catch(Exception error){
+                final String message=error.getMessage()==null?
+                    "Malformed JSON report":error.getMessage();
+                runOnUiThread(()->{
+                    if(!isFinishing()&&!isDestroyed())
+                        status.setText("Report import refused: "+message);
+                });
+            }finally{
+                busy.set(false);
+                runOnUiThread(()->{
+                    if(!isFinishing()&&!isDestroyed()){
+                        choose.setEnabled(true);
+                        spinner.setVisibility(View.GONE);
+                    }
+                });
+            }
+        });
     }
 
     private void exportReport() {

@@ -60,6 +60,8 @@ jobs:
           cp "$tmp/tests/version-84/sample.hbc" "$target/hbc84.hbc"
           cp "$tmp/tests/version-94/sample.hbc" "$target/hbc94.hbc"
           cp "$tmp/tests/version-99-202602/sample.hbc" "$target/hbc99.hbc"
+          cp "$tmp/tests/version-94/sample.hermes_raw_hasm" "$target/hbc94.official"
+          cp "$tmp/tests/version-99-202602/sample.hermes_raw_hasm" "$target/hbc99.official"
           sha256sum "$target"/hbc*.hbc
       - name: Build Android 9+ debug APK and execute JVM unit tests
         run: |

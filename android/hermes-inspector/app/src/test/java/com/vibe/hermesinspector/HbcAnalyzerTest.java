@@ -5,6 +5,11 @@ import static org.junit.Assert.*;
 import java.io.ByteArrayOutputStream;
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.regex.Pattern;
+import java.util.regex.Matcher;
 import java.io.InputStream;
 import java.io.File;
 import java.nio.file.Files;
@@ -45,6 +50,42 @@ public class HbcAnalyzerTest {
         assertTrue(h.instructionsDecoded>=300);
         assertTrue(h.instructions.get(0).contains("CreateFunctionEnvironment"));
     }
+    private void assertAgainstPinnedHbcdump(int version) throws Exception {
+        HbcAnalyzer.Result result=inspect(fixture(version),version);
+        InputStream stream=getClass().getResourceAsStream("/hbc"+version+".official");
+        if(stream==null)throw new IOException("Missing pinned official Hermes reference "+version);
+        String text;
+        try(InputStream input=stream) {
+            text=new String(input.readAllBytes(),StandardCharsets.UTF_8);
+        }
+        Pattern function=Pattern.compile("^(?:NC)?Function<.*?>(\\d+)\\(");
+        Pattern instruction=Pattern.compile("^\\[@\\s*(\\d+)\\]\\s+([A-Za-z][A-Za-z0-9_]*)");
+        ArrayList<String> expected=new ArrayList<>();
+        int fid=-1;
+        for(String line:text.split("\\R")) {
+            Matcher header=function.matcher(line);
+            if(header.find())fid=Integer.parseInt(header.group(1));
+            Matcher op=instruction.matcher(line);
+            if(fid>=0 && op.find())expected.add("fn#"+fid+" +"+op.group(1)+" "+op.group(2));
+        }
+        ArrayList<String> actual=new ArrayList<>();
+        for(String line:result.instructions) {
+            String[] parts=line.split("\\s+",4);
+            if(parts.length<3)throw new AssertionError("Malformed native opcode output: "+line);
+            actual.add(parts[0]+" "+parts[1]+" "+parts[2]);
+        }
+        assertTrue("No official opcodes parsed",expected.size()>150);
+        assertEquals("Native function opcode IDs and relative offsets must match official saved hbcdump",
+                     expected,actual);
+    }
+
+    @Test public void nativeHbc94OpcodeOffsetsMatchOfficialHbcdump()throws Exception{
+        assertAgainstPinnedHbcdump(94);
+    }
+    @Test public void nativeHbc99OpcodeOffsetsMatchOfficialHbcdump()throws Exception{
+        assertAgainstPinnedHbcdump(99);
+    }
+
     @Test public void genuineHbc84DecodesWithinBudget()throws Exception{
         HbcAnalyzer.Result h=inspect(fixture(84),84);
         assertEquals(84,h.version);
