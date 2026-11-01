@@ -117,6 +117,9 @@ public final class ApkSourceExplorer {
     }
 
     public static String open(File apk,Entry entry)throws IOException {
+        return open(apk,entry,DexViewModes.MODE_BYTECODE);
+    }
+    public static String open(File apk,Entry entry,int viewMode)throws IOException {
         if(apk==null||entry==null)throw new IOException("No APK source entry selected");
         if(apk.length()>ApkInspector.MAX_APK_BYTES || !apk.isFile())
             throw new IOException("APK no longer available");
@@ -128,17 +131,24 @@ public final class ApkSourceExplorer {
             if("class".equals(entry.kind)){
                 if(!isDex(entry.archivePath)||entry.classDescriptor==null)
                     throw new IOException("Invalid DEX class reference");
-                return openClass(zip,member,entry.classDescriptor);
+                return openClass(zip,member,entry.classDescriptor,viewMode);
             }
             if(!"file".equals(entry.kind))throw new IOException("Unknown source type");
             String name=entry.archivePath.toLowerCase(Locale.ROOT);
             if(isDex(name))return dexSummary(zip,member);
-            if(name.endsWith(".so") || name.endsWith(".o") || name.endsWith(".a"))
-                return binarySummary(member,"Native ELF / binary library: source not included");
+            if(name.endsWith(".so"))
+                return BinaryResourceViewer.elf(readPrefix(zip,member,64),entry.archivePath,member.getSize());
+            if(name.endsWith(".o")||name.endsWith(".a"))
+                return binarySummary(member,"Native compiled object/archive; source unavailable");
             if(name.equals("resources.arsc"))
-                return binarySummary(member,"Android binary resource table: requires a resource decoder");
+                return BinaryResourceViewer.resourceTable(readPrefix(zip,member,BinaryResourceViewer.MAX_BYTES),member.getSize());
             if(name.equals("androidmanifest.xml"))
-                return binarySummary(member,"Compiled AndroidManifest.xml binary XML; original XML unavailable");
+                return BinaryResourceViewer.manifest(readPrefix(zip,member,BinaryResourceViewer.MAX_BYTES));
+            if(name.endsWith(".xml")){
+                byte[] preview=readPrefix(zip,member,8);
+                if(preview.length>=4 && preview[0]==3 && preview[1]==0)
+                    return BinaryResourceViewer.manifest(readPrefix(zip,member,BinaryResourceViewer.MAX_BYTES));
+            }
             if(!isText(name))
                 return binarySummary(member,"Binary or unsupported asset; original source unavailable");
             if(member.getSize()<0||member.getSize()>MAX_ASSET)
@@ -173,7 +183,7 @@ public final class ApkSourceExplorer {
         }
     }
 
-    private static String openClass(ZipFile zip,ZipEntry member,String descriptor)
+    private static String openClass(ZipFile zip,ZipEntry member,String descriptor,int viewMode)
             throws IOException {
         if(descriptor.length()>1000||!descriptor.startsWith("L")||!descriptor.endsWith(";"))
             throw new IOException("Invalid class descriptor");
@@ -186,7 +196,7 @@ public final class ApkSourceExplorer {
                 if(cls.getType().equals(descriptor)){found=cls;break;}
             }
             if(found==null)throw new IOException("Class not found in selected DEX");
-            return formatClass(found);
+            return DexViewModes.render(found,viewMode);
         }catch(RuntimeException malformed){
             throw new IOException("DEX class could not be disassembled safely",malformed);
         }
@@ -299,6 +309,41 @@ public final class ApkSourceExplorer {
         return "# "+member.getName()+"\n# "+reason+
           "\n# Uncompressed bytes: "+member.getSize()+
           "\n# Only read-only metadata exposed; original text source cannot be recovered.";
+    }
+    private static byte[] readPrefix(ZipFile zip,ZipEntry member,int cap)throws IOException{
+        if(member.getSize()<0)throw new IOException("Unknown ZIP source member size");
+        int size=(int)Math.min(member.getSize(),cap);
+        byte[] data=new byte[size];
+        try(InputStream in=zip.getInputStream(member)){
+            int pos=0;
+            while(pos<size){
+                if(Thread.currentThread().isInterrupted())throw new IOException("Source preview cancelled");
+                int n=in.read(data,pos,Math.min(size-pos,16384));
+                if(n<0)throw new IOException("Truncated binary source");
+                if(n==0)continue;
+                pos+=n;
+            }
+        }
+        return data;
+    }
+    public static List<String> callTargets(File apk,Entry entry)throws IOException{
+        if(apk==null||entry==null||!"class".equals(entry.kind)||
+           entry.classDescriptor==null||!isDex(entry.archivePath))
+            return java.util.Collections.emptyList();
+        try(ZipFile zip=new ZipFile(apk)){
+            ZipEntry member=zip.getEntry(entry.archivePath);
+            if(member==null)throw new IOException("Missing DEX for source references");
+            byte[] data=readBounded(zip,member,MAX_DEX);
+            try{
+                DexBackedDexFile file=DexBackedDexFile.fromInputStream(null,
+                                               new ByteArrayInputStream(data));
+                for(ClassDef cls:file.getClasses()){
+                    if(cls.getType().equals(entry.classDescriptor))
+                        return DexViewModes.callTargets(cls);
+                }
+                throw new IOException("Selected class not found");
+            }catch(RuntimeException corrupt){throw new IOException("Malformed DEX callsite listing",corrupt);}
+        }
     }
     private static byte[] readBounded(ZipFile zip,ZipEntry member,int cap)throws IOException{
         if(member.getSize()<0||member.getSize()>cap)throw new IOException("Source exceeds per-item limit");
