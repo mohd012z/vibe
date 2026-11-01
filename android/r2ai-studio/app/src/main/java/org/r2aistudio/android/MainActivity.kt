@@ -39,6 +39,7 @@ class MainActivity : Activity() {
         output = TextView(this).apply { text = "The editor and offline inspector do not require AI." }
         root.addView(status)
         root.addView(import)
+        root.addView(Button(this).apply { text = "LLM · Load saved model"; setOnClickListener { showSavedModels() } })
         root.addView(expectedHash)
         root.addView(prompt)
         root.addView(send)
@@ -54,6 +55,45 @@ class MainActivity : Activity() {
         } else {
             showSetup()
         }
+    }
+
+    private fun showSavedModels() {
+        if (importing || generating) {
+            status.text = "Wait for the current model operation to finish"
+            return
+        }
+        val files = filesDir.listFiles()
+            ?.filter { it.isFile && it.name.endsWith(".litertlm", ignoreCase = true) }
+            ?.sortedByDescending { it.lastModified() }
+            .orEmpty()
+        if (files.isEmpty()) {
+            showSetup()
+            return
+        }
+        val labels = files.map { file ->
+            file.name + " (" + (file.length() / (1024 * 1024)) + " MiB)"
+        }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Offline LLM models")
+            .setItems(labels) { _, index ->
+                val selected = files[index]
+                importing = true
+                generationEpoch++
+                scope.launch {
+                    status.text = "Loading saved LLM…"
+                    try {
+                        ai.load(selected.absolutePath)
+                        model = selected
+                        status.text = "Local LLM ready"
+                    } catch (failure: Exception) {
+                        status.text = "LLM load failed: " + (failure.message ?: "Unknown error")
+                    } finally {
+                        importing = false
+                    }
+                }
+            }
+            .setNegativeButton("Close", null)
+            .show()
     }
 
     private fun showSetup() {
