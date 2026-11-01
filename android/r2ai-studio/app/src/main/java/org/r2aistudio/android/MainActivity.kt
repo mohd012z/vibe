@@ -92,7 +92,6 @@ class MainActivity : Activity() {
             return
         }
         val address = EditText(this).apply {
-            setText("https://huggingface.co/litert-community/Qwen3-0.6B/resolve/main/Qwen3-0.6B.litertlm")
             hint = "https://.../model.litertlm"
             setText(DefaultModelCatalog.url)
             setSingleLine(true)
@@ -123,9 +122,10 @@ class MainActivity : Activity() {
                                     val connection = URL(urlText).openConnection() as HttpURLConnection
                                     connection.connectTimeout = 15000
                                     connection.readTimeout = 30000
-                                    connection.instanceFollowRedirects = false
+                                    connection.instanceFollowRedirects = true
                                     try {
                                         require(connection.responseCode == 200) { "Download failed: HTTP " + connection.responseCode }
+                                        require(connection.url.protocol.equals("https", ignoreCase = true)) { "Insecure download redirect refused" }
                                         require(connection.contentLengthLong <= limit) { "Model exceeds 4 GiB" }
                                         val declaredLength = connection.contentLengthLong
                                         connection.inputStream.use { input ->
@@ -212,6 +212,10 @@ class MainActivity : Activity() {
                         preferences.edit().putString("activeModel", selected.name).apply()
                         status.text = "Local LLM ready"
                     } catch (failure: Exception) {
+                        val previous = model
+                        if (previous?.isFile == true && !ai.isLoaded) {
+                            runCatching { ai.load(previous.absolutePath) }
+                        }
                         status.text = "LLM load failed: " + (failure.message ?: "Unknown error")
                     } finally {
                         importing = false
