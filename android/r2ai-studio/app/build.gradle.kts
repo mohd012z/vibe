@@ -25,4 +25,5 @@ dependencies {
     // 0.16.1 metadata is compatible with Kotlin 2.3, per upstream documentation.
     implementation("com.google.ai.edge.litertlm:litertlm-android:0.16.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+    testImplementation("junit:junit:4.13.2")
 }
