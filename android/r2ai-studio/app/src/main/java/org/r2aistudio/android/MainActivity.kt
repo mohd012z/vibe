@@ -46,7 +46,14 @@ class MainActivity : Activity() {
         scroll.addView(output)
         root.addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         setContentView(root)
-        showSetup()
+        if (savedInstanceState != null) {
+            prompt.setText(savedInstanceState.getString("draftPrompt", ""))
+            expectedHash.setText(savedInstanceState.getString("expectedHash", ""))
+            output.text = savedInstanceState.getString("lastOutput", "The editor and offline inspector do not require AI.")
+            status.text = "Offline mode • Model must be loaded again"
+        } else {
+            showSetup()
+        }
     }
 
     private fun showSetup() {
@@ -165,6 +172,13 @@ class MainActivity : Activity() {
                 generating = false
             }
         }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString("draftPrompt", prompt.text.toString())
+        outState.putString("expectedHash", expectedHash.text.toString())
+        outState.putString("lastOutput", output.text.toString())
+        super.onSaveInstanceState(outState)
     }
 
     override fun onDestroy() {
