@@ -127,6 +127,7 @@ class MainActivity : Activity() {
                                     try {
                                         require(connection.responseCode == 200) { "Download failed: HTTP " + connection.responseCode }
                                         require(connection.contentLengthLong <= limit) { "Model exceeds 4 GiB" }
+                                        val declaredLength = connection.contentLengthLong
                                         connection.inputStream.use { input ->
                                             temp.outputStream().use { output ->
                                                 val buffer = ByteArray(65536)
@@ -138,9 +139,14 @@ class MainActivity : Activity() {
                                                     require(count <= limit && n.toLong() <= filesDir.usableSpace) { "Model exceeds size or available storage" }
                                                     output.write(buffer, 0, n)
                                                     digest.update(buffer, 0, n)
+                                                    if (count % (1024 * 1024) < n) {
+                                                        val progress = if (declaredLength > 0L) " (" + (count * 100 / declaredLength).coerceAtMost(100) + "%)" else ""
+                                                        withContext(Dispatchers.Main) { status.text = "Downloading LLM: " + (count / (1024 * 1024)) + " MiB" + progress }
+                                                    }
                                                 }
                                             }
                                         }
+                                        require(declaredLength < 0L || temp.length() == declaredLength) { "Incomplete download" }
                                         require(temp.length() > 0) { "Downloaded model is empty" }
                                         val hash = digest.digest().joinToString("") { "%02x".format(it) }
                                         if (checksum.isNotEmpty()) {
