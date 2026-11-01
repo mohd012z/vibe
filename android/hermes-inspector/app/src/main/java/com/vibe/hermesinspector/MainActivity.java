@@ -712,7 +712,7 @@ public final class MainActivity extends Activity {
             return;
         }
         SpannableString colored=new SpannableString(value);
-        Matcher lines=Pattern.compile("(?m)^(?:\\\\.class|\\\\.super|\\\\.method|\\\\.end|\\\\.field|\\\\.registers|METHOD|method |#).*?$")
+        Matcher lines=Pattern.compile("(?m)^(?:\\.class|\\.super|\\.method|\\.end|\\.field|\\.registers|METHOD|method |#).*?$")
             .matcher(value);
         int count=0;
         while(lines.find()&&count++<1200)
