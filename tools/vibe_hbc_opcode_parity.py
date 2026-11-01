@@ -9,7 +9,7 @@ from pathlib import Path
 
 HBC_HEADER=re.compile(r"^Function<.*?>([0-9]{1,10})\(")
 OFFICIAL_HEADER=re.compile(r"^(?:NC)?Function<.*?>([0-9]{1,10})\(")
-HBC_OPCODE=re.compile(r"^\t([A-Za-z][A-Za-z0-9_]*)\s+\t")
+HBC_OPCODE=re.compile(r"^\t([A-Za-z][A-Za-z0-9_]*) *\t")
 P1_HEADER=re.compile(r'^=> \[(?:Function|Generator function|Async function) #([0-9]{1,10}) ')
 P1_OPCODE=re.compile(r"^==> [0-9A-Fa-f]{8}: <([A-Za-z][A-Za-z0-9_]*)>:")
 OFFICIAL_OPCODE=re.compile(r"^\[@\s*[0-9]+\]\s+([A-Za-z][A-Za-z0-9_]*)\b")
