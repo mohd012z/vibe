@@ -138,7 +138,7 @@ public final class FileComparator {
         boolean textFiles=a!=null&&b!=null;
         if(textFiles)diff.append(lineDifferences(a,b));
         else diff.append("Binary/large data: compare hashes, bytes and (for APKs) the entry inventory.\n");
-        if(looksApk(left)&&looksApk(right))
+        if(looksZip(left)&&looksZip(right))
             diff.append("\n").append(zipDifferences(left,right));
         return new Result(equal,textFiles,lhs,rhs,left.length(),right.length(),trim(diff.toString()));
     }
@@ -190,8 +190,17 @@ public final class FileComparator {
         if(changes==0)result.append("No line differences.\n");
         return trim(result.toString());
     }
-    private static boolean looksApk(File f){
-        return f.getName().toLowerCase(java.util.Locale.ROOT).endsWith(".apk");
+    private static boolean looksZip(File f)throws IOException{
+        permitted(f);
+        if(f.length()<4)return false;
+        try(InputStream in=new FileInputStream(f)){
+            byte[] prefix=new byte[4];
+            if(in.read(prefix)!=4)return false;
+            return prefix[0]=='P' && prefix[1]=='K' &&
+                ((prefix[2]==3&&prefix[3]==4)||
+                 (prefix[2]==5&&prefix[3]==6)||
+                 (prefix[2]==7&&prefix[3]==8));
+        }
     }
     private static boolean safeName(String name){
         if(name==null||name.isEmpty()||name.startsWith("/")||name.indexOf('\\')>=0||
@@ -206,10 +215,11 @@ public final class FileComparator {
         long total=0;
         try(ZipFile zip=new ZipFile(archive)){
             Enumeration<? extends ZipEntry> all=zip.entries();
+            int memberCount=0;
             while(all.hasMoreElements()){
                 if(Thread.currentThread().isInterrupted())throw new IOException("ZIP inspection cancelled");
                 ZipEntry entry=all.nextElement();
-                if(results.size()>=MAX_MEMBERS)throw new IOException("Too many ZIP entries");
+                if(++memberCount>MAX_MEMBERS)throw new IOException("Too many ZIP entries");
                 if(!safeName(entry.getName())||results.containsKey(entry.getName()))
                     throw new IOException("Unsafe or duplicate ZIP entry");
                 if(entry.getSize()<0||entry.getCompressedSize()<0)
@@ -247,15 +257,17 @@ public final class FileComparator {
             ZipInfo l=a.get(name),r=b.get(name);
             if(l==null){
                 missingLeft++;
-                if(listed++<100)out.append("+ only right: ").append(name).append('\n');
+                if(listed++<100&&out.length()<MAX_DISPLAY-500)
+                    out.append("+ only right: ").append(name).append('\n');
             }else if(r==null){
                 missingRight++;
-                if(listed++<100)out.append("- only left: ").append(name).append('\n');
+                if(listed++<100&&out.length()<MAX_DISPLAY-500)
+                    out.append("- only left: ").append(name).append('\n');
             }else if(l.size!=r.size||l.crc!=r.crc){
                 changed++;
-                if(listed++<100)out.append("~ changed: ").append(name).append('\n');
+                if(listed++<100&&out.length()<MAX_DISPLAY-500)
+                    out.append("~ changed: ").append(name).append('\n');
             }else identical++;
-            if(out.length()>MAX_DISPLAY-300)break;
         }
         out.append("Left-only: ").append(missingRight).append("\nRight-only: ").append(missingLeft)
            .append("\nChanged metadata: ").append(changed)
