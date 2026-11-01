@@ -10,6 +10,7 @@ from pathlib import Path, PurePosixPath
 import re
 import struct
 import zipfile
+import zlib
 
 MAGIC = 2240826417119764422
 SUPPORTED = frozenset((59,62,74,76,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100))
@@ -118,8 +119,11 @@ def inspect_bytes(payload: bytes) -> dict:
     """Normalize corrupt ZIP internals into a public, bounded validation error."""
     try:
         return _inspect_bytes_impl(payload)
+    except InvalidAPK:
+        raise
     except (zipfile.BadZipFile, EOFError, OSError, RuntimeError,
-            NotImplementedError, UnicodeError, struct.error) as exc:
+            NotImplementedError, UnicodeError, struct.error,
+            ValueError, OverflowError, zlib.error) as exc:
         raise InvalidAPK("Malformed or unsupported ZIP structure") from exc
 
 
