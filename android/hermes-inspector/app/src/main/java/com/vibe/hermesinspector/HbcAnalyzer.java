@@ -122,6 +122,7 @@ public final class HbcAnalyzer {
         return Long.toUnsignedString(raw);
     }
     public static Result parse(byte[] data,InputStream schema)throws IOException {
+        if(schema==null)throw new IOException("Missing HBC opcode schema");
         if(data==null||data.length<128||data.length>MAX_SOURCE)
             throw new IOException("Unsupported HBC bytecode size");
         if(unsigned32(data,0)!= (ApkInspector.HERMES_MAGIC & 0xffffffffL) ||
@@ -168,6 +169,9 @@ public final class HbcAnalyzer {
                 units=unsigned32(data,overflowTable+8*strOff+4);
                 strOff=unsigned32(data,overflowTable+8*strOff);
             }
+            long byteCount=units*(utf16?2L:1L);
+            if(strOff>storageSize || byteCount>storageSize-strOff)
+                throw new IOException("HBC string exceeds declared string-storage section");
             if(units>MAX_STR_LEN) {
                 result.truncated=true;
                 continue;
@@ -202,7 +206,7 @@ public final class HbcAnalyzer {
                 "fn#%d  %s  byte@%d  length %d",fid,name,absolute,byteSize));
             result.functionsIndexed++;
             if(byteSize==0)continue;
-            if(byteSize>MAX_SOURCE||absolute<0||absolute+byteSize>data.length){
+            if(byteSize>MAX_SOURCE || absolute<128 || absolute+byteSize>data.length){
                 result.warnings.add("Function #"+fid+" bytecode outside scanned source");
                 result.truncated=true;continue;
             }

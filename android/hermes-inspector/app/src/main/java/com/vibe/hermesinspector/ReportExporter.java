@@ -40,6 +40,8 @@ public final class ReportExporter {
         root.put("printable_candidates",entries(report.candidates,2000));
         root.put("warnings",entries(report.warnings,100));
         root.put("classification_note","DEX methods are method-id references, not proven executable functions. HBC opcodes are bytecode, not JavaScript source.");
+        root.put("provenance", "offline bytecode metadata only; imported APK never executed");
+        root.put("analysis_limits", "bounded DEX/HBC indexing; omitted records are not verified");
         String encoded=root.toString(2);
         if(encoded.length()>4*1024*1024)
             throw new IllegalArgumentException("Export exceeds 4 MiB safe limit");

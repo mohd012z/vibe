@@ -75,22 +75,38 @@ public final class LibraryStore {
                 if(out.length()>=MAX_HISTORY)break;
                 if(!item.uri.equals(uri.toString()))out.put(toJson(item));
             }
-            prefs().edit().putString(INDEX,out.toString()).apply();
+            if(!prefs().edit().putString(INDEX,out.toString()).commit())
+                throw new IllegalStateException("Cannot persist local APK library");
         }catch(JSONException error){
             throw new IllegalStateException("Failed to serialize local library",error);
         }
     }
 
     public void remove(String target){
+        if(target==null)return;
         JSONArray output=new JSONArray();
         try{
             for(Item item:list())if(!item.uri.equals(target))output.put(toJson(item));
-            prefs().edit().putString(INDEX,output.toString()).apply();
+            if(!prefs().edit().putString(INDEX,output.toString()).commit())
+                throw new IllegalStateException("Cannot remove saved APK reference");
         }catch(JSONException error){throw new IllegalStateException(error);}
+        release(target);
     }
 
     public void clear(){
-        prefs().edit().remove(INDEX).apply();
+        for(Item item:list()) release(item.uri);
+        if(!prefs().edit().remove(INDEX).commit())
+            throw new IllegalStateException("Cannot clear local APK references");
+    }
+
+    private void release(String savedUri) {
+        if(savedUri==null || !savedUri.startsWith("content://"))return;
+        try {
+            context.getContentResolver().releasePersistableUriPermission(
+                Uri.parse(savedUri),Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        } catch(SecurityException ignored) {
+            // Already revoked or document-provider grant has expired.
+        }
     }
 
     private static JSONObject toJson(Item item)throws JSONException {
