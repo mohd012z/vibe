@@ -51,7 +51,7 @@ def read_hbc_header(data: bytes, entry_size: int | None = None) -> dict:
     return result
 
 
-def inspect_bytes(payload: bytes) -> dict:
+def _inspect_bytes_impl(payload: bytes) -> dict:
     if len(payload) > MAX_APK:
         raise InvalidAPK("APK exceeds upload size limit")
     if not zipfile.is_zipfile(io.BytesIO(payload)):
@@ -111,6 +111,16 @@ def inspect_bytes(payload: bytes) -> dict:
                 "entries": len(entries), "technologies": technologies, "bundles": hermes,
                 "evidence": "static packaging and HBC header only",
                 "limitations": ["No runtime claims", "No opcode or full semantic validation"]}
+
+
+
+def inspect_bytes(payload: bytes) -> dict:
+    """Normalize corrupt ZIP internals into a public, bounded validation error."""
+    try:
+        return _inspect_bytes_impl(payload)
+    except (zipfile.BadZipFile, EOFError, OSError, RuntimeError,
+            NotImplementedError, UnicodeError, struct.error) as exc:
+        raise InvalidAPK("Malformed or unsupported ZIP structure") from exc
 
 
 def inspect_path(path: str | Path) -> dict:
