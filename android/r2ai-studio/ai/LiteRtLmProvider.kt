@@ -38,8 +38,8 @@ class LiteRtLmProvider : LocalAiProvider {
         loaded = false
         try { oldChat?.close() } finally { oldEngine?.close() }
         val candidate = Engine(EngineConfig(modelPath = modelPath, backend = Backend.CPU()))
-        candidate.initialize()
         try {
+            candidate.initialize()
             conversation = candidate.createConversation()
             engine = candidate
             loaded = true
