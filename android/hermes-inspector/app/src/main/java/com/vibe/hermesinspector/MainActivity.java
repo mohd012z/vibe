@@ -57,6 +57,7 @@ public final class MainActivity extends Activity {
     private static final int IMPORT_REPORT = 4203;
     private static final int EXPORT_SOURCE = 4204;
     private static final int EXPORT_PAGE = 4205;
+    private static final int EXPORT_UNSIGNED_APK = 4206;
     private static final int SOURCE_PAGE_SIZE = 25;
     private static final int AUDIT_PAGE_SIZE = 20;
     private static final String[] MODES = {"DEX strings", "DEX classes", "DEX method references", "Hermes strings", "Hermes functions", "Hermes opcodes", "Hermes string references", "Printable candidates"};
@@ -81,6 +82,11 @@ public final class MainActivity extends Activity {
     private LinearLayout draftActions;
     private TextView diffPreview;
     private TextDraft localDraft;
+    private ApkPatchWorkspace patchWorkspace;
+    private LinearLayout patchCard;
+    private TextView patchStatus;
+    private EditText patchFind,patchReplacement;
+    private Button patchStage,patchBatch,patchExport,patchReset;
     private final Button[] quickAuditButtons=new Button[5];
     private final List<ApkFeatureAudit.Hit> auditMatches=new ArrayList<>();
     private int auditPageNumber=0;
@@ -212,8 +218,8 @@ public final class MainActivity extends Activity {
         scroll.requestApplyInsets();
 
         margin(text("VIBE  /  HERMES INSPECTOR", 12, ACCENT, true), root, 0, 5);
-        margin(text("Read-only APK analysis", 26, TEXT, true), root, 0, 5);
-        margin(text("Offline • On-device • No network permission • Android 9+", 13, MUTED, false),
+        margin(text("APK Source & Patch Studio", 26, TEXT, true), root, 0, 5);
+        margin(text("Offline • Inspect, stage text edits, repack unsigned • Android 9+", 13, MUTED, false),
                 root, 0, 10);
 
         LinearLayout importCard = card("Import APK");
@@ -314,7 +320,7 @@ public final class MainActivity extends Activity {
         showAuditMatches();
 
         LinearLayout recentCard=card("Local APK library");
-        margin(text("Saved document references only. No APK copies retained after analysis.",
+        margin(text("Saved document references only. A temporary APK copy is kept during this session for browsing and removed on close.",
                 12,MUTED,false),recentCard,0,8);
         libraryList=vertical();
         recentCard.addView(libraryList);
@@ -502,6 +508,50 @@ public final class MainActivity extends Activity {
         sourceLinks=vertical();
         sourceCard.addView(sourceLinks);
 
+        patchCard=card("⚙️ Automated APK Text Patch Workspace");
+        patchCard.setVisibility(View.GONE);
+        margin(text("For your own or authorized APKs. Stage non-executable assets, inspect changes, then export a NEW UNSIGNED APK. Do not install until aligned and correctly signed.",12,MUTED,false),patchCard,0,8);
+        patchStatus=text("No patches staged.",13,MUTED,false);
+        patchStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        patchStatus.setTextIsSelectable(true);
+        margin(patchStatus,patchCard,0,8);
+        patchStage=button("＋ Stage selected text-asset edit");
+        margin(patchStage,patchCard,0,8);
+        patchStage.setOnClickListener(v->stageSelectedPatch());
+        patchFind=new EditText(this);
+        patchFind.setSingleLine(true);
+        patchFind.setTextColor(TEXT);
+        patchFind.setHintTextColor(MUTED);
+        patchFind.setHint("Exact text to find (non-executable assets)");
+        patchFind.setContentDescription("Exact search string for automated text-resource replacements");
+        patchFind.setBackground(surface(Color.rgb(14,26,43),10));
+        patchFind.setPadding(dp(12),dp(10),dp(12),dp(10));
+        margin(patchFind,patchCard,8,6);
+        patchReplacement=new EditText(this);
+        patchReplacement.setSingleLine(true);
+        patchReplacement.setTextColor(TEXT);
+        patchReplacement.setHintTextColor(MUTED);
+        patchReplacement.setHint("Replacement text");
+        patchReplacement.setContentDescription("Replacement string for eligible text-resource assets");
+        patchReplacement.setBackground(surface(Color.rgb(14,26,43),10));
+        patchReplacement.setPadding(dp(12),dp(10),dp(12),dp(10));
+        margin(patchReplacement,patchCard,0,7);
+        patchBatch=button("▶ Auto-stage exact replacements");
+        margin(patchBatch,patchCard,0,8);
+        patchBatch.setOnClickListener(v->runBatchPatch());
+        patchReset=button("↶ Discard all staged patches");
+        margin(patchReset,patchCard,0,7);
+        patchReset.setOnClickListener(v->{
+            if(patchWorkspace==null || busy.get())return;
+            patchWorkspace.clear();
+            refreshPatchStatus();
+            status.setText("Staged changes discarded. Original APK unchanged.");
+        });
+        patchExport=button("Export modified APK (UNSIGNED; signing required)");
+        patchExport.setEnabled(false);
+        margin(patchExport,patchCard,0,9);
+        patchExport.setOnClickListener(v->chooseUnsignedExport());
+
         LinearLayout stringCard = card("Indexed analysis & search");
         margin(text("Browse verified DEX and Hermes records by category. Printable candidates are unverified.",
                 12, MUTED, false), stringCard, 0, 8);
@@ -603,6 +653,8 @@ public final class MainActivity extends Activity {
             exportSource(uri);
         }else if(requestCode==EXPORT_PAGE){
             exportPage(uri);
+        }else if(requestCode==EXPORT_UNSIGNED_APK){
+            exportUnsigned(uri);
         }
     }
 
@@ -633,6 +685,15 @@ public final class MainActivity extends Activity {
                     if(sourceApk!=null && !sourceApk.equals(captured))sourceApk.delete();
                     sourceApk=captured;
                     sourceIndex=ready;
+                    try{
+                        patchWorkspace=new ApkPatchWorkspace(captured);
+                        patchCard.setVisibility(View.VISIBLE);
+                    }catch(IOException patchUnavailable){
+                        patchWorkspace=null;
+                        patchCard.setVisibility(View.GONE);
+                        result.warnings.add("Patch workspace unavailable: "+patchUnavailable.getMessage());
+                    }
+                    refreshPatchStatus();
                     featureAudit=featureResults;
                     updateAuditSummary();
                     selectedSourceText=null;
@@ -770,6 +831,8 @@ public final class MainActivity extends Activity {
                     if(isFinishing()||isDestroyed())return;
                     if(sourceApk!=null){sourceApk.delete();sourceApk=null;}
                     sourceIndex=null;
+                    patchWorkspace=null;
+                    patchCard.setVisibility(View.GONE);
                     sourceCard.setVisibility(View.GONE);
                     featureAudit=null;
                     updateAuditSummary();
@@ -922,6 +985,121 @@ public final class MainActivity extends Activity {
         diffPreview.setVisibility(View.VISIBLE);
         diffPreview.setText("No changes.");
         status.setText("Editing an exported copy; the imported APK is unchanged.");
+    }
+
+    private void refreshPatchStatus(){
+        if(patchStatus==null||patchExport==null)return;
+        if(patchWorkspace==null){
+            patchStatus.setText("Load an authorized APK to stage text patches.");
+            patchExport.setEnabled(false);
+            return;
+        }
+        StringBuilder info=new StringBuilder();
+        info.append(patchWorkspace.size()).append(" / ").append(ApkPatchWorkspace.MAX_STAGE)
+            .append(" text assets staged\nOriginal SHA-256: ")
+            .append(patchWorkspace.sourceSha256()).append("\n");
+        for(ApkPatchWorkspace.Change entry:patchWorkspace.staged())
+            info.append("• ").append(entry.describe()).append("\n");
+        if(patchWorkspace.size()==0)info.append("No pending modifications.");
+        info.append("\nOutput is UNSIGNED; Android install requires private-key signing.");
+        patchStatus.setText(info.toString());
+        patchExport.setEnabled(patchWorkspace.size()>0);
+    }
+
+    private void stageSelectedPatch(){
+        if(patchWorkspace==null||sourceApk==null||selectedSourceEntry==null||
+           !"file".equals(selectedSourceEntry.kind)||localDraft==null){
+            status.setText("Select and edit a supported text asset first.");return;
+        }
+        try{
+            patchWorkspace.stage(sourceApk,selectedSourceEntry.archivePath,
+                assetEditor.getText().toString());
+            refreshPatchStatus();
+            status.setText("Text edit staged for unsigned APK export; original untouched.");
+        }catch(IOException error){
+            status.setText("Patch rejected: "+error.getMessage());
+        }
+    }
+    private void runBatchPatch(){
+        if(patchWorkspace==null||sourceApk==null||!busy.compareAndSet(false,true))return;
+        final ApkPatchWorkspace pending=patchWorkspace;
+        final File input=sourceApk;
+        final String find=patchFind.getText().toString();
+        final String replace=patchReplacement.getText().toString();
+        patchBatch.setEnabled(false);
+        status.setText("Scanning eligible text assets for exact replacements…");
+        executor.execute(()->{
+            try{
+                int updated=pending.replaceLiteral(input,find,replace);
+                runOnUiThread(()->{
+                    if(isFinishing()||isDestroyed()||patchWorkspace!=pending)return;
+                    refreshPatchStatus();
+                    status.setText("Auto-staged "+updated+" eligible text assets.");
+                });
+            }catch(IOException error){
+                runOnUiThread(()->{
+                    if(!isFinishing()&&!isDestroyed())status.setText("Automation rejected: "+error.getMessage());
+                });
+            }finally{
+                busy.set(false);
+                runOnUiThread(()->{
+                    if(!isFinishing()&&!isDestroyed())patchBatch.setEnabled(true);
+                });
+            }
+        });
+    }
+    private void chooseUnsignedExport(){
+        if(patchWorkspace==null||patchWorkspace.size()==0||busy.get())return;
+        Intent intent=new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("application/vnd.android.package-archive");
+        intent.putExtra(Intent.EXTRA_TITLE,"Vibe_Repacked_UNSIGNED_NOT_INSTALLABLE.apk");
+        try{startActivityForResult(intent,EXPORT_UNSIGNED_APK);}
+        catch(android.content.ActivityNotFoundException none){
+            status.setText("No system document provider for unsigned APK export.");
+        }
+    }
+    private void exportUnsigned(Uri destination){
+        if(patchWorkspace==null||patchWorkspace.size()==0||sourceApk==null||
+           !busy.compareAndSet(false,true))return;
+        final File original=sourceApk;
+        final ApkPatchWorkspace pending=patchWorkspace;
+        patchExport.setEnabled(false);
+        status.setText("Repacking unsigned APK with integrity checks…");
+        executor.execute(()->{
+            File scratch=null;
+            try{
+                scratch=new File(getCacheDir(),"vibe-unsigned-"+System.nanoTime()+".apk");
+                ApkPatchWorkspace.Result built=pending.buildUnsigned(original,scratch);
+                try(InputStream in=new java.io.FileInputStream(scratch);
+                    OutputStream output=getContentResolver().openOutputStream(destination,"w")){
+                    if(output==null)throw new IOException("Document provider refused output");
+                    byte[] buf=new byte[32768];int n;
+                    while((n=in.read(buf))!=-1){
+                        if(Thread.currentThread().isInterrupted())throw new IOException("APK export cancelled");
+                        output.write(buf,0,n);
+                    }
+                    output.flush();
+                }
+                final String result="UNSIGNED APK exported. SHA-256: "+
+                    built.outputSha256+" · changed assets: "+built.changedFiles+
+                    ". Must align and sign before installation.";
+                runOnUiThread(()->{
+                    if(!isFinishing()&&!isDestroyed())status.setText(result);
+                });
+            }catch(Exception error){
+                runOnUiThread(()->{
+                    if(!isFinishing()&&!isDestroyed())
+                        status.setText("Unsigned export failed: "+error.getMessage());
+                });
+            }finally{
+                if(scratch!=null&&scratch.exists())scratch.delete();
+                busy.set(false);
+                runOnUiThread(()->{
+                    if(!isFinishing()&&!isDestroyed())refreshPatchStatus();
+                });
+            }
+        });
     }
 
     private void refreshSourceResults() {
