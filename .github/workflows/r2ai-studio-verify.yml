@@ -22,7 +22,9 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-      - name: Compile and run Android unit tests
+      - name: Resolve dependencies and compile Android Kotlin
+        run: gradle --no-daemon :app:dependencies --configuration debugCompileClasspath :app:compileDebugKotlin --stacktrace
+      - name: Run Android unit tests and assemble APK
         run: gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug --stacktrace
       - name: Check APK exists
         run: test -s app/build/outputs/apk/debug/app-debug.apk
