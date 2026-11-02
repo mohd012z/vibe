@@ -1157,9 +1157,32 @@ public final class MainActivity extends Activity {
                     }
                     output.flush();
                 }
+                String verification;
+                try(InputStream check=getContentResolver().openInputStream(destination)){
+                    if(check==null)throw new IOException("Document provider returned no readable output");
+                    java.security.MessageDigest digest=java.security.MessageDigest.getInstance("SHA-256");
+                    byte[] part=new byte[32768];
+                    long count=0;
+                    int n;
+                    while((n=check.read(part))!=-1){
+                        if(Thread.currentThread().isInterrupted())throw new IOException("Export verification cancelled");
+                        count+=n;
+                        if(count>256L*1024*1024)throw new IOException("Provider output exceeds size limit");
+                        digest.update(part,0,n);
+                    }
+                    StringBuilder actual=new StringBuilder();
+                    for(byte b:digest.digest())
+                        actual.append(String.format(Locale.ROOT,"%02x",b&255));
+                    if(count!=built.outputBytes ||
+                       !actual.toString().equals(built.outputSha256))
+                        throw new IOException("Exported APK checksum mismatch. Delete the damaged file.");
+                    verification="Provider read-back SHA-256 VERIFIED.";
+                }catch(java.io.FileNotFoundException|SecurityException unavailable){
+                    verification="WARNING: Provider read-back unavailable; verify exported file independently.";
+                }
                 final String result="UNSIGNED APK exported. SHA-256: "+
                     built.outputSha256+" · changed assets: "+built.changedFiles+
-                    ". Must align and sign before installation.";
+                    ". "+verification+" Alignment and private-key signing required.";
                 runOnUiThread(()->{
                     if(!isFinishing()&&!isDestroyed())status.setText(result);
                 });
