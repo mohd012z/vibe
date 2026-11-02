@@ -83,6 +83,8 @@ public final class MainActivity extends Activity {
     private TextView diffPreview;
     private TextDraft localDraft;
     private ApkPatchWorkspace patchWorkspace;
+    private PatchPlanStore patchStore;
+    private Button patchUndo;
     private LinearLayout patchCard;
     private TextView patchStatus;
     private EditText patchFind,patchReplacement;
@@ -138,6 +140,8 @@ public final class MainActivity extends Activity {
         getWindow().getDecorView().setSystemUiVisibility(0);
         libraryStore = new LibraryStore(this);
         cleanupPreviousSessionTempFiles();
+        try{patchStore=new PatchPlanStore(this);}
+        catch(IOException unavailable){patchStore=null;}
         createView();
     }
 
@@ -555,13 +559,24 @@ public final class MainActivity extends Activity {
         patchBatch=button("▶ Auto-stage exact replacements");
         margin(patchBatch,patchCard,0,8);
         patchBatch.setOnClickListener(v->runBatchPatch());
+        patchUndo=button("↶ Undo last staged operation");
+        margin(patchUndo,patchCard,0,7);
+        patchUndo.setOnClickListener(v->{
+            if(patchWorkspace==null||busy.get())return;
+            if(patchWorkspace.undo()){
+                String warning=savePatchCheckpoint();
+                refreshPatchStatus();
+                status.setText("Last staged operation undone."+warning);
+            }else status.setText("No earlier patch queue state available.");
+        });
         patchReset=button("↶ Discard all staged patches");
         margin(patchReset,patchCard,0,7);
         patchReset.setOnClickListener(v->{
             if(patchWorkspace==null || busy.get())return;
             patchWorkspace.clear();
+            String warning=savePatchCheckpoint();
             refreshPatchStatus();
-            status.setText("Staged changes discarded. Original APK unchanged.");
+            status.setText("Staged changes discarded. Original APK unchanged."+warning);
         });
         patchExport=button("Export modified APK (UNSIGNED; signing required)");
         patchExport.setEnabled(false);
@@ -694,6 +709,19 @@ public final class MainActivity extends Activity {
                 catch(IOException rejected){result.warnings.add("Feature evidence scan failed: "+rejected.getMessage());}
                 final ApkFeatureAudit.Result featureResults=audit;
                 final ApkSourceExplorer.Result ready=sources;
+                ApkPatchWorkspace recovered=null;
+                String recoveryNote=null;
+                try{
+                    recovered=patchStore==null?new ApkPatchWorkspace(scratch):patchStore.load(scratch);
+                }catch(IOException badCheckpoint){
+                    recoveryNote="Saved patch plan could not be restored: "+badCheckpoint.getMessage();
+                    try{recovered=new ApkPatchWorkspace(scratch);}
+                    catch(IOException badSource){
+                        recoveryNote="Patch workspace unavailable: "+badSource.getMessage();
+                    }
+                }
+                final ApkPatchWorkspace readyPatch=recovered;
+                if(recoveryNote!=null)result.warnings.add(recoveryNote);
                 final File captured=scratch;
                 scratch=null;
                 runOnUiThread(()->{
@@ -701,14 +729,8 @@ public final class MainActivity extends Activity {
                     if(sourceApk!=null && !sourceApk.equals(captured))sourceApk.delete();
                     sourceApk=captured;
                     sourceIndex=ready;
-                    try{
-                        patchWorkspace=new ApkPatchWorkspace(captured);
-                        patchCard.setVisibility(View.VISIBLE);
-                    }catch(IOException patchUnavailable){
-                        patchWorkspace=null;
-                        patchCard.setVisibility(View.GONE);
-                        result.warnings.add("Patch workspace unavailable: "+patchUnavailable.getMessage());
-                    }
+                    patchWorkspace=readyPatch;
+                    patchCard.setVisibility(readyPatch==null?View.GONE:View.VISIBLE);
                     refreshPatchStatus();
                     featureAudit=featureResults;
                     updateAuditSummary();
@@ -1020,21 +1042,52 @@ public final class MainActivity extends Activity {
         info.append("\nOutput is UNSIGNED; Android install requires private-key signing.");
         patchStatus.setText(info.toString());
         patchExport.setEnabled(patchWorkspace.size()>0);
+        if(patchUndo!=null)patchUndo.setEnabled(patchWorkspace.canUndo());
     }
 
+    private String savePatchCheckpoint(){
+        if(patchWorkspace==null)return "";
+        if(patchStore==null)return " Checkpoint persistence unavailable on this device.";
+        try{
+            patchStore.save(patchWorkspace);
+            return " Patch queue saved privately.";
+        }catch(IOException error){
+            return " WARNING: patch queue not saved: "+error.getMessage();
+        }
+    }
     private void stageSelectedPatch(){
         if(patchWorkspace==null||sourceApk==null||selectedSourceEntry==null||
            !"file".equals(selectedSourceEntry.kind)||localDraft==null){
             status.setText("Select and edit a supported text asset first.");return;
         }
-        try{
-            patchWorkspace.stage(sourceApk,selectedSourceEntry.archivePath,
-                assetEditor.getText().toString());
-            refreshPatchStatus();
-            status.setText("Text edit staged for unsigned APK export; original untouched.");
-        }catch(IOException error){
-            status.setText("Patch rejected: "+error.getMessage());
-        }
+        if(!busy.compareAndSet(false,true))return;
+        final ApkPatchWorkspace plan=patchWorkspace;
+        final File original=sourceApk;
+        final String path=selectedSourceEntry.archivePath;
+        final String replacement=assetEditor.getText().toString();
+        patchStage.setEnabled(false);
+        status.setText("Validating staged text edit against source APK...");
+        executor.execute(()->{
+            String message;
+            try{
+                plan.stage(original,path,replacement);
+                message="Text resource staged. Original APK unchanged.";
+                if(patchStore!=null)patchStore.save(plan);
+                else message+=" Checkpoint persistence unavailable.";
+            }catch(IOException error){
+                message="Patch rejected or not saved: "+error.getMessage();
+            }
+            final String outcome=message;
+            busy.set(false);
+            runOnUiThread(()->{
+                if(isFinishing()||isDestroyed())return;
+                patchStage.setEnabled(true);
+                if(patchWorkspace==plan){
+                    refreshPatchStatus();
+                    status.setText(outcome);
+                }
+            });
+        });
     }
     private void runBatchPatch(){
         if(patchWorkspace==null||sourceApk==null||!busy.compareAndSet(false,true))return;
@@ -1047,10 +1100,12 @@ public final class MainActivity extends Activity {
         executor.execute(()->{
             try{
                 int updated=pending.replaceLiteral(input,find,replace);
+                final String checkpointNotice=patchStore==null?
+                    " Checkpoint persistence unavailable." : persistBatchCheckpoint(pending);
                 runOnUiThread(()->{
                     if(isFinishing()||isDestroyed()||patchWorkspace!=pending)return;
                     refreshPatchStatus();
-                    status.setText("Auto-staged "+updated+" eligible text assets.");
+                    status.setText("Auto-staged "+updated+" eligible text assets."+checkpointNotice);
                 });
             }catch(IOException error){
                 runOnUiThread(()->{
@@ -1064,6 +1119,11 @@ public final class MainActivity extends Activity {
             }
         });
     }
+    private String persistBatchCheckpoint(ApkPatchWorkspace plan){
+        try{patchStore.save(plan);return " Patch queue saved privately.";}
+        catch(IOException bad){return " WARNING: checkpoint failed: "+bad.getMessage();}
+    }
+
     private void chooseUnsignedExport(){
         if(patchWorkspace==null||patchWorkspace.size()==0||busy.get())return;
         Intent intent=new Intent(Intent.ACTION_CREATE_DOCUMENT);
