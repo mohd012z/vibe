@@ -1,0 +1,148 @@
+name: Vibe Hermes Inspector Android APK
+
+on:
+  push:
+    branches:
+      - feature/read-only-hermes-inspector-20261101
+    paths:
+      - android/hermes-inspector/**
+      - .github/workflows/hermes-inspector-apk.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vibe-hermes-android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    name: Build, unit test, sign-check and archive debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout exact branch head
+        uses: actions/checkout@v4
+      - name: Install JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Use preinstalled Android SDK and install Android 35 components
+        run: |
+          set -euo pipefail
+          SDK_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          test -d "$SDK_HOME"
+          echo "ANDROID_HOME=$SDK_HOME" >> "$GITHUB_ENV"
+          if [ -x "$SDK_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            SDKMANAGER="$SDK_HOME/cmdline-tools/latest/bin/sdkmanager"
+          else
+            SDKMANAGER="$(find "$SDK_HOME/cmdline-tools" -maxdepth 3 -type f -name sdkmanager | sort -V | tail -n 1)"
+          fi
+          test -x "$SDKMANAGER"
+          "$SDKMANAGER" --sdk_root="$SDK_HOME" --install 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Install Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+      - name: Provision pinned genuine HBC84/94/99 test-only fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$RUNNER_TEMP/hermes-fixture-corpus"
+          git clone --quiet --filter=blob:none --no-checkout https://github.com/P1sec/hermes-dec.git "$tmp"
+          git -C "$tmp" sparse-checkout init --cone
+          git -C "$tmp" sparse-checkout set tests/version-84 tests/version-94 tests/version-99-202602
+          git -C "$tmp" checkout --quiet 2e796663e1fedb93dca51060797ebf3327b3fedb
+          target="android/hermes-inspector/app/src/test/resources"
+          mkdir -p "$target"
+          cp "$tmp/tests/version-84/sample.hbc" "$target/hbc84.hbc"
+          cp "$tmp/tests/version-94/sample.hbc" "$target/hbc94.hbc"
+          cp "$tmp/tests/version-99-202602/sample.hbc" "$target/hbc99.hbc"
+          cp "$tmp/tests/version-94/sample.hermes_raw_hasm" "$target/hbc94.official"
+          cp "$tmp/tests/version-99-202602/sample.hermes_raw_hasm" "$target/hbc99.official"
+          sha256sum "$target"/hbc*.hbc
+      - name: Generate an authentic DEX class fixture using Android D8
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$RUNNER_TEMP/vibe-source-fixture"
+          mkdir -p "$tmp/java/com/vibe/fixture" "$tmp/classes" "$tmp/dex"
+          cat > "$tmp/java/com/vibe/fixture/Greeter.java" <<'JAVA'
+          package com.vibe.fixture;
+          public final class Greeter {
+              public static String echo(String text) { return text; }
+              public static String greeting() {
+                  return echo("Hello from genuine Dalvik bytecode");
+              }
+              public static String premiumEvidence() {
+                  return "VIP Premium Pro entitlement";
+              }
+              public static String subscriptionEvidence() {
+                  return "subscription paywall";
+              }
+              public static String billingEvidence() {
+                  return "BillingClient productDetails";
+              }
+              public static String adsEvidence() {
+                  return "AdMob AdView AppLovin";
+              }
+              public static String analyticsEvidence() {
+                  return "AppsFlyer attribution";
+              }
+          }
+          JAVA
+          javac --release 8 -d "$tmp/classes" "$tmp/java/com/vibe/fixture/Greeter.java"
+          "$ANDROID_HOME/build-tools/35.0.0/d8" --min-api 28 \
+             --lib "$ANDROID_HOME/platforms/android-35/android.jar" \
+             --output "$tmp/dex" "$tmp/classes/com/vibe/fixture/Greeter.class"
+          test -s "$tmp/dex/classes.dex"
+          cp "$tmp/dex/classes.dex" "android/hermes-inspector/app/src/test/resources/source-explorer-fixture.dex"
+          sha256sum "android/hermes-inspector/app/src/test/resources/source-explorer-fixture.dex"
+      - name: Build Android 9+ debug APK and execute JVM unit tests
+        run: |
+          set -euo pipefail
+          gradle --no-daemon --stacktrace -p android/hermes-inspector \
+            testDebugUnitTest lintDebug assembleDebug
+      - name: Verify native signature, zip alignment, bytecode, metadata and permissions
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="android/hermes-inspector/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          ZIPALIGN="$ANDROID_HOME/build-tools/35.0.0/zipalign"
+          AAPT="$ANDROID_HOME/build-tools/35.0.0/aapt"
+          "$APKSIGNER" verify --verbose --print-certs "$APK"
+          "$ZIPALIGN" -c -v 4 "$APK"
+          "$AAPT" dump badging "$APK" | grep -E 'package:|sdkVersion:|targetSdkVersion:'
+          "$AAPT" dump permissions "$APK" | tee /tmp/hermes-apk-permissions.txt
+          if grep -Eq 'android.permission.(INTERNET|READ_EXTERNAL_STORAGE|WRITE_EXTERNAL_STORAGE|MANAGE_EXTERNAL_STORAGE)' /tmp/hermes-apk-permissions.txt; then
+            echo "Unauthorized permission found in native Android build" >&2
+            exit 1
+          fi
+          unzip -Z1 "$APK" | grep -qx classes.dex
+          sha256sum "$APK" | tee android/hermes-inspector/app/build/outputs/apk/debug/SHA256SUMS.txt
+      - name: Verify release signing fails without private signing credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          if env -u VIBE_RELEASE_KEYSTORE_FILE -u VIBE_RELEASE_STORE_PASSWORD \
+                 -u VIBE_RELEASE_KEY_ALIAS -u VIBE_RELEASE_KEY_PASSWORD \
+                 gradle --no-daemon -p android/hermes-inspector verifyReleaseSigning \
+                 > /tmp/signing-gate-check.log 2>&1; then
+            echo "Release signing gate unexpectedly passed without keystore" >&2
+            exit 1
+          fi
+          grep -q 'Release signing requires' /tmp/signing-gate-check.log
+          echo 'PASS: private release-signing gate fails closed'
+      - name: Upload installable signed debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Vibe-Hermes-Inspector-Android9-16-debug
+          path: |
+            android/hermes-inspector/app/build/outputs/apk/debug/app-debug.apk
+            android/hermes-inspector/app/build/outputs/apk/debug/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14

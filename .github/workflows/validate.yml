@@ -57,6 +57,118 @@ jobs:
         run: |
           set -e
           python3 tools/vibebot_test.py
+      - name: Hermes read-only inventory and local UI regression suite (stdlib)
+        run: |
+          set -e
+          python3 -m unittest discover -s tests -p 'test_vibe_hermes*.py' -v
+      - name: SHA-pinned HBC59/99/100 source repair in temporary checkout
+        run: |
+          set -euo pipefail
+          temp="$(mktemp -d)"
+          trap 'rm -rf "$temp"' EXIT
+          git clone --quiet https://github.com/Kirlif/HBC-Tool.git "$temp/HBC-Tool"
+          git -C "$temp/HBC-Tool" checkout --quiet eaf70a8700380f35e39e1bdbcaac01a3c49a63b0
+          python3 tools/vibe_hbc_patch_checkout.py "$temp/HBC-Tool"
+          python3 - "$temp/HBC-Tool" <<'PYCODE'
+          import sys,types
+          from pathlib import Path
+          sys.path.insert(0,sys.argv[1])
+          sys.modules['docopt']=types.ModuleType('docopt')
+          sys.modules['docopt'].docopt=lambda *args,**kwargs: {}
+          from hbctool.hbc.hbc59 import HBC59
+          from hbctool.hbc.hbc99 import HBC99
+          from hbctool.hbc.hbc100 import HBC100
+          for cls,v in ((HBC59,59),(HBC99,99),(HBC100,100)):
+              o=cls()
+              assert o.getVersion()==v,(v,o.getVersion())
+              o.setObj({'header':{'stringCount':1},
+                        'stringTableEntries':[{'isUTF16':0,'offset':0,'length':4}],
+                        'stringStorage':[65,66,67,68],
+                        'stringTableOverflowEntries':[]})
+              o.setString(0,'éé')
+              assert bytes(o.getObj()['stringStorage'])=='éé'.encode('utf-8')
+              for too_short in ('x','abc'):
+                  try: o.setString(0,too_short)
+                  except ValueError: pass
+                  else: raise AssertionError(f'HBC{v}: short replacement accepted')
+              assert bytes(o.getObj()['stringStorage'])=='éé'.encode('utf-8')
+          print('Actual pinned upstream source patched: 3 version checks and 6 rejected short-string edits OK')
+          PYCODE
+      - name: All-version source and BitWriter validation on pinned HBC checkout
+        run: |
+          set -euo pipefail
+          temp="$(mktemp -d)"
+          trap 'rm -rf "$temp"' EXIT
+          git clone --quiet https://github.com/Kirlif/HBC-Tool.git "$temp/HBC-Tool"
+          git -C "$temp/HBC-Tool" checkout --quiet eaf70a8700380f35e39e1bdbcaac01a3c49a63b0
+          python3 tools/vibe_hbc_patch_all.py "$temp/HBC-Tool"
+          python3 tools/vibe_hbc_validate_checkout.py "$temp/HBC-Tool"
+          python3 tools/vibe_hbc_source_audit.py "$temp/HBC-Tool"
+      - name: Public genuine HBC84/94/99 corpus and independent hermes-dec comparison
+        run: |
+          set -euo pipefail
+          temp="$(mktemp -d)"
+          trap 'rm -rf "$temp"' EXIT
+          git clone --quiet https://github.com/Kirlif/HBC-Tool.git "$temp/HBC-Tool"
+          git -C "$temp/HBC-Tool" checkout --quiet eaf70a8700380f35e39e1bdbcaac01a3c49a63b0
+          python3 tools/vibe_hbc_patch_all.py "$temp/HBC-Tool"
+          python3 tools/vibe_hbc_bigint_patch.py "$temp/HBC-Tool"
+          python3 tools/vibe_hbc_functionsource_patch.py "$temp/HBC-Tool"
+          git clone --quiet --filter=blob:none --no-checkout https://github.com/P1sec/hermes-dec.git "$temp/hermes-dec"
+          git -C "$temp/hermes-dec" sparse-checkout init --cone
+          git -C "$temp/hermes-dec" sparse-checkout set src tests/version-84 tests/version-94 tests/version-99-202602
+          git -C "$temp/hermes-dec" checkout --quiet 2e796663e1fedb93dca51060797ebf3327b3fedb
+          python3 tools/vibe_hermes_public_corpus.py "$temp/HBC-Tool" "$temp/hermes-dec"
+      - name: Check mobile Hermes JavaScript syntax and viewport markup
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          import ast
+          from pathlib import Path
+          source=Path('tools/vibe_hermes_mobile.py').read_text()
+          tree=ast.parse(source)
+          page=next(node.value.value for node in tree.body if isinstance(node,ast.Assign)
+              and any(isinstance(t,ast.Name) and t.id=='PAGE' for t in node.targets))
+          assert 'name="viewport"' in page
+          assert 'id="pageInfo"' in page
+          assert 'aria-live="polite"' in page
+          assert 'PAGE_SIZE=50' in page
+          script=page.split('<script>',1)[1].split('</script>',1)[0]
+          Path('/tmp/vibe-hermes-ui-check.js').write_text(script)
+          PYCODE
+          node --check /tmp/vibe-hermes-ui-check.js
+      - name: Experimental BigInt section codec 87-100 (isolated pinned checkout)
+        run: |
+          set -euo pipefail
+          temp="$(mktemp -d)"
+          trap 'rm -rf "$temp"' EXIT
+          git clone --quiet https://github.com/Kirlif/HBC-Tool.git "$temp/HBC-Tool"
+          git -C "$temp/HBC-Tool" checkout --quiet eaf70a8700380f35e39e1bdbcaac01a3c49a63b0
+          python3 tools/vibe_hbc_patch_all.py "$temp/HBC-Tool"
+          python3 tools/vibe_hbc_bigint_patch.py "$temp/HBC-Tool"
+          python3 tools/vibe_hbc_validate_bigint.py "$temp/HBC-Tool"
+      - name: SHA-pinned Hermes opcode translator mutation fuzz (22 versions)
+        run: |
+          set -euo pipefail
+          temp="$(mktemp -d)"
+          trap 'rm -rf "$temp"' EXIT
+          git clone --quiet https://github.com/Kirlif/HBC-Tool.git "$temp/HBC-Tool"
+          git -C "$temp/HBC-Tool" checkout --quiet eaf70a8700380f35e39e1bdbcaac01a3c49a63b0
+          python3 tools/vibe_hbc_translator_patch.py "$temp/HBC-Tool"
+          python3 tools/vibe_hbc_translator_fuzz.py "$temp/HBC-Tool"
+      - name: Genuine 10-version public Talaria bytecode compatibility survey
+        run: |
+          set -euo pipefail
+          temp="$(mktemp -d)"
+          trap 'rm -rf "$temp"' EXIT
+          git clone --quiet https://github.com/Kirlif/HBC-Tool.git "$temp/HBC-Tool"
+          git -C "$temp/HBC-Tool" checkout --quiet eaf70a8700380f35e39e1bdbcaac01a3c49a63b0
+          python3 tools/vibe_hbc_patch_all.py "$temp/HBC-Tool"
+          git clone --quiet --filter=blob:none --no-checkout https://github.com/tuvior/Talaria.git "$temp/Talaria"
+          git -C "$temp/Talaria" sparse-checkout init --cone
+          git -C "$temp/Talaria" sparse-checkout set src/talaria/hbc
+          git -C "$temp/Talaria" checkout --quiet 279c0f21e35e0e99ac699e6bdad9f237497adc12
+          python3 tools/vibe_hbc_talaria_corpus.py "$temp/HBC-Tool" "$temp/Talaria"
       - name: APK pipeline + Vibe AI + Telegram + deploy suite
         run: |
           set -e

@@ -1,0 +1,85 @@
+plugins {
+    id 'com.android.application'
+}
+
+def releaseSigningVariables = [
+    'VIBE_RELEASE_KEYSTORE_FILE',
+    'VIBE_RELEASE_STORE_PASSWORD',
+    'VIBE_RELEASE_KEY_ALIAS',
+    'VIBE_RELEASE_KEY_PASSWORD'
+]
+def releaseSigningReady = releaseSigningVariables.every { name ->
+    def value = System.getenv(name)
+    value != null && !value.trim().isEmpty()
+}
+
+android {
+    namespace 'com.vibe.hermesinspector'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.vibe.hermesinspector'
+        minSdk 28
+        targetSdk 35
+        versionCode 11
+        versionName '0.8.1'
+    }
+
+    signingConfigs {
+        if (releaseSigningReady) {
+            create('vibeRelease') {
+                storeFile = file(System.getenv('VIBE_RELEASE_KEYSTORE_FILE'))
+                storePassword = System.getenv('VIBE_RELEASE_STORE_PASSWORD')
+                keyAlias = System.getenv('VIBE_RELEASE_KEY_ALIAS')
+                keyPassword = System.getenv('VIBE_RELEASE_KEY_PASSWORD')
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            minifyEnabled false
+        }
+        release {
+            minifyEnabled false
+            if (releaseSigningReady) {
+                signingConfig signingConfigs.vibeRelease
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        abortOnError true
+    }
+}
+
+dependencies {
+    implementation 'org.smali:dexlib2:2.5.2'
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.json:json:20240303'
+}
+
+tasks.register('verifyReleaseSigning') {
+    group = 'verification'
+    description = 'Fail closed when private release keystore environment is not configured.'
+    doLast {
+        if (!releaseSigningReady) {
+            throw new GradleException(
+                'Release signing requires a privately stored keystore and four VIBE_RELEASE_* environment values.'
+            )
+        }
+        if (!file(System.getenv('VIBE_RELEASE_KEYSTORE_FILE')).isFile()) {
+            throw new GradleException('Configured release keystore file is missing.')
+        }
+    }
+}
+tasks.configureEach {
+    if (name == 'assembleRelease' || name == 'bundleRelease') {
+        dependsOn tasks.named('verifyReleaseSigning')
+    }
+}
