@@ -41,10 +41,35 @@ public final class PatchPlanCodec {
         }
     }
 
+    /**
+     * Bound untrusted JSON nesting before handing it to org.json.
+     * Quoted braces and escaped quotes are ignored by the structural scanner.
+     */
+    private static void verifyJsonStructure(String source)throws IOException{
+        int depth=0;boolean quoted=false,escaped=false;
+        for(int i=0;i<source.length();i++){
+            char c=source.charAt(i);
+            if(quoted){
+                if(escaped){escaped=false;continue;}
+                if(c=='\\'){escaped=true;continue;}
+                if(c=='"'){quoted=false;continue;}
+            }else{
+                if(c=='"'){quoted=true;continue;}
+                if(c=='{'||c=='['){
+                    if(++depth>20)throw new IOException("Patch JSON nesting exceeds safety limit");
+                }else if(c=='}'||c==']'){
+                    if(--depth<0)throw new IOException("Patch JSON bracket mismatch");
+                }
+            }
+        }
+        if(quoted||depth!=0)throw new IOException("Incomplete patch JSON");
+    }
+
     public static ApkPatchWorkspace restore(File original,String json)throws IOException{
         if(json==null||json.isEmpty()||
            json.getBytes(StandardCharsets.UTF_8).length>MAX_JSON_BYTES)
             throw new IOException("Patch plan missing or exceeds 1 MiB");
+        verifyJsonStructure(json);
         final JSONObject data;
         try{data=new JSONObject(json);}
         catch(JSONException malformed){throw new IOException("Corrupt patch plan JSON",malformed);}
