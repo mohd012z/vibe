@@ -132,6 +132,8 @@ public final class DualPaneActivity extends Activity {
         commands.setOrientation(LinearLayout.HORIZONTAL);
         compareButton=action("⇄ Compare");
         swapButton=action("Swap files");
+        compareButton.setContentDescription("Compare selected left and right documents without changing them");
+        swapButton.setContentDescription("Swap left and right selected documents");
         commands.addView(compareButton,new LinearLayout.LayoutParams(0,dp(52),2));
         LinearLayout.LayoutParams swapParams=new LinearLayout.LayoutParams(0,dp(52),1);
         swapParams.setMargins(dp(5),0,0,0);
@@ -147,6 +149,7 @@ public final class DualPaneActivity extends Activity {
         HorizontalScrollView horizontal=new HorizontalScrollView(this);
         horizontal.setFillViewport(true);
         horizontal.setHorizontalScrollBarEnabled(true);
+        horizontal.setContentDescription("Scrollable side-by-side file panels; swipe horizontally to access the right panel on narrow screens");
         LinearLayout sides=new LinearLayout(this);
         sides.setOrientation(LinearLayout.HORIZONTAL);
         horizontal.addView(sides);
@@ -181,6 +184,8 @@ public final class DualPaneActivity extends Activity {
         pickers.setOrientation(LinearLayout.HORIZONTAL);
         Button chooseFile=action("Open file");
         Button chooseFolder=action("Open folder");
+        chooseFile.setContentDescription("Choose a file for the "+pane.side+" inspection panel");
+        chooseFolder.setContentDescription("Choose a folder for the "+pane.side+" inspection panel");
         pickers.addView(chooseFile,new LinearLayout.LayoutParams(0,dp(48),1));
         LinearLayout.LayoutParams folder=new LinearLayout.LayoutParams(0,dp(48),1);
         folder.setMargins(dp(3),0,0,0);
@@ -196,6 +201,7 @@ public final class DualPaneActivity extends Activity {
         margin(pane.card,pane.back,7);
         pane.back.setOnClickListener(v->back(index));
         pane.zipButton=action("Browse APK entries");
+        pane.zipButton.setContentDescription("List APK ZIP contents in the "+pane.side+" panel, read only");
         pane.zipButton.setEnabled(false);
         margin(pane.card,pane.zipButton,5);
         pane.zipButton.setOnClickListener(v->toggleZip(index));
@@ -208,6 +214,7 @@ public final class DualPaneActivity extends Activity {
         pane.next.setContentDescription("Next "+pane.side+" folder page");
         pane.pageLabel=label("1 / 1",12,WHITE,true);
         pane.pageLabel.setGravity(Gravity.CENTER);
+        pane.pageLabel.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         pageNavigation.addView(pane.previous,new LinearLayout.LayoutParams(0,dp(46),1));
         pageNavigation.addView(pane.pageLabel,new LinearLayout.LayoutParams(0,dp(46),2));
         pageNavigation.addView(pane.next,new LinearLayout.LayoutParams(0,dp(46),1));
