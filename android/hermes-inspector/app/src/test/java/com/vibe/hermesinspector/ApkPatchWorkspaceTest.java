@@ -126,4 +126,41 @@ public class ApkPatchWorkspaceTest {
         assertTrue(plan.staged().get(0).path.equals("assets/theme.css"));
     }
 
+    @Test public void multipleAutomationPassesRespectExistingStagedText()throws Exception{
+        File source=archive("chain.apk",sample());
+        ApkPatchWorkspace plan=new ApkPatchWorkspace(source);
+        plan.stage(source,"assets/theme.css","body { color: blue; }");
+        assertEquals(1,plan.replaceLiteral(source,"color: blue","color: green"));
+        assertEquals(1,plan.size());
+        ApkPatchWorkspace.Validation check=plan.validateStaged(source);
+        assertEquals(1,check.stagedFiles);
+        assertEquals(3,check.strippedSignatureEntries);
+        File unsigned=new File(tmp.getRoot(),"chain-unsigned.apk");
+        plan.buildUnsigned(source,unsigned);
+        try(ZipFile zip=new ZipFile(unsigned)){
+            String text=new String(zip.getInputStream(zip.getEntry("assets/theme.css"))
+                .readAllBytes(),StandardCharsets.UTF_8);
+            assertEquals("body { color: green; }",text);
+        }
+        assertTrue(plan.undo());
+        assertEquals(1,plan.size());
+        File reverted=new File(tmp.getRoot(),"chain-reverted.apk");
+        plan.buildUnsigned(source,reverted);
+        try(ZipFile zip=new ZipFile(reverted)){
+            assertEquals("body { color: blue; }",
+                new String(zip.getInputStream(zip.getEntry("assets/theme.css"))
+                    .readAllBytes(),StandardCharsets.UTF_8));
+        }
+    }
+    @Test public void preflightDetectsChangedInputWithoutExport()throws Exception{
+        File source=archive("preflight.apk",sample());
+        ApkPatchWorkspace plan=new ApkPatchWorkspace(source);
+        plan.stage(source,"assets/theme.css","body { color: blue; }");
+        assertEquals(1,plan.validateStaged(source).stagedFiles);
+        try(FileOutputStream out=new FileOutputStream(source,true)){out.write(21);}
+        try{plan.validateStaged(source);fail("Modified source accepted");}
+        catch(IOException expected){assertTrue(expected.getMessage().contains("differs"));}
+        assertEquals(1,plan.size());
+    }
+
 }

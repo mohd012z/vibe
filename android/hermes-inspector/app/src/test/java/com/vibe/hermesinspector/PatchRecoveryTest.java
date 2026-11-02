@@ -126,4 +126,21 @@ public class PatchRecoveryTest {
         try{store.has("../evil");fail("Path traversal SHA accepted");}
         catch(IOException expected){assertTrue(expected.getMessage().contains("SHA-256"));}
     }
+    @Test public void rejectNestedJsonBeforeParserRecurses()throws Exception{
+        File source=fixture("nested.apk","body { color: red; }");
+        ApkPatchWorkspace plan=new ApkPatchWorkspace(source);
+        plan.stage(source,"assets/theme.css","body { color: blue; }");
+        String valid=PatchPlanCodec.encode(plan);
+        String attack="[".repeat(200)+"0"+"]".repeat(200);
+        try{PatchPlanCodec.restore(source,attack);fail("Nesting bomb accepted");}
+        catch(IOException expected){assertTrue(expected.getMessage().contains("nesting"));}
+        assertEquals(1,PatchPlanCodec.restore(source,valid).size());
+    }
+    @Test public void escapedBracketsDoNotTriggerNestingLimit()throws Exception{
+        File source=fixture("braces.apk","{ text: red }");
+        ApkPatchWorkspace plan=new ApkPatchWorkspace(source);
+        plan.stage(source,"assets/theme.css","test [ brackets ] with quoted \\\" text");
+        assertEquals(1,PatchPlanCodec.restore(source,PatchPlanCodec.encode(plan)).size());
+    }
+
 }
