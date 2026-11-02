@@ -48,9 +48,11 @@ public class PatchRecoveryTest {
         assertEquals(plan.sourceSha256(),restored.sourceSha256());
         File output=new File(folder.getRoot(),"unsigned.apk");
         assertEquals(2,restored.buildUnsigned(original,output).changedFiles);
-        assertEquals("body { color: red; }", new String(
-            Files.readAllBytes(original.toPath()),StandardCharsets.ISO_8859_1)
-            .contains("body { color: red; }")?"body { color: red; }":"missing");
+        try(java.util.zip.ZipFile saved=new java.util.zip.ZipFile(original)){
+            assertEquals("body { color: red; }",
+                new String(saved.getInputStream(saved.getEntry("assets/theme.css"))
+                    .readAllBytes(),StandardCharsets.UTF_8));
+        }
         store.delete(plan.sourceSha256());
         assertFalse(store.has(plan.sourceSha256()));
     }
