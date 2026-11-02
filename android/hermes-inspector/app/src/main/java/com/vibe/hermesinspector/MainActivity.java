@@ -578,6 +578,39 @@ public final class MainActivity extends Activity {
             refreshPatchStatus();
             status.setText("Staged changes discarded. Original APK unchanged."+warning);
         });
+        Button validatePatch=button("✓ Preflight staged patches (read-only)");
+        validatePatch.setContentDescription("Verify staged resource hashes and APK ZIP safety before export");
+        margin(validatePatch,patchCard,0,8);
+        validatePatch.setOnClickListener(v->{
+            if(patchWorkspace==null||sourceApk==null||!busy.compareAndSet(false,true))return;
+            final ApkPatchWorkspace plan=patchWorkspace;
+            final File file=sourceApk;
+            validatePatch.setEnabled(false);
+            status.setText("Checking staged hashes and ZIP limits...");
+            executor.execute(()->{
+                String message;
+                try{
+                    ApkPatchWorkspace.Validation verified=plan.validateStaged(file);
+                    message="Preflight PASS: "+verified.stagedFiles+
+                        " text changes, "+verified.zipEntries+" ZIP entries; "+
+                        verified.strippedSignatureEntries+" existing signature records will be stripped."+
+                        " Export remains UNSIGNED.";
+                }catch(IOException invalid){
+                    message="Preflight REJECTED: "+invalid.getMessage();
+                }catch(RuntimeException invalid){
+                    message="Preflight FAILED on malformed input: "+invalid.getClass().getSimpleName();
+                }
+                final String result=message;
+                busy.set(false);
+                runOnUiThread(()->{
+                    if(!isFinishing()&&!isDestroyed()){
+                        validatePatch.setEnabled(true);
+                        if(patchWorkspace==plan&&sourceApk==file)
+                            status.setText(result);
+                    }
+                });
+            });
+        });
         patchExport=button("Export modified APK (UNSIGNED; signing required)");
         patchExport.setEnabled(false);
         margin(patchExport,patchCard,0,9);
