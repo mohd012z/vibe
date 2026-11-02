@@ -17,10 +17,23 @@ public final class PatchPlanStore {
     private final File root;
 
     public PatchPlanStore(Context context)throws IOException{
-        if(context==null)throw new IOException("Missing application context");
-        root=new File(context.getApplicationContext().getFilesDir(),DIRECTORY);
+        this(context==null?null:new File(context.getApplicationContext().getFilesDir(),DIRECTORY));
+    }
+    // Testable private-directory constructor; callers cannot escape via the hash filename.
+    PatchPlanStore(File directory)throws IOException{
+        if(directory==null)throw new IOException("Missing private patch directory");
+        root=directory;
         if(!root.isDirectory()&&!root.mkdirs())
             throw new IOException("Cannot create private patch checkpoint directory");
+        File[] old=root.listFiles();
+        if(old!=null){
+            int cleaned=0;
+            for(File candidate:old){
+                if(candidate.isFile() && candidate.getName().startsWith("vibe-draft-") &&
+                   candidate.getName().endsWith(".part") && candidate.delete())cleaned++;
+                if(cleaned>=40)break;
+            }
+        }
     }
     private File checkpoint(String sha)throws IOException{
         if(sha==null||!sha.matches("[a-f0-9]{64}"))
