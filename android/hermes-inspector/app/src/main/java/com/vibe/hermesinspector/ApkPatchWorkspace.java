@@ -36,6 +36,7 @@ import java.util.zip.ZipOutputStream;
  */
 public final class ApkPatchWorkspace {
     public static final int MAX_STAGE=12;
+    public static final int MAX_UNDO=8;
     public static final int MAX_ASSET_BYTES=64*1024;
     public static final int MAX_REPLACEMENTS=100;
     private static final long MAX_OUTPUT=256L*1024*1024;
@@ -69,6 +70,7 @@ public final class ApkPatchWorkspace {
     }
     private final String sourceSha256;
     private final LinkedHashMap<String,Change> changes=new LinkedHashMap<>();
+    private final java.util.ArrayDeque<LinkedHashMap<String,Change>> history=new java.util.ArrayDeque<>();
 
     public ApkPatchWorkspace(File original)throws IOException{
         if(original==null||!original.isFile()||original.length()<22||
@@ -79,8 +81,32 @@ public final class ApkPatchWorkspace {
     public String sourceSha256(){return sourceSha256;}
     public List<Change> staged(){return Collections.unmodifiableList(new ArrayList<>(changes.values()));}
     public int size(){return changes.size();}
-    public void clear(){changes.clear();}
-    public void remove(String path){changes.remove(path);}
+    public void clear(){
+        if(changes.isEmpty())return;
+        remember();
+        changes.clear();
+    }
+    public void remove(String path){
+        if(!changes.containsKey(path))return;
+        remember();
+        changes.remove(path);
+    }
+    public boolean undo(){
+        if(history.isEmpty())return false;
+        changes.clear();
+        changes.putAll(history.removeLast());
+        return true;
+    }
+    public boolean canUndo(){return !history.isEmpty();}
+    String replacementText(String path)throws IOException{
+        Change item=changes.get(path);
+        if(item==null)throw new IOException("No staged replacement for "+path);
+        return decode(item.replacement);
+    }
+    private void remember(){
+        if(history.size()>=MAX_UNDO)history.removeFirst();
+        history.addLast(new LinkedHashMap<>(changes));
+    }
 
     public static boolean editable(String path){
         if(path==null||path.isEmpty()||!safeName(path))return false;
@@ -106,9 +132,15 @@ public final class ApkPatchWorkspace {
             throw new IOException("Maximum twelve staged text assets");
         byte[] before=readOriginalText(original,path);
         Change replacement=new Change(path,before,after);
-        if(replacement.beforeSha256.equals(replacement.afterSha256))
-            changes.remove(path);
-        else changes.put(path,replacement);
+        if(replacement.beforeSha256.equals(replacement.afterSha256)){
+            if(changes.containsKey(path)){remember();changes.remove(path);}
+        }else{
+            Change existing=changes.get(path);
+            if(existing==null||!existing.afterSha256.equals(replacement.afterSha256)){
+                remember();
+                changes.put(path,replacement);
+            }
+        }
     }
 
     /** Deterministic exact literal replacement on *eligible* text entries only.
@@ -153,9 +185,22 @@ public final class ApkPatchWorkspace {
             }
         }
         // Commit only after every candidate and ZIP member has passed validation.
-        changes.clear();
-        changes.putAll(pending);
+        if(!equalChanges(pending,changes)){
+            remember();
+            changes.clear();
+            changes.putAll(pending);
+        }
         return affected;
+    }
+
+    private static boolean equalChanges(Map<String,Change> a,Map<String,Change> b){
+        if(a.size()!=b.size())return false;
+        for(Map.Entry<String,Change> entry:a.entrySet()){
+            Change other=b.get(entry.getKey());
+            if(other==null||!entry.getValue().afterSha256.equals(other.afterSha256))
+                return false;
+        }
+        return true;
     }
 
     /**
