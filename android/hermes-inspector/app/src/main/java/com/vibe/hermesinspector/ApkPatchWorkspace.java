@@ -328,7 +328,9 @@ public final class ApkPatchWorkspace {
             }
             validateSource(original);
             String finalDigest=FileComparator.sha256(scratch);
-            Files.move(scratch.toPath(),target.toPath(),StandardCopyOption.ATOMIC_MOVE);
+            // No REPLACE_EXISTING or ATOMIC_MOVE: fail rather than clobber a
+            // destination that another actor created after the initial check.
+            Files.move(scratch.toPath(),target.toPath());
             return new Result(sourceSha256,finalDigest,original.length(),target.length(),
                 applied,signatureCount);
         }finally{
