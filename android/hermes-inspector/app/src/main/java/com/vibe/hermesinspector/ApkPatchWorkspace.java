@@ -98,6 +98,7 @@ public final class ApkPatchWorkspace {
         return true;
     }
     public boolean canUndo(){return !history.isEmpty();}
+    void clearUndoHistory(){history.clear();}
     String replacementText(String path)throws IOException{
         Change item=changes.get(path);
         if(item==null)throw new IOException("No staged replacement for "+path);
