@@ -172,7 +172,11 @@ public final class ApkPatchWorkspace {
                     throw new IOException("Suspicious APK compression ratio");
                 if(!editable(path)||entry.isDirectory()||size>MAX_ASSET_BYTES)continue;
                 byte[] beforeBytes=readEntry(zip,entry,MAX_ASSET_BYTES);
-                String before=decode(beforeBytes);
+                Change alreadyStaged=pending.get(path);
+                if(alreadyStaged!=null &&
+                   !alreadyStaged.beforeSha256.equals(hash(beforeBytes)))
+                    throw new IOException("Staged source entry hash changed");
+                String before=decode(alreadyStaged==null?beforeBytes:alreadyStaged.replacement);
                 if(!before.contains(find))continue;
                 if(!pending.containsKey(path)&&pending.size()>=MAX_STAGE)
                     throw new IOException("Batch replacement exceeds twelve-file limit");
@@ -192,6 +196,53 @@ public final class ApkPatchWorkspace {
             changes.putAll(pending);
         }
         return affected;
+    }
+
+    /** Read-only preflight. Never changes APK bytes or the staged plan. */
+    public static final class Validation {
+        public final int zipEntries, stagedFiles, strippedSignatureEntries;
+        public final long declaredExpandedBytes;
+        Validation(int entries,int staged,int signatures,long expanded){
+            zipEntries=entries;stagedFiles=staged;
+            strippedSignatureEntries=signatures;declaredExpandedBytes=expanded;
+        }
+    }
+    public Validation validateStaged(File original)throws IOException{
+        validateSource(original);
+        if(changes.isEmpty())throw new IOException("No changes staged");
+        int entries=0,signatures=0,verified=0;
+        long declared=0;
+        Set<String> seen=new HashSet<>();
+        try(ZipFile zip=new ZipFile(original)){
+            Enumeration<? extends ZipEntry> records=zip.entries();
+            while(records.hasMoreElements()){
+                if(Thread.currentThread().isInterrupted())throw new IOException("Preflight cancelled");
+                ZipEntry item=records.nextElement();
+                String path=item.getName();
+                if(++entries>MAX_ZIP_MEMBERS||!safeName(path)||!seen.add(path))
+                    throw new IOException("Unsafe/duplicate ZIP path or entry limit");
+                long size=item.getSize(),packed=item.getCompressedSize();
+                if(size<0||packed<0||size>MAX_EXPANDED||declared>MAX_EXPANDED-size)
+                    throw new IOException("APK expanded-size budget exceeded");
+                declared+=size;
+                if(size>1024*1024&&(packed==0||size/Math.max(1,packed)>200))
+                    throw new IOException("Suspicious APK compression ratio");
+                if(signatureFile(path))signatures++;
+                Change change=changes.get(path);
+                if(change!=null){
+                    if(item.isDirectory()||!editable(path))
+                        throw new IOException("Ineligible staged asset");
+                    if(!hash(readEntry(zip,item,MAX_ASSET_BYTES)).equals(change.beforeSha256))
+                        throw new IOException("Staged source hash mismatch: "+path);
+                    if(change.replacement.length>MAX_ASSET_BYTES)
+                        throw new IOException("Replacement exceeds 64 KiB");
+                    verified++;
+                }
+            }
+        }
+        if(verified!=changes.size())throw new IOException("Missing staged asset in APK");
+        validateSource(original);
+        return new Validation(entries,verified,signatures,declared);
     }
 
     private static boolean equalChanges(Map<String,Change> a,Map<String,Change> b){
