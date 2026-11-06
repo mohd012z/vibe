@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Creating a Google Reseller Subscription Link — the Jio × AI Gemini Pro case</title>
+<style>
+  :root{
+    --bg:#0b0e14; --panel:#11151f; --panel2:#161c29; --line:#242c3d;
+    --text:#e6ebf5; --muted:#8b96ab; --dim:#5b6579;
+    --g1:#4f8cff; --g2:#34d399; --g3:#f59e0b; --g4:#e879f9; --g5:#22d3ee;
+    --code:#0d1119; --codeborder:#26304a;
+    --ok:#34d399; --warn:#f59e0b; --bad:#f87171;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+  a{color:var(--g1);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code{font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace;
+    font-size:.9em;background:var(--code);border:1px solid var(--codeborder);
+    padding:.1em .4em;border-radius:5px;color:#c9d6f2}
+  .wrap{max-width:960px;margin:0 auto;padding:0 22px 80px}
+  header.hero{padding:54px 22px 40px;background:
+    radial-gradient(1200px 500px at 20% -10%,rgba(79,140,255,.20),transparent 60%),
+    radial-gradient(900px 500px at 90% 0%,rgba(52,211,153,.16),transparent 55%),
+    var(--panel);border-bottom:1px solid var(--line);}
+  .hero-inner{max-width:960px;margin:0 auto}
+  .kicker{color:var(--g5);letter-spacing:.18em;text-transform:uppercase;
+    font-size:12px;font-weight:700}
+  h1{font-size:34px;line-height:1.2;margin:14px 0 10px;font-weight:800}
+  .sub{color:var(--muted);font-size:17px;max-width:720px}
+  .badges{margin-top:20px;display:flex;flex-wrap:wrap;gap:8px}
+  .badge{border:1px solid var(--line);background:var(--panel2);color:var(--muted);
+    font-size:12px;padding:5px 11px;border-radius:999px}
+  .badge b{color:var(--text)}
+  nav.toc{position:sticky;top:0;z-index:20;background:rgba(11,14,20,.86);
+    backdrop-filter:blur(10px);border-bottom:1px solid var(--line);padding:10px 22px}
+  nav.toc .wrap{padding:0;display:flex;gap:18px;overflow-x:auto;white-space:nowrap}
+  nav.toc a{color:var(--muted);font-size:13.5px;font-weight:600}
+  nav.toc a:hover{color:var(--text);text-decoration:none}
+  section{padding:44px 0 8px;border-bottom:1px solid var(--line)}
+  section:last-child{border-bottom:none}
+  h2{font-size:24px;margin:0 0 6px;font-weight:750;display:flex;align-items:center;gap:11px}
+  .num{display:inline-flex;align-items:center;justify-content:center;min-width:30px;height:30px;
+    padding:0 8px;border-radius:9px;background:var(--panel2);border:1px solid var(--line);
+    color:var(--g1);font-size:14px;font-weight:800}
+  h3{font-size:17px;margin:26px 0 8px;color:var(--text)}
+  p{color:#cdd6e6}
+  .lead{color:var(--text);font-size:17px}
+  .muted{color:var(--muted)}
+  .grid{display:grid;gap:16px;margin:18px 0}
+  .cols-2{grid-template-columns:repeat(2,1fr)}
+  .cols-3{grid-template-columns:repeat(3,1fr)}
+  @media(max-width:720px){.cols-2,.cols-3{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px}
+  .card h4{margin:0 0 6px;font-size:15px}
+  .card p{margin:0;font-size:14px;color:var(--muted)}
+  .card .ic{font-size:22px}
+  .callout{border:1px solid var(--line);border-left:4px solid var(--g1);
+    background:var(--panel2);border-radius:10px;padding:14px 16px;margin:16px 0}
+  .callout.warn{border-left-color:var(--g3)}
+  .callout.ok{border-left-color:var(--g2)}
+  .callout b{color:var(--text)}
+  .callout p{margin:4px 0 0;font-size:14.5px;color:var(--muted)}
+  pre{background:var(--code);border:1px solid var(--codeborder);border-radius:12px;
+    padding:16px 18px;overflow-x:auto;font-size:13px;line-height:1.6;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:#d6e0f5}
+  .tk{color:#8b96ab}.tf{color:#7fd1ff}.ts{color:#c3e88d}.tn{color:#f0a56a}.tc{color:#5b6579;font-style:italic}
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:14px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.05em}
+  td{color:#cdd6e6}
+  tr:last-child td{border-bottom:none}
+  .tblwrap{border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--panel)}
+  .step{display:flex;gap:16px;margin:16px 0}
+  .step .dot{flex:0 0 auto;width:34px;height:34px;border-radius:50%;display:flex;
+    align-items:center;justify-content:center;font-weight:800;font-size:15px;
+    background:linear-gradient(135deg,var(--g1),var(--g5));color:#fff}
+  .step .body{flex:1;background:var(--panel);border:1px solid var(--line);
+    border-radius:12px;padding:14px 16px}
+  .step .body h4{margin:0 0 4px;font-size:15.5px}
+  .step .body p{margin:0;font-size:14px;color:var(--muted)}
+  .flow{display:flex;flex-wrap:wrap;align-items:stretch;gap:0;margin:18px 0}
+  .fnode{flex:1 1 150px;background:var(--panel);border:1px solid var(--line);
+    border-radius:12px;padding:14px;min-width:150px;position:relative}
+  .fnode .t{font-weight:700;font-size:13.5px;margin-bottom:4px}
+  .fnode .d{font-size:12px;color:var(--muted);line-height:1.4}
+  .fnode .who{font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;
+    color:var(--g5);font-weight:700;margin-bottom:8px}
+  .arrow{flex:0 0 auto;display:flex;align-items:center;justify-content:center;
+    padding:0 8px;color:var(--dim);font-size:22px}
+  @media(max-width:720px){.arrow{transform:rotate(90deg);width:100%;padding:2px 0}}
+  .pill{display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;
+    border:1px solid var(--line);color:var(--muted)}
+  .pill.jio{color:#4f8cff;border-color:rgba(79,140,255,.4);background:rgba(79,140,255,.1)}
+  .pill.google{color:#34d399;border-color:rgba(52,211,153,.4);background:rgba(52,211,153,.1)}
+  .pill.user{color:#f59e0b;border-color:rgba(245,158,11,.4);background:rgba(245,158,11,.1)}
+  footer{color:var(--dim);font-size:12.5px;text-align:center;padding:34px 22px 10px}
+  .anchor{scroll-margin-top:64px}
+  .big-url{font-family:ui-monospace,Menlo,monospace;font-size:14px;word-break:break-all;
+    background:var(--code);border:1px solid var(--codeborder);border-radius:10px;
+    padding:14px 16px;color:#c9d6f2}
+  .big-url .u{color:var(--g2)}
+  .big-url .t{color:var(--g3)}
+  .checklist li{margin:9px 0;color:#cdd6e6;font-size:14.5px}
+  .checklist .mk{color:var(--g2);font-weight:800;margin-right:8px}
+  .keyrow{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0}
+  .keyrow .k{background:var(--panel2);border:1px solid var(--line);border-radius:8px;
+    padding:8px 12px;font-size:13px}
+  .keyrow .k b{color:var(--g3)}
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="hero-inner">
+    <div class="kicker">Google Payments Reseller Subscription API · v1</div>
+    <h1>Creating a Google Reseller / Billing-Partner Subscription Link</h1>
+    <p class="sub">A working study of exactly how the <b>Jio × “AI Gemini Pro”</b> activation link
+    <code>serviceactivation.google.com/subscription/new/&lt;token&gt;</code> is minted — and what you
+    need to generate your own as a Google reseller/billing partner.</p>
+    <div class="badges">
+      <span class="badge">Case study · <b>Jio (Reliance) × Google AI Pro</b></span>
+      <span class="badge">API · <b>paymentsresellersubscription.googleapis.com</b></span>
+      <span class="badge">Auth · <b>RS256 service-account JWT</b></span>
+      <span class="badge">Delivered live in msasoup bot · <b>/gemini</b></span>
+      <span class="badge">Verified · <b>token → Google sign-in (HTTP 200)</b></span>
+    </div>
+  </div>
+</header>
+
+<nav class="toc">
+  <div class="wrap">
+    <a href="#what">What the link is</a>
+    <a href="#model">The partner model</a>
+    <a href="#token">How the token is created</a>
+    <a href="#jwt">The RS256 JWT</a>
+    <a href="#generate">userSessions:generate</a>
+    <a href="#activate">Activation + Pub/Sub</a>
+    <a href="#build">Build your own</a>
+    <a href="#jio">The Jio specifics</a>
+    <a href="#refs">References</a>
+  </div>
+</nav>
+
+<div class="wrap">
+
+<!-- ================= WHAT ================= -->
+<section id="what" class="anchor">
+  <h2><span class="num">1</span> What the link actually is</h2>
+  <p class="lead">The link is <b>not</b> built by Jio’s screen or app. It is a Google URL whose
+  last segment is a <b>signed, short-lived, single-use token</b> minted by Google’s
+  <b>Payments Reseller Subscription API</b>. Jio is a Google <em>reseller/billing partner</em>;
+  its backend asks Google for a token, and Google glues it onto the activation path.</p>
+
+  <div class="tblwrap"><table>
+    <tr><th>Endpoint</th><th>Path</th><th>Use</th></tr>
+    <tr><td><b>Create intent</b></td><td><code>https://serviceactivation.google.com/subscription/new/&lt;token&gt;</code></td><td>End user creates + activates a brand-new subscription</td></tr>
+    <tr><td><b>Entitle intent</b></td><td><code>https://serviceactivation.google.com/subscription/entitle/&lt;token&gt;</code></td><td>End user links an already-provisioned subscription to their Google account</td></tr>
+    <tr><td><b>Sandbox</b></td><td><code>https://serviceactivation.sandbox.google.com/subscription/new/&lt;token&gt;</code></td><td>Same, but pre-production</td></tr>
+  </table></div>
+
+  <h3>Anatomy of a real Jio token (verified 2026-09)</h3>
+  <p>A live token shared for the Jio offer was inspected byte-for-byte:</p>
+  <div class="big-url"><span class="u">https://serviceactivation.google.com/subscription/new/</span><span class="t">AQCpiIFGJKlYJG59Qeh‑R_zayuBXvyh…2HQ==</span></div>
+  <div class="grid cols-3">
+    <div class="card"><div class="ic">📦</div><h4>205 bytes</h4><p>base64url‑encoded, opaque. Decodes to binary starting <code>01 00</code> (a protobuf envelope), not a JSON you can read.</p></div>
+    <div class="card"><div class="ic">🕐</div><h4>~1 hour TTL</h4><p>Short‑lived by default. Google returns an <code>expireTime</code> in the same call that mints it.</p></div>
+    <div class="card"><div class="ic">🔒</div><h4>Single‑use + signed</h4><p>Bound to the intent payload server‑side. The end user can’t forge, share, or replay it.</p></div>
+  </div>
+  <div class="callout ok">
+    <b>Proof it’s real:</b> opening the Jio token (with a browser User‑Agent) returned
+    <b>HTTP 200 → 2 redirects → <code>accounts.google.com/v3/signin</code></b>. That is Google’s
+    own “Google Managed Signup” activation UI. The token is just a key that unlocks that UI for
+    one person, one offer, for one hour.
+  </div>
+</section>
+
+<!-- ================= MODEL ================= -->
+<section id="model" class="anchor">
+  <h2><span class="num">2</span> The reseller / billing‑partner model</h2>
+  <p>Google’s Reseller Subscription API lets a <b>partner</b> (Jio, G2A, an operator, a
+  telco) <b>resell a Google product</b> (Google One, Google AI Pro, YouTube, Play Pass) to end
+  users, while <b>Google handles identity, billing and entitlement</b>. The partner never sees the
+  user’s Google password.</p>
+
+  <div class="flow">
+    <div class="fnode"><div class="who"><span class="pill jio">Partner (Jio)</span></div>
+      <div class="t">Knows the customer</div>
+      <div class="d">Owns the user (Jio number, age, plan tier). Runs eligibility + billing rules.</div></div>
+    <div class="arrow">→</div>
+    <div class="fnode"><div class="who"><span class="pill google">Google</span></div>
+      <div class="t">Reseller Subscription API</div>
+      <div class="d">Holds products &amp; promotions, mints tokens, creates the subscription, charges/renews.</div></div>
+    <div class="arrow">→</div>
+    <div class="fnode"><div class="who"><span class="pill user">End user</span></div>
+      <div class="t">Signs in + activates</div>
+      <div class="d">Opens the link, logs in with a Google Account, taps “Activate now”.</div></div>
+  </div>
+
+  <div class="grid cols-2">
+    <div class="card">
+      <h4>Two signup styles</h4>
+      <p><b>Google Managed Signup</b> (used here): the partner mints a <code>userSession</code> token and
+      redirects the user to Google’s own activation page. No OAuth consent screen for the partner.
+      <b>Partner Managed Signup (OAuth)</b>: the partner runs its own OAuth flow and calls
+      <code>subscriptions.create</code> directly.</p>
+    </div>
+    <div class="card">
+      <h4>Two ways to make a sub</h4>
+      <p><b>Create intent</b> → brand‑new subscription (this offer).
+      <b>Entitle intent</b> → link a pre‑provisioned sub to the user
+      (<code>subscriptions.provision</code> first, then <code>:entitle</code>).</p>
+    </div>
+  </div>
+
+  <div class="callout">
+    <b>Who is the “partner” here?</b> Jio (Reliance). Google’s own announcement confirms it:
+    “Through a new strategic partnership with Reliance… giving millions of their users access to
+    the Google AI Pro plan at no extra cost for 18 months.” That partnership is what lets Jio’s
+    backend call <code>userSessions:generate</code> at all.
+  </div>
+</section>
+
+<!-- ================= TOKEN ================= -->
+<section id="token" class="anchor">
+  <h2><span class="num">3</span> How the token is created (step by step)</h2>
+  <p>The whole minting is <b>server‑to‑server</b>. The end user only ever sees step 6.</p>
+
+  <div class="step"><div class="dot">1</div><div class="body">
+    <h4>Eligibility check <span class="pill jio">Jio</span></h4>
+    <p>User taps “Claim” in MyJio. Jio verifies the offer rules — here: age 18–25, an active
+    Jio plan of ₹349 or above, one claim per Jio number.</p></div></div>
+
+  <div class="step"><div class="dot">2</div><div class="body">
+    <h4>Sign an RS256 service‑account JWT <span class="pill jio">Jio backend</span></h4>
+    <p>Jio’s backend (a Google <b>service account</b>) builds a JSON Web Token signed with the SA
+    private key, requesting scope <code>…/auth/payments.reseller.subscription</code>. This proves
+    “this is really our partner” — see §4.</p></div></div>
+
+  <div class="step"><div class="dot">3</div><div class="body">
+    <h4>Swap the JWT for an OAuth access token <span class="pill google">Google</span></h4>
+    <p><code>POST https://oauth2.googleapis.com/token</code> with
+    <code>grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer</code> and the signed assertion.
+    Google returns a short‑lived <code>access_token</code> for the service account.</p></div></div>
+
+  <div class="step"><div class="dot">4</div><div class="body">
+    <h4>Call <code>userSessions:generate</code> with an intent <span class="pill google">Google</span></h4>
+    <p><code>POST …/v1/partners/{partner}/userSessions:generate</code> with a <b>createIntent</b>
+    describing exactly what to give: the product (Google AI Pro), the promotion (free 18 months),
+    the partner’s own id for this user, and the region. See §5.</p></div></div>
+
+  <div class="step"><div class="dot">5</div><div class="body">
+    <h4>Google mints the token <span class="pill google">Google</span></h4>
+    <p>Google encrypts the intent + request into the signed blob and returns
+    <code>{"token":"…","expireTime":"…"}</code>. Token size scales with the intent payload.</p></div></div>
+
+  <div class="step"><div class="dot">6</div><div class="body">
+    <h4>Build the link &amp; send it to the user <span class="pill jio">Jio</span></h4>
+    <p>Jio returns <code>https://serviceactivation.google.com/subscription/new/</code> + <code>token</code>.
+    That is the exact link. It’s delivered via the app redirect / a page / SMS — then the user
+    opens it, signs in, and activates.</p></div></div>
+
+  <div class="callout warn">
+    <b>You cannot self‑generate one.</b> The token only exists after the partner’s backend passes
+    its own eligibility check and asks Google to mint it. Anyone selling “Gemini Pro keys” (G2A,
+    Telegram channels, etc.) is a <em>separate reseller account</em> running this same API and
+    handing you the token <em>they</em> minted — you just activate it with your own account.
+  </div>
+</section>
+
+<!-- ================= JWT ================= -->
+<section id="jwt" class="anchor">
+  <h2><span class="num">4</span> The RS256 service‑account JWT</h2>
+  <p>This is the credential that proves the request comes from a legitimate partner. It’s a
+  standard Google service‑account assertion (the same mechanism Cloud IAM uses), just with a
+  reseller scope. The <b>msasoup bot implements it with no extra dependency</b> — only the
+  <code>cryptography</code> package that’s already in <code>requirements.txt</code>.</p>
+
+  <h3>Claims</h3>
+  <div class="tblwrap"><table>
+    <tr><th>Field</th><th>Value</th><th>Notes</th></tr>
+    <tr><td><code>iss</code></td><td><code>&lt;service.account.email&gt;.iam.gserviceaccount.com</code></td><td>The partner’s service account</td></tr>
+    <tr><td><code>scope</code></td><td><code>https://www.googleapis.com/auth/payments.reseller.subscription</code></td><td>Reseller API access</td></tr>
+    <tr><td><code>aud</code></td><td><code>https://oauth2.googleapis.com/token</code></td><td>Google token endpoint</td></tr>
+    <tr><td><code>iat</code></td><td>now</td><td>Issued‑at (epoch)</td></tr>
+    <tr><td><code>exp</code></td><td>now + 3600</td><td>Expiry — 1 hour</td></tr>
+  </table></div>
+
+  <h3>The full flow (runnable, no <code>google‑auth</code>/<code>PyJWT</code>)</h3>
+<pre><code><span class="tc"># 1) build + sign the RS256 JWT (cryptography only)</span>
+header  = {"alg": "RS256", "typ": "JWT"}
+claims  = {"iss": sa[<span class="ts">"client_email"</span>],
+           <span class="ts">"scope"</span>: <span class="ts">"…/payments.reseller.subscription"</span>,
+           <span class="ts">"aud"</span>: <span class="ts">"https://oauth2.googleapis.com/token"</span>,
+           <span class="ts">"iat"</span>: now, <span class="ts">"exp"</span>: now + 3600}
+sig     = rsa_key.sign(b64(header) + b<span class="ts">"."</span> + b64(claims),
+                       padding.PKCS1v15(), hashes.SHA256())
+jwt     = b64(header) + b<span class="ts">"."</span> + b64(claims) + b<span class="ts">"."</span> + b64(sig)
+
+<span class="tc"># 2) swap for an OAuth access token</span>
+POST https://oauth2.googleapis.com/token
+     grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer &amp; assertion=&lt;jwt&gt;
+<span class="tc"># → {"access_token":"…","expires_in":3600}</span>
+
+<span class="tc"># 3) mint the user session (see §5)</span>
+POST …/v1/partners/&lt;partner&gt;/userSessions:generate
+     Authorization: Bearer &lt;access_token&gt;
+</code></pre>
+
+  <div class="callout ok">
+    <b>Verified in the msasoup tooling:</b> the JWT is generated from a real RSA key, the signature
+    is checked with the public key (PKCS1v15 / SHA‑256), claims round‑trip correctly, and changing
+    any input changes the token — all covered by unit tests.
+  </div>
+</section>
+
+<!-- ================= GENERATE ================= -->
+<section id="generate" class="anchor">
+  <h2><span class="num">5</span> <code>userSessions:generate</code> — the actual call</h2>
+  <p>One call turns “give this user Google AI Pro free for 18 months” into a token. The body is a
+  <b>createIntent</b> whose <code>subscription</code> is identical to what
+  <code>partners.subscriptions.create</code> would take.</p>
+
+<pre><code><span class="tf">POST</span> https://paymentsresellersubscription.googleapis.com/v1/partners/<span class="tn">jiopartner</span>/userSessions:generate
+Authorization: <span class="ts">Bearer &lt;access_token&gt;</span>
+Content-Type: application/json
+
+{
+  <span class="tk">"intentPayload"</span>: {
+    <span class="tk">"createIntent"</span>: {
+      <span class="tk">"parent"</span>: <span class="ts">"partners/jiopartner"</span>,
+      <span class="tk">"subscriptionId"</span>: <span class="ts">"&lt;partner-chosen unique id&gt;"</span>,
+      <span class="tk">"subscription"</span>: {
+        <span class="tk">"partnerUserToken"</span>: <span class="ts">"&lt;jio user id, ≤63 ASCII chars&gt;"</span>,
+        <span class="tk">"serviceLocation"</span>: { <span class="tk">"regionCode"</span>: <span class="ts">"IN"</span> },
+        <span class="tk">"lineItems"</span>: [
+          {
+            <span class="tk">"product"</span>: <span class="ts">"partners/jiopartner/products/GOOGLE_AI_PRO"</span>,
+            <span class="tk">"lineItemPromotionSpecs"</span>: [
+              { <span class="tk">"promotion"</span>: <span class="ts">"partners/jiopartner/promotions/FREE_18MO"</span> }
+            ]
+          }
+        ]
+      },
+      <span class="tk">"cycleOptions"</span>: { <span class="tc">/* optional */</span> }
+    }
+  }
+}
+
+<span class="tc">// → 200 OK</span>
+{
+  <span class="tk">"userSession"</span>: {
+    <span class="tk">"token"</span>: <span class="ts">"AQCpiIFGJKlY…(205 bytes)…"</span>,
+    <span class="tk">"expireTime"</span>: <span class="ts">"2026‑11‑06T13:00:00Z"</span>
+  }
+}
+<span class="tc">// link = "https://serviceactivation.google.com/subscription/new/" + token</span>
+</code></pre>
+
+  <div class="grid cols-2">
+    <div class="card"><h4><code>partnerUserToken</code></h4>
+      <p>The partner’s own id for the end user (e.g. a Jio customer id). ≤63 ASCII chars. It’s what
+      lets the partner map the Google subscription back to its customer.</p></div>
+    <div class="card"><h4><code>subscriptionId</code></h4>
+      <p>Chosen by the partner, unique per sub. It’s the idempotency key: re‑minting tokens for the
+      same id never double‑fulfills, so tokens can be freely regenerated.</p></div>
+    <div class="card"><h4><code>product</code> + <code>promotion</code></h4>
+      <p>Names Google registered for the partner. The <em>promotion</em> is the free‑18‑months
+      deal; <code>enableOfferOverride</code> can let Google swap in a different eligible offer.</p></div>
+    <div class="card"><h4><code>serviceLocation</code></h4>
+      <p>Where the service is provided (ISO region, e.g. <code>IN</code>). Drives regional pricing/eligibility.</p></div>
+  </div>
+
+  <div class="callout warn">
+    <b>Token hygiene:</b> Google’s docs are explicit — generate the token <em>dynamically, for an
+    authenticated user</em>, and don’t paste it into an unauthenticated channel (SMS/email) where it
+    could be grabbed by someone else. It’s a bearer for that one activation.
+  </div>
+</section>
+
+<!-- ================= ACTIVATE ================= -->
+<section id="activate" class="anchor">
+  <h2><span class="num">6</span> Activation &amp; the Pub/Sub round‑trip</h2>
+  <p>The link is only half the story. Once the user activates, Google tells the partner what
+  happened over <b>Cloud Pub/Sub</b> — this is the source of truth the partner must listen to.</p>
+
+  <div class="flow">
+    <div class="fnode"><div class="who"><span class="pill user">User</span></div>
+      <div class="t">Opens link → Google sign‑in → “Activate now”</div>
+      <div class="d">Google creates the sub and links the user’s Google Account.</div></div>
+    <div class="arrow">→</div>
+    <div class="fnode"><div class="who"><span class="pill google">Google</span></div>
+      <div class="t">Publishes a Pub/Sub message</div>
+      <div class="d">The subscription resource as JSON (base64) + attributes, to the partner’s topic.</div></div>
+    <div class="arrow">→</div>
+    <div class="fnode"><div class="who"><span class="pill jio">Partner (Jio)</span></div>
+      <div class="t">Receives <code>endUserEntitled=true</code></div>
+      <div class="d">Knows the specific user succeeded — keeps it alive while their plan is active.</div></div>
+  </div>
+
+  <h3>What the notification carries</h3>
+  <div class="tblwrap"><table>
+    <tr><th>Field</th><th>Meaning</th></tr>
+    <tr><td><code>data</code></td><td>Base64 JSON of the full <b>Subscription</b> resource (state, products, <code>partnerUserToken</code>, <code>endUserEntitled</code>, times…)</td></tr>
+    <tr><td><code>attributes.state</code></td><td>e.g. <code>STATE_ACTIVE</code>, <code>STATE_CANCELLED</code></td></tr>
+    <tr><td><code>attributes.endUserEntitled</code></td><td><code>true</code> once the user linked their Google account</td></tr>
+    <tr><td><code>attributes.sequenceNumber</code></td><td>Per‑sub counter — use it for idempotency / out‑of‑order handling</td></tr>
+    <tr><td><code>attributes.cancellationReason</code></td><td>e.g. <code>CANCELLATION_REASON_ACCOUNT_CLOSED</code></td></tr>
+  </table></div>
+
+  <div class="callout">
+    <b>Why the sub can quietly die:</b> for this offer the 18‑month access stays only as long as an
+    eligible recharge remains active. Google’s lifecycle events (<code>STATE_CANCELLED</code>,
+    <code>…/past_due</code>, <code>…/account_closed</code>) are how Jio — and any partner — finds out.
+    That’s why the T&amp;Cs hinge on keeping a ₹349+ plan active.
+  </div>
+</section>
+
+<!-- ================= BUILD ================= -->
+<section id="build" class="anchor">
+  <h2><span class="num">7</span> Build your own partner integration</h2>
+  <p>Everything below is what you stand up <em>before</em> you can mint a single token. The Google
+  Integration Team hands you the pieces you can’t self‑serve (partner id, product/promotion ids,
+  Pub/Sub topics).</p>
+
+  <h3>Setup checklist</h3>
+  <ul class="checklist">
+    <li><span class="mk">✓</span><b>Two GCP projects</b> — one for staging, one for production. Tell Google your project <b>name, id and number</b> so they can configure your client.</li>
+    <li><span class="mk">✓</span><b>Enable the API</b> — in the Cloud Console: <em>APIs &amp; Services → Library</em> → search <b>“Payments Reseller Subscription API”</b> → Enable. Unlocks <code>paymentsresellersubscription.googleapis.com</code> (prod) and <code>preprod‑…</code> (sandbox).</li>
+    <li><span class="mk">✓</span><b>Create a service account</b> (per environment) — for server‑to‑server calls like <code>provision</code> and <code>userSessions:generate</code>.</li>
+    <li><span class="mk">✓</span><b>Grant the IAM role</b> — <b>Payments Reseller Admin (Beta)</b> on that service account (full access to subscriptions, products, promotions). If you run on Compute/App Engine the default SA may already have it.</li>
+    <li><span class="mk">✓</span><b>Create an SA key</b> (JSON) — this is the <code>sa</code> that signs the RS256 JWT in §4.</li>
+    <li><span class="mk">✓</span><b>Get your partner/product/promotion ids</b> from the Google Integration Team — you can’t list‑and‑guess them into <code>lineItems</code>.</li>
+    <li><span class="mk">✓</span><b>Set up Pub/Sub</b> — receive your topic ids from Google, allow‑list your subscriber SA, subscribe (filtered on <code>attributes.state</code> if you want), and handle <code>sequenceNumber</code>.</li>
+    <li><span class="mk">✓</span><b>(OAuth style only)</b> Configure the OAuth consent screen + client id/secret with the reseller scope, and set authorized JavaScript origins / redirect URLs. Skip for Google Managed Signup.</li>
+    <li><span class="mk">✓</span><b>Pass Google’s test requirements</b> — there’s a formal onboarding/test gate before launch.</li>
+  </ul>
+
+  <h3>Minimum env to go live (what the msasoup <code>/gemini</code> tool reads)</h3>
+  <div class="keyrow">
+    <div class="k"><b>GEMINI_JIO_PARTNER</b> — your <code>partners/{partner}</code> id</div>
+    <div class="k"><b>GEMINI_JIO_PRODUCT</b> — <code>partners/{partner}/products/{productId}</code></div>
+    <div class="k"><b>GEMINI_JIO_PARTNER_USER_TOKEN</b> — your per‑user id</div>
+    <div class="k"><b>GEMINI_JIO_SA_FILE</b> — path to the SA JSON key</div>
+    <div class="k"><b>GEMINI_JIO_REGION</b> — default <code>IN</code></div>
+    <div class="k"><b>GEMINI_JIO_PROMOTION</b> — optional free‑trial offer</div>
+    <div class="k"><b>GEMINI_JIO_ENV</b> — <code>prod</code> / <code>sandbox</code></div>
+  </div>
+
+  <div class="callout ok">
+    <b>Fail‑open by design:</b> the msasoup tool tries the real flow when the SA is configured, and
+    otherwise returns a <em>template</em> — the exact <code>userSessions:generate</code> request it
+    would send, the link shape it would produce, and the list of env vars still missing. No dead end.
+  </div>
+</section>
+
+<!-- ================= JIO ================= -->
+<section id="jio" class="anchor">
+  <h2><span class="num">8</span> The Jio specifics (the concrete numbers)</h2>
+  <div class="grid cols-2">
+    <div class="card"><h4>🎁 The offer</h4><p><b>Google AI Pro free for 18 months</b> (≈ ₹35,100 value): Gemini 2.5 Pro/3, Veo + Nano Banana image/video, NotebookLM, higher limits, <b>2 TB</b> Google One storage (Photos/Gmail/Drive).</p></div>
+    <div class="card"><h4>📞 Eligibility</h4><p>Jio users <b>age 18–25</b> on an active <b>Unlimited 5G plan of ₹349+</b> (prepaid or postpaid). <b>Once per Jio number.</b> DOB comes from KYC — can’t be changed.</p></div>
+    <div class="card"><h4>🧭 Claim path</h4><p>MyJio app → “Google Gemini Offer” banner → register interest → <b>Claim</b> → sign in with your Gmail → <b>Activate now</b>. Fallback page: <code>jio.com/google-gemini-offer</code>.</p></div>
+    <div class="card"><h4>⚠️ Status (Nov 2026)</h4><p>Jio <b>decommissioned its redemption gateway</b> (<code>tiny.jio.com/loginrecharge</code> + selfcare campaign URL now return <b>403</b>). Subscriptions already linked before the patch stay active to <b>01 May 2028</b>, provided the ₹349+ plan stays continuously active.</p></div>
+  </div>
+
+  <div class="callout warn">
+    <b>What this proves:</b> even with the user‑facing link 403’d, the <em>underlying</em> mechanism is
+    still the Google Reseller Subscription API. The 403 is on Jio’s gateway (which mints the token),
+    not on Google’s activation endpoint. A token that was already issued still works until it
+    expires — which is exactly why third parties resell “fresh keys.”
+  </div>
+</section>
+
+<!-- ================= REFS ================= -->
+<section id="refs" class="anchor">
+  <h2><span class="num">9</span> References &amp; where to go next</h2>
+  <div class="tblwrap"><table>
+    <tr><th>Topic</th><th>Source</th></tr>
+    <tr><td>Google Managed Signup (overview + endpoints)</td><td><code>developers.google.com/payments/reseller/subscription/…/Google.Managed.Signup</code></td></tr>
+    <tr><td><code>partners.userSessions.generate</code> (method + intent payloads)</td><td><code>…/rest/v1/partners.userSessions/generate</code></td></tr>
+    <tr><td><code>Subscription</code> resource (lineItems, states, reasons)</td><td><code>…/rest/v1/partners.subscriptions</code></td></tr>
+    <tr><td><code>LineItem</code> / <code>GoogleOnePayload</code> / products / promotions</td><td><code>…/rest/v1/partners.subscriptions.lineItems</code>, <code>…/partners.products</code></td></tr>
+    <tr><td>Integration steps (GCP, API enable, SA, IAM role, Pub/Sub)</td><td><code>…/reference/index/Integration.Steps</code></td></tr>
+    <tr><td>Pub/Sub notifications + lifecycle + examples</td><td><code>…/reference/index/Outbound.integrations/Pub.Sub.Notifications</code></td></tr>
+    <tr><td>Quickstart (prod + sandbox endpoints, Java client)</td><td><code>…/reference/index/Quickstart</code></td></tr>
+    <tr><td>Jio × Google AI Pro partnership</td><td><code>blog.google/…/reliance-jio-india-partnership</code></td></tr>
+    <tr><td>Jio offer details + T&amp;Cs + gateway status</td><td><code>jio.com/google-gemini-offer</code>, <code>jio.com/…/jio-google-gemini-terms-and-conditions</code></td></tr>
+  </table></div>
+
+  <div class="callout ok">
+    <b>Try it live:</b> the msasoup Telegram bot now ships a <b><code>/gemini</code></b> command and a
+    home‑menu button (“🎁 Jio AI Gemini Pro link”). <b>⚡ Generate my link</b> runs this exact flow
+    end‑to‑end (real token when the partner SA is configured, otherwise the annotated template), and
+    <b>📖 How the link is created</b> walks through §1–§6 in chat.
+  </div>
+</section>
+
+</div>
+
+<footer>
+  Single self‑contained HTML (no external assets) · Google Payments Reseller Subscription API study ·
+  built with the msasoup <code>/gemini</code> generator · verified against a live Jio token (2026‑09)
+</footer>
+
+</body>
+</html>
