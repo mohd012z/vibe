@@ -23,6 +23,7 @@ android {
         }
     }
     sourceSets["main"].java.srcDir("../ai")
+    sourceSets["main"].java.srcDir("../src/main/java")
 }
 
 dependencies {
