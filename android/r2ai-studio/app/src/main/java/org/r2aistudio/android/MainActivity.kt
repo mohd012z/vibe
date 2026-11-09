@@ -281,8 +281,9 @@ class MainActivity : Activity() {
                     val report = withContext(Dispatchers.IO) {
                         contentResolver.openInputStream(uri).use { stream ->
                             requireNotNull(stream) { "Unable to read selected file" }
+                            val job = currentCoroutineContext()[Job]
                             val bytes = BoundedReader.read(stream, OfflineInspector.MAX_INPUT_BYTES) {
-                                !currentCoroutineContext().isActive
+                                job?.isActive == false
                             }
                             OfflineInspector.inspect(bytes).asText()
                         }
