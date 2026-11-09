@@ -1,6 +1,12 @@
 name: R2AI Studio Android verification
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - feature/r2ai-studio-offline-m14
+    paths:
+      - 'android/r2ai-studio/**'
+      - '.github/workflows/r2ai-studio-verify.yml'
 permissions:
   contents: read
 jobs:
