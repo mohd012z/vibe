@@ -10,6 +10,8 @@ import kotlinx.coroutines.*
 import org.r2aistudio.ai.LiteRtLmProvider
 import org.r2aistudio.ai.ModelIntegrity
 import org.r2aistudio.ai.DefaultModelCatalog
+import org.r2aistudio.offline.BoundedReader
+import org.r2aistudio.offline.OfflineInspector
 import java.io.File
 import java.security.MessageDigest
 import java.net.URL
@@ -24,6 +26,7 @@ class MainActivity : Activity() {
     private lateinit var expectedHash: EditText
     private var model: File? = null
     private val importCode = 12
+    private val inspectCode = 13
     private var importing = false
     private var generating = false
     private var downloadJob: Job? = null
@@ -44,6 +47,15 @@ class MainActivity : Activity() {
         output = TextView(this).apply { text = "The editor and offline inspector do not require AI." }
         root.addView(status)
         root.addView(import)
+        root.addView(Button(this).apply {
+            text = "Inspect local file · read only"
+            setOnClickListener {
+                startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                    type = "*/*"
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                }, inspectCode)
+            }
+        })
         root.addView(Button(this).apply { text = "LLM · Download model"; setOnClickListener { showDownloadModel() } })
         root.addView(Button(this).apply { text = "LLM · Load saved model"; setOnClickListener { showSavedModels() } })
         root.addView(Button(this).apply {
@@ -260,8 +272,30 @@ class MainActivity : Activity() {
     @Deprecated("Uses Activity result API for a minimal compatibility shell")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != importCode || resultCode != RESULT_OK) return
+        if (resultCode != RESULT_OK) return
         val uri = data?.data ?: return
+        if (requestCode == inspectCode) {
+            scope.launch {
+                status.text = "Inspecting local file…"
+                try {
+                    val report = withContext(Dispatchers.IO) {
+                        contentResolver.openInputStream(uri).use { stream ->
+                            requireNotNull(stream) { "Unable to read selected file" }
+                            val bytes = BoundedReader.read(stream, OfflineInspector.MAX_INPUT_BYTES) {
+                                !currentCoroutineContext().isActive
+                            }
+                            OfflineInspector.inspect(bytes).asText()
+                        }
+                    }
+                    output.text = report
+                    status.text = "Offline inspection complete · read only"
+                } catch (e: Exception) {
+                    status.text = "Inspection failed: ${e.message}"
+                }
+            }
+            return
+        }
+        if (requestCode != importCode) return
         if (importing) return
         val checksum = expectedHash.text.toString().trim()
         if (checksum.isNotEmpty()) {
