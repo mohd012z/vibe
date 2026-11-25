@@ -9,6 +9,10 @@
 ---
 
 # Also in this folder
+- Suno Pro — suno.ai web app cloned as a native Android app (design tokens, real plan table, Pro gates, create flow; offline demo engine, 6 synthesized tracks) → [SUNO-PRO.md](SUNO-PRO.md)
+  - File: SunoPro-v1.apk (5.3 MB, com.aliph.suno, v2+v3 signed)
+  - Direct: https://mohd012z.github.io/vibe/downloads/SunoPro-v1.apk
+
 - Pulse Player 4.0.0 — YouTube / YT Music download (debug build) → [PULSEPLAYER.md](PULSEPLAYER.md)
   - File: PulsePlayer-4.0.0-yt-download.apk (46 MB), com.pulseplayer.app, CI build from PR #27
   - Direct: https://mohd012z.github.io/vibe/downloads/PulsePlayer-4.0.0-yt-download.apk
