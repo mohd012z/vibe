@@ -25,3 +25,7 @@
   - File: r2ai-android-v2.0.1-aarch64.apk (70 MB, arm64, com.r2ai.app) — v2.0.1: MINDA KEY FIX (401) + EXPIRY AUTO-DETECT
   - Direct: https://mohd012z.github.io/vibe/downloads/r2ai-android-v2.0.1-aarch64.apk
   - (v1.1–v1.9 superseded)
+
+## Suno DL — our own Suno downloader (token-reuse)
+- File: [SunoDL-v1.apk](SunoDL-v1.apk) (54 KB) — paste browser Cookie -> verify -> lookup song url / library / create -> MP3+cover download + history
+- Package com.aliph.sunodl · v2+v3 · [info](SUNO-DL.md)
