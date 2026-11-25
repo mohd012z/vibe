@@ -129,6 +129,89 @@ class ApkModEngine(core.Engine):
         return False
 
 
+class KitEngine(core.Engine):
+    """APK workbench patch/compile engine (v0.37, tools/vibebot/kit.py).
+
+    Runs the heavy apktool decode -> smali regex battery -> build -> align ->
+    sign -> verify pipeline as a bounded job. The cheap stdlib ops
+    (extract/read/write/add/delete/encrypt/decrypt) are synchronous and do NOT
+    use this engine. params: {preset | patterns:[...]} select the battery.
+    """
+
+    spec = core.EngineSpec(
+        name="kit", description="APK workbench: smali-regex patch + rebuild + sign",
+        formats=("apk",))
+
+    def __init__(self, out_dir: str, toolchain=None):
+        from . import kit
+        self.kit = kit
+        self.out_dir = out_dir
+        self.tc = toolchain or kit.Toolchain()
+
+    def can_run(self, artifact: str) -> bool:
+        return artifact.lower().endswith((".apk", ".apks"))
+
+    def run(self, job: core.Job) -> core.EngineResult:
+        k = self.kit
+        os.makedirs(self.out_dir, exist_ok=True)
+        preset = (job.params or {}).get("preset", "vip")
+        base = os.path.basename(job.artifact).rsplit(".", 1)[0]
+
+        if preset == "compile":
+            project = job.artifact
+            out_apk = (job.params or {}).get("out") or os.path.join(
+                self.out_dir, base + "-kit-compiled.apk")
+            job.progress("compile", 30, "build + align + sign")
+            k.compile_dir(self.tc, project, out_apk)
+            job.progress("done", 100, "compiled")
+            md = (f"# KIT compile\n\n- project: {project}\n"
+                  f"- out: {out_apk} ({os.path.getsize(out_apk)} B)\n")
+            return core.EngineResult(
+                intake={"sha256": self._sha256(out_apk), "package": "kit",
+                        "versionName": "compile"},
+                structural={"preset": "compile", "outSize": os.path.getsize(out_apk)},
+                findings=[], report_md=md,
+                outputs={"apk": out_apk})
+
+        patterns = (job.params or {}).get("patterns") or k.preset_patterns(preset)
+        out_name = base + f"-{preset}-kit.apk"
+        out_apk = os.path.join(self.out_dir, out_name)
+        job.progress("plan", 10, f"preset={preset} patterns={len(patterns)}")
+        job.checkpoint("plan", {"preset": preset, "out": out_apk})
+        job.progress("patch", 40, "decode + smali regex + build + sign")
+        res = k.patch_apk(self.tc, job.artifact, patterns, out_apk)
+        job.checkpoint("patch", {"matches": res["matches"],
+                                 "outSize": res["outSize"]})
+        job.progress("done", 100, f"{res['matches']} matches")
+        md = (f"# KIT patch — {preset}\n\n"
+              f"- matches: {res['matches']}\n"
+              f"- dex entries before/after: {res['dexEntriesBefore']}"
+              f"/{res['dexEntriesAfter']}\n"
+              f"- out: {out_apk} ({res['outSize']} B)\n\n"
+              f"{res['note']}\n\n## hits\n")
+        md += "\n".join(f"- {h['file']}  {h['pattern']}  x{h['matches']}"
+                        for h in res["hitDetail"]) or "  (none — 0 matches)"
+        return core.EngineResult(
+            intake={"sha256": self._sha256(job.artifact),
+                    "package": "kit", "versionName": preset},
+            structural={"preset": preset, "matches": res["matches"],
+                        "outSize": res["outSize"]},
+            findings=[],
+            report_md=md,
+            outputs={"apk": out_apk, "report": os.path.join(
+                self.out_dir, out_name + ".report.md")},
+        )
+
+    @staticmethod
+    def _sha256(path: str) -> str:
+        import hashlib
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+
 class MockEngine(core.Engine):
     """Deterministic offline engine — no artifact content is read.
 

@@ -84,7 +84,7 @@ def main() -> int:
         allowed_env = os.environ.get("VIBE_BOT_ALLOWED_USERS", "").strip()
         allowed = {s.strip() for s in allowed_env.split(",") if s.strip()} or None
         from vibebot.telegram_runtime import CategoryTelegramTransport
-        transport = CategoryTelegramTransport(gw, token, allowed)
+        transport = CategoryTelegramTransport(gw, token, allowed, worker=True)
         print(f"vibebot serving Telegram category console (allowlist "
               f"{'on: ' + str(sorted(allowed)) if allowed else 'OFF — open; set VIBE_BOT_ALLOWED_USERS'})")
         try:
