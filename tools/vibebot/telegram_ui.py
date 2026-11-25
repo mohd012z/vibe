@@ -92,6 +92,12 @@ CATEGORIES: dict[str, tuple[str, tuple[Button, ...]]] = {
         Button("📖 Help", "cmd:help"),
         Button("⌨ Commands", "cmd:commands"),
     )),
+    # v0.38: one-tap dex2c detection (the RE-side of the DEX->C++ provider).
+    # detect takes no rules file, so it is a genuine one-tap against the
+    # current artifact; select/codegen/convert are typed commands (/dex2c help).
+    "dex2c": ("🔒 Dex2C", (
+        Button("🕵 Detect", "dex2c:detect", True),
+    )),
     # v0.37: one-tap APK workbench (AdsRegex technique, offline pattern DB).
     # Each button submits a kit JOB on the current artifact and sends back the
     # patched .apk. Locked (🔒) until an artifact is on file. 2-wide footer.
@@ -150,7 +156,7 @@ CATEGORIES: dict[str, tuple[str, tuple[Button, ...]]] = {
 # not misalignment).
 HOME_SECTIONS: tuple[str, ...] = (
     "links", "analyze", "investigate", "evidence", "runtime", "tools",
-    "system", "kit", "ai",
+    "system", "dex2c", "kit", "ai",
 )
 
 

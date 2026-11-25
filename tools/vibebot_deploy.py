@@ -43,6 +43,7 @@ COMMANDS = [
     ("callees", "what this calls: /callees <M|Cls.m> --sha <sha>"),
     ("xmatch", "cross-version method match: /xmatch <src.apk|url> <dst.apk|url>"),
     ("kmeta", "recover original (pre-R8) Kotlin names from @Metadata: /kmeta <dex|apk|bundle.apks> [class_filter]"),
+    ("dex2c", "DEX->C++ protection: /dex2c <path> detect|select|codegen|convert [--rules <f>]"),
     ("harness", "native-harness validation (build + run C under qemu): /harness <srcdir>"),
     ("smali", "query Dalvik opcode table: /smali <name|0x..|substr>"),
     ("claims", "evidence board: /claims [--sha]"),

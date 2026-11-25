@@ -150,6 +150,23 @@ class CategoryTelegramTransport(TelegramTransport):
             if job is not None:
                 self._work_and_finalize(chat_id, job)
             return
+        if data.startswith("dex2c:"):
+            # v0.38: one-tap dex2c detection on the CURRENT artifact —
+            # the RE-side question ("is this already DEX->C++ protected?").
+            art = self._artifact_for(user_id)
+            if not art or not art.get("path"):
+                self._edit(chat_id, message_id,
+                           "📦 Upload an APK/DEX first, then tap Detect.\n"
+                           "(or /dex2c detect <path>)",
+                           telegram_ui.home_keyboard(False))
+                return
+            reply, job = self.gw.handle(
+                f"/dex2c detect {art['path']}", user=f"tg:{user_id[:6]}")
+            self._edit(chat_id, message_id, reply,
+                       telegram_ui.home_keyboard(has_artifact))
+            if job is not None:
+                self._work_and_finalize(chat_id, job)
+            return
         if data.startswith("cmd:"):
             name = data.split(":", 1)[1]
             command = self._command_for_callback(name, user_id)

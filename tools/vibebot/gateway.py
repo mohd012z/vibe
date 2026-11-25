@@ -62,6 +62,7 @@ HELP = """vibebot commands
   /native <path|url>     Radare native provider: ELF fns/imports/exports + JNI bridge
   /harness <srcdir>      native-harness validation: build + run C test under qemu (E5)
   /kmeta <dex|apk> [f]   recover original (pre-R8) Kotlin names from @Metadata (E2)
+  /dex2c <path> <op> [args]   dex2c: detect (RE) / select / codegen / convert (build)
   /commands [query]      searchable command registry (L0 always · L1 on demand)
   /oracle <target> [mode] Frida oracle GATE (dry-run — is a runtime call allowed? E5)
   /smali <name|0x..|substr>   query the Dalvik opcode table
@@ -499,6 +500,11 @@ class Gateway:
                     os.path.join(self.work_dir, "reports"))
         except Exception:
             pass
+        # v0.38: DEX->C++ protection provider — driver is a subprocess
+        # (license + crash isolation); degrades to an honest Dex2cError when
+        # the dex2cpp toolchain is absent, so registration is unconditional.
+        from . import dex2c as _d2c
+        m["dex2c"] = _d2c.Dex2cEngine(os.path.join(self.work_dir, "dex2c-out"))
         return m
 
     # ------------------------------------------------------------------ api
@@ -515,7 +521,7 @@ class Gateway:
                 "/smali", "/base", "/hash", "/dexcheck", "/dexrepair", "/status",
                 "/jobs", "/sessions", "/deepdive", "/investigate", "/report",
                 "/cancel", "/help", "/start", "/commands", "/oracle",
-                "/ask", "/models"):
+                "/ask", "/models", "/dex2c"):
             return HELP, None
         cmd = parts[0]
 
@@ -719,6 +725,9 @@ class Gateway:
         if cmd == "/kmeta":
             return self._kmeta(parts[1:], user)
 
+        if cmd == "/dex2c":
+            return self._dex2c(parts[1:])
+
         if cmd == "/status":
             jid = parts[1] if len(parts) > 1 else self._last_job_id()
             if not jid:
@@ -918,6 +927,74 @@ class Gateway:
         return self._bundle_ack(f"ACK {job.id}  engine=kotlinmeta\n"
                 f"  {os.path.basename(path)}  filter={flt or '(all)'}\n"
                 f"  /report {job.id}   /status {job.id}"), job
+
+    def _dex2c(self, parts: list[str]) -> tuple[str, core.Job | None]:
+        """v0.38 dex2c provider: detect (RE) / select / codegen / convert.
+
+        `detect` is synchronous (stdlib zip+bytes; androguard E3 is optional).
+        select/codegen/convert are JOBS over the dex2cpp driver (subprocess
+        isolation) and ACK first — convert sends the protected .apk back."""
+        from . import dex2c as d2c
+        usage = ("DEX2C — DEX→C++ protection (amimo/dcc engine, Apache-2.0)\n"
+                 "  /dex2c detect <path>            is this APK dex2c-protected? (E1-E3, sync)\n"
+                 "  /dex2c select <path> --rules <f>  what would be converted (job)\n"
+                 "  /dex2c codegen <path> --rules <f>  C++ only (job)\n"
+                 "  /dex2c convert <path> --rules <f> [--abi arm64-v8a ...]  (job -> protected .apk)\n"
+                 "rules file: regex over Lcom/x/Class;name(desc) — '!' blacklist, '=' exact\n"
+                 "  <path> may be a local path or an https url (downloaded first)")
+        if not parts or parts[0] in ("help", "?"):
+            return usage, None
+        op = parts[0]
+        if op not in ("detect", "select", "codegen", "convert"):
+            return f"unknown dex2c op '{op}' — /dex2c help", None
+        rest = parts[1:]
+        if op == "detect":
+            if len(rest) < 1:
+                return usage, None
+            path, err = self._artifact(rest[0])
+            if err:
+                return err, None
+            try:
+                res = d2c.zip_detect(path)
+                lines = [f"🕵 DEX2C detect — {os.path.basename(path)}",
+                         res["verdict"], ""]
+                for e in res["evidence"]:
+                    lines.append(f"  {e['level']}  {e['detail']}")
+                lines.append(f"  E3  {res.get('e3', '(see above)')}")
+                return "\n".join(lines), None
+            except (d2c.Dex2cError, zipfile.BadZipFile) as e:
+                return f"dex2c detect: {e}", None
+        # job ops need the driver
+        if "dex2c" not in self.engines:
+            return ("dex2c engine not available on this host — dex2cpp "
+                    "driver NOT OBSERVED (set VIBE_DEX2CPP_DRIVER/PYTHON)"), None
+        if len(rest) < 1:
+            return usage, None
+        path, err = self._artifact(rest[0])
+        if err:
+            return err, None
+        if not path.lower().endswith(".apk"):
+            return f"dex2c {op} takes an .apk (got {os.path.basename(path)})", None
+        rules = self._arg(rest, "--rules")
+        if not rules:
+            return f"usage: /dex2c {op} <path> --rules <rules-file>", None
+        params = self._budget_params(rest)
+        params["op"] = op
+        params["rules"] = rules
+        if op == "convert":
+            abis = rest[rest.index("--abi") + 1:] if "--abi" in rest else []
+            params["abis"] = [a for a in abis if a.endswith("-v8a") or
+                              a.endswith("abi-v7a")] or params.get("abis")
+        try:
+            job = self.jobs.submit("dex2c", path, "cli", "dex2c", params)
+        except (KeyError, FileNotFoundError, RuntimeError) as e:
+            return f"error: {e}", None
+        verb = {"select": "selection report",
+                "codegen": "generated C++ (no APK out)",
+                "convert": "protected .apk sent on completion"}[op]
+        return (f"🔒 DEX2C {op} — {os.path.basename(path)}\n"
+                f"  ACK {job.id}  engine=dex2c  (→ {verb})\n"
+                f"  /status {job.id}  ·  /cancel {job.id}"), job
     def _apk(self, parts: list[str], user: str) -> tuple[str, core.Job | None]:
         if not parts:
             return ("/apk <path|bundle.apks>   (APK overview + Vibe IR entity graph; "

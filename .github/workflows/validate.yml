@@ -70,7 +70,7 @@ jobs:
               tests/test_vibe_artifact_router.py tests/test_vibe_correlation.py \
               tests/test_vibe_telegram_ui.py tests/test_vibe_telegram_runtime.py \
               tests/test_vibebot_deploy_contract.py \
-              tools/kit_test.py
+              tools/kit_test.py tools/dex2c_test.py
           else
             echo "apk pipeline suite not present on this branch — skipping"
           fi
