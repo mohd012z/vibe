@@ -106,7 +106,18 @@ def main() -> int:
                     help="getMe + setMyCommands only, no messages sent")
     args = ap.parse_args()
 
-    tok = open(TOKEN_FILE).read().split("=", 1)[1].strip()
+    # Line-aware parse: the token file carries more keys below the token,
+    # and a missing trailing newline makes a naive read().split("=",1)
+    # swallow the next line into the "token" (pre-existing deploy bug).
+    tok = ""
+    for line in open(TOKEN_FILE):
+        line = line.strip()
+        if line.startswith("VIBE_TELEGRAM_TOKEN="):
+            tok = line.split("=", 1)[1].strip()
+            break
+    if not tok:
+        print("VIBE_TELEGRAM_TOKEN not found in", TOKEN_FILE)
+        return 1
     api = f"https://api.telegram.org/bot{tok}"
 
     me = call(api, "getMe", {})
